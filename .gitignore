@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+
+# Node (web/ já tem seu próprio .gitignore com node_modules/dist, isso é
+# reforço caso algo rode a partir da raiz)
+node_modules/
+
+# Dados de runtime — gerados/mutados pelo server.py em produção, não são
+# código-fonte. server.py já cria esses arquivos vazios sozinho se não
+# existirem (ver EMPTY_CALIBRATION em server.py).
+calibration.json
+route_log.json
+
+# Editor / SO
+.vscode/
+.idea/
+.DS_Store

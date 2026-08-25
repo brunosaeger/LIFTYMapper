@@ -1,0 +1,785 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+}
+
+/* --- toolbar ------------------------------------------------------------ */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 0 20px;
+  height: 56px;
+  flex: none;
+  background: var(--panel-raised);
+  border-bottom: 1px solid var(--panel-line);
+}
+
+.toolbar__brand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: 'Arial Black', 'Helvetica Neue', Arial, sans-serif;
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.toolbar__brand-33 {
+  color: #f5522a;
+}
+
+.toolbar__modes {
+  display: flex;
+  gap: 4px;
+  background: var(--panel-base);
+  border: 1px solid var(--panel-line);
+  border-radius: 8px;
+  padding: 3px;
+}
+
+.toolbar__mode {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.toolbar__mode.is-active {
+  background: var(--panel-raised-hi);
+  color: var(--text-primary);
+}
+
+.toolbar__actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.toolbar__add {
+  border: 1px solid var(--accent-cyan-dim);
+  background: transparent;
+  color: var(--accent-cyan);
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.toolbar__add.is-active {
+  background: var(--accent-cyan-dim);
+  color: var(--text-primary);
+}
+
+.toolbar__theme {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--panel-line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.toolbar__theme:hover {
+  color: var(--text-primary);
+  background: var(--panel-raised-hi);
+}
+
+.toolbar__theme svg {
+  width: 16px;
+  height: 16px;
+}
+
+.toolbar__save {
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+  min-width: 90px;
+}
+
+.toolbar__save--error {
+  color: var(--state-error);
+}
+
+.toolbar__dev {
+  border: 1px solid var(--panel-line);
+  background: transparent;
+  color: var(--text-muted);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.toolbar__dev.is-active {
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+}
+
+/* --- modal: senha do modo desenvolvedor ------------------------------------ */
+.dev-modal__backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+
+.dev-modal {
+  width: 320px;
+  max-width: calc(100vw - 32px);
+  background: var(--panel-raised);
+  border: 1px solid var(--panel-line);
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dev-modal__title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.dev-modal__hint {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 0 0 4px;
+}
+
+.dev-modal__input {
+  background: var(--panel-base);
+  border: 1px solid var(--panel-line);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 14px;
+  color: var(--text-primary);
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+}
+
+.dev-modal__input:focus {
+  outline: none;
+  border-color: var(--accent-cyan);
+}
+
+.dev-modal__error {
+  font-size: 12px;
+  color: var(--state-error);
+  margin: 0;
+}
+
+.dev-modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.dev-modal__cancel {
+  border: 1px solid var(--panel-line);
+  background: transparent;
+  color: var(--text-muted);
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.dev-modal__submit {
+  border: 1px solid var(--accent-cyan-dim);
+  background: var(--accent-cyan-dim);
+  color: var(--text-primary);
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* --- body layout ---------------------------------------------------------- */
+.app__body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.floorplan-container {
+  flex: 1;
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--panel-base);
+  cursor: grab;
+  touch-action: none; /* deixa o pinch-zoom/pan em touch pro nosso handler, sem o navegador brigando (scroll/zoom da página) */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none; /* toque longo (pressionar-e-arrastar pra pintar/selecionar) não pode abrir lupa/menu de seleção de texto do navegador */
+}
+
+.floorplan-container.is-adding {
+  cursor: crosshair;
+}
+
+/* --- botão flutuante: trocar vista de cima / isométrica -------------------- */
+.view-toggle {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 10;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: 1px solid var(--panel-line);
+  background: var(--panel-raised);
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.5;
+  transition: opacity 0.15s ease;
+}
+
+.view-toggle svg {
+  width: 26px;
+  height: 26px;
+}
+
+.view-toggle:hover {
+  opacity: 0.75;
+}
+
+.mark-toggle {
+  top: 88px; /* logo abaixo do view-toggle (56px + 12px de topo + 20px de respiro) */
+}
+
+.mark-toggle.is-active {
+  opacity: 1;
+  border-color: var(--state-error);
+  color: var(--state-error);
+}
+
+.ptp-toggle {
+  top: 164px; /* logo abaixo do mark-toggle (88px + 56px + 20px de respiro) */
+}
+
+.ptp-toggle svg {
+  width: 22px; /* ícone mais "cheio" (preenchido) que os outros dois (linha) — um pouco menor pra não pesar visualmente */
+  height: 22px;
+}
+
+.ptp-toggle.is-active {
+  opacity: 1;
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+}
+
+.view-toggle:active {
+  opacity: 1;
+}
+
+/* --- side panels (points/lots list / point-to-point) ----------------------- */
+.sidebar {
+  flex: none;
+  width: 280px;
+  border-left: 1px solid var(--panel-line);
+  background: var(--panel-raised);
+  padding: 16px;
+  /* respiro extra embaixo, além do padding normal: a sidebar estica até a
+     borda inferior da viewport, e em tablet Android essa faixa costuma ser
+     reservada pra barra de gesto do sistema (voltar/home) — ela INTERCEPTA
+     o toque antes dele chegar no navegador, mesmo com conteúdo desenhado
+     visualmente ali. env(safe-area-inset-bottom) é o valor que o próprio
+     SO expõe pra essa faixa quando existe; 24px é o piso mesmo sem suporte
+     a isso (a maioria dos navegadores Android já entende essa env var). */
+  padding-bottom: calc(16px + env(safe-area-inset-bottom, 32px));
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.points-panel,
+.lots-panel,
+.ptp-bar,
+.route-queue {
+  display: flex;
+  flex-direction: column;
+}
+
+.points-panel {
+  flex: 1;
+}
+
+.points-panel__title {
+  font-family: 'Arial Black', 'Helvetica Neue', Arial, sans-serif;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0 0 12px;
+}
+
+.points-panel__empty {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.points-panel__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.points-panel__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.points-panel__row.is-selected {
+  border-color: var(--accent-amber);
+  background: var(--panel-raised-hi);
+}
+
+.lots-panel__row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.lots-panel__swatches {
+  display: flex;
+  gap: 6px;
+  padding: 0 6px 4px;
+}
+
+.lots-panel__swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  background: var(--swatch-color);
+  padding: 0;
+}
+
+.lots-panel__swatch.is-active {
+  border-color: var(--text-primary);
+}
+
+.lots-panel__eye {
+  margin-left: auto;
+  width: 22px;
+  height: 22px;
+  padding: 3px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.lots-panel__eye svg {
+  width: 100%;
+  height: 100%;
+}
+
+.lots-panel__eye.is-active {
+  color: var(--accent-cyan);
+  background: var(--panel-raised-hi);
+}
+
+.points-panel__input {
+  flex: 1;
+  min-width: 0;
+  background: var(--panel-base);
+  border: 1px solid var(--panel-line);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+.lots-panel__count {
+  flex: none;
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.points-panel__delete {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.points-panel__delete:hover {
+  color: var(--state-error);
+  background: var(--panel-base);
+}
+
+.points-panel__hint {
+  margin-top: auto;
+  padding-top: 16px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* --- histórico (modo desenvolvedor) ----------------------------------------
+   Duas seções empilhadas, cada uma com seu PRÓPRIO scroll (não o do
+   .sidebar inteiro) — min-height:0 é o que permite um filho flex encolher
+   abaixo do tamanho do conteúdo e deixar o overflow-y:auto dele fazer
+   efeito, em vez de estourar o pai. */
+.sidebar--history {
+  overflow-y: hidden; /* quem rola é .history-panel__list, não o sidebar inteiro */
+}
+
+.history-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.history-panel__section {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.history-panel__section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.history-panel__section-head .points-panel__title {
+  margin: 0;
+}
+
+.history-panel__refresh {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.history-panel__refresh:hover {
+  color: var(--accent-cyan);
+  background: var(--panel-raised-hi);
+}
+
+.history-panel__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-right: 2px; /* respiro pra barra de scroll não colar no texto */
+}
+
+.history-route {
+  border: 1px solid var(--panel-line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--panel-base);
+}
+
+.history-route__path {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.history-route__time {
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.history-error {
+  border: 1px solid var(--panel-line);
+  border-left-width: 3px;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--panel-base);
+}
+
+.history-error--error { border-left-color: var(--state-error); }
+.history-error--warn { border-left-color: var(--accent-amber); }
+
+.history-error__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.history-error__level {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.history-error--error .history-error__level { color: var(--state-error); }
+.history-error--warn .history-error__level { color: var(--accent-amber); }
+
+.history-error__time {
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.history-error__desc {
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--text-primary);
+}
+
+/* --- point-to-point bar ---------------------------------------------------- */
+.ptp-bar__hint {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  margin: 0 0 10px;
+}
+
+.ptp-bar__slot {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--panel-base);
+  border: 1px solid var(--panel-line);
+  margin-bottom: 10px;
+}
+
+.ptp-bar__slot-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 700;
+}
+
+.ptp-bar__slot-label--pickup { color: var(--accent-cyan); }
+.ptp-bar__slot-label--dropoff { color: var(--accent-amber); }
+
+.ptp-bar__slot-value {
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 14px;
+}
+
+.ptp-bar__pallet {
+  margin-bottom: 10px;
+}
+
+.ptp-bar__pallet-title {
+  font-family: 'Arial Black', 'Helvetica Neue', Arial, sans-serif;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0 0 6px;
+}
+
+.ptp-bar__pallet-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.ptp-bar__pallet-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border: 2px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+}
+
+.ptp-bar__pallet-option.is-selected {
+  border-color: var(--accent-amber);
+  background: var(--panel-raised-hi);
+}
+
+.ptp-bar__pallet-swatch {
+  width: 100%;
+  height: 40px; /* compacto de propósito — essa seção empurra o resto da sidebar pra baixo, e o botão "Enviar task" (ver .ptp-bar__actions) precisa continuar cabendo na tela sem cortar em tablets com viewport mais baixa */
+  border-radius: 6px;
+  background-size: cover;
+  background-position: center;
+  border: 1px solid var(--panel-line);
+}
+
+.ptp-bar__pallet-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ptp-bar__actions {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ptp-bar__clear,
+.ptp-bar__send {
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 13px;
+  font-weight: 700;
+  border: 1px solid var(--panel-line);
+  background: var(--panel-base);
+  color: var(--text-primary);
+}
+
+.ptp-bar__clear:disabled,
+.ptp-bar__send:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.ptp-bar__send {
+  border-color: var(--accent-cyan-dim);
+  background: var(--accent-cyan-dim);
+}
+
+/* --- fila de rotas (modo Ponto a Ponto) ------------------------------------ */
+.route-queue {
+  gap: 20px;
+}
+
+.route-queue__section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.route-queue__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Rolagem própria (mouse ou dedo) quando a fila não cabe mais — o resto da
+   sidebar (indicador de pickup/destino, rota em andamento) fica fixo. */
+.route-queue__list--scroll {
+  max-height: 220px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.route-queue__list--scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.route-queue__list--scroll::-webkit-scrollbar-thumb {
+  background: var(--panel-line);
+  border-radius: 3px;
+}
+
+.route-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--panel-base);
+  border: 1px solid var(--panel-line);
+}
+
+.route-row__label {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.route-row__cancel {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--state-error);
+  font-weight: 700;
+}
+
+.route-row__cancel:hover {
+  background: var(--state-error);
+  color: var(--text-primary);
+}
+
+/* --- toast ------------------------------------------------------------ */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  padding: 10px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  background: var(--panel-raised-hi);
+  border: 1px solid var(--panel-line);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 1000;
+}
+
+.toast--success { border-color: var(--state-success); }
+.toast--error { border-color: var(--state-error); }
+.toast--info { border-color: var(--accent-cyan-dim); }

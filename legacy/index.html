@@ -1,0 +1,1063 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Painel de Controle — Forklift Dispatch</title>
+<style>
+  :root{
+    --bg-void:#06070a;
+    --panel-base:#0e1116;
+    --panel-raised:#171c22;
+    --panel-raised-hi:#1e242c;
+    --panel-line:#262e38;
+    --accent-amber:#f5a524;
+    --accent-amber-dim:#8a611c;
+    --accent-cyan:#2dd4bf;
+    --accent-cyan-dim:#1c766c;
+    --text-primary:#edeff3;
+    --text-muted:#8a93a3;
+    --state-error:#f45b69;
+    --icon-gray:#9aa4b3;
+  }
+
+  *{ box-sizing:border-box; }
+
+  html,body{
+    height:100%;
+    margin:0;
+    background:var(--panel-base);
+    color:var(--text-primary);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+    overflow:hidden;
+  }
+
+  .device{
+    container-type:size;
+    container-name:panel;
+    width:100vw;
+    height:100vh;
+    display:flex;
+    flex-direction:column;
+  }
+
+  /* --- células fixas: marcação visual, não clicável -------------------- */
+  .cells{
+    flex:0 0 26cqh;
+    display:grid;
+    grid-template-columns:repeat(4, 1fr);
+    align-items:center;
+  }
+
+  .cell{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    gap:1.4cqh;
+  }
+  .cell--a{ grid-column:1; justify-self:center; }
+  .cell--b{ grid-column:4; justify-self:center; }
+
+  .cell__icon{
+    width:9cqh;
+    height:9cqh;
+    color:var(--icon-gray);
+    display:block;
+  }
+  .cell__icon svg{ width:100%; height:100%; display:block; }
+
+  .cell__label{
+    font-family:"Arial Black","Helvetica Neue",Arial,sans-serif;
+    font-weight:900;
+    font-size:2.4cqh;
+    letter-spacing:0.08em;
+    text-transform:uppercase;
+    color:var(--text-primary);
+  }
+
+  /* --- ações centrais: cancelar / emergência, entre as células ---------- */
+  .mid-actions{
+    grid-column:2 / 4;
+    justify-self:center;
+    display:flex;
+    align-items:center;
+    gap:6cqw;
+  }
+
+  .mid-btn{
+    all:unset;
+    box-sizing:border-box;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    gap:1cqh;
+    cursor:pointer;
+  }
+
+  .mid-btn__circle{
+    width:10cqh;
+    height:10cqh;
+    border-radius:50%;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    transition:transform .08s ease, filter .12s ease;
+    box-shadow:0 2px 0 rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.1);
+  }
+  .mid-btn:hover .mid-btn__circle{ filter:brightness(1.1); }
+  .mid-btn:active .mid-btn__circle{ transform:scale(0.94); }
+  .mid-btn:focus-visible .mid-btn__circle{ outline:3px solid var(--accent-cyan); outline-offset:3px; }
+
+  .mid-btn--home .mid-btn__circle{ background:#2ecc71; color:#06210f; }
+  .mid-btn--home svg{ width:52%; height:52%; }
+
+  .mid-btn--estop .mid-btn__circle{ background:#e0202b; }
+  .mid-btn--estop .mid-btn__square{ width:34%; height:34%; background:#fff; border-radius:2px; }
+
+  .mid-btn__label{
+    font-family:"Arial Black","Helvetica Neue",Arial,sans-serif;
+    font-weight:900;
+    font-size:1.5cqh;
+    letter-spacing:0.06em;
+    text-transform:uppercase;
+    color:var(--text-muted);
+  }
+
+  /* --- construção de lotes de armazenamento ----------------------------- */
+  .workspace{
+    flex:1;
+    min-height:0;
+    border-top:1px solid var(--panel-line);
+    display:flex;
+    align-items:center;
+    padding:2cqh 4cqw;
+  }
+
+  /* Mesma referência de quartis usada nas células: 4 colunas de largura
+     igual cobrindo a página inteira, cada slot centralizado na sua. */
+  .batch-grid{
+    width:100%;
+    display:grid;
+    grid-template-columns:repeat(4, 1fr);
+    align-items:center;
+    justify-items:center;
+  }
+
+  .lot-card{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    gap:1.2cqh;
+  }
+
+  .lot-card__label{
+    font-family:"Arial Black","Helvetica Neue",Arial,sans-serif;
+    font-weight:900;
+    font-size:2cqh;
+    letter-spacing:0.06em;
+    text-transform:uppercase;
+    color:var(--text-primary);
+  }
+
+  .lot-card__square{
+    container-type:size;
+    width:32cqmin;
+    height:32cqmin;
+    overflow:hidden;
+  }
+
+  .lot-card__actions{
+    display:flex;
+    gap:1.4cqh;
+  }
+
+  .icon-btn{
+    all:unset;
+    box-sizing:border-box;
+    cursor:pointer;
+    width:4.4cqh;
+    height:4.4cqh;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    border-radius:50%;
+    color:var(--text-muted);
+    background:var(--panel-raised);
+    border:1px solid var(--panel-line);
+    transition:color .12s ease, border-color .12s ease, background .12s ease;
+  }
+  .icon-btn svg{ width:52%; height:52%; }
+  .icon-btn__glyph{ font-family:ui-monospace,"SF Mono","Cascadia Code",monospace; font-weight:700; font-size:1.6cqh; }
+  .icon-btn:hover{ color:var(--text-primary); border-color:var(--icon-gray); }
+  .icon-btn:focus-visible{ outline:2px solid var(--accent-cyan); outline-offset:2px; }
+  .icon-btn--danger:hover{ color:var(--state-error); border-color:var(--state-error); }
+
+  .slot-add{
+    all:unset;
+    box-sizing:border-box;
+    width:100%;
+    height:100%;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    cursor:pointer;
+    border-radius:14cqmin;
+    background:linear-gradient(180deg, var(--panel-raised) 0%, #10141a 100%);
+    border:1px dashed var(--panel-line);
+    color:var(--text-muted);
+    font-size:36cqmin;
+    font-weight:300;
+    line-height:1;
+    transition:background .12s ease, color .12s ease, border-color .12s ease;
+  }
+  .slot-add:hover{
+    color:var(--text-primary);
+    border-color:var(--icon-gray);
+    background:linear-gradient(180deg, var(--panel-raised-hi) 0%, #141a21 100%);
+  }
+  .slot-add:focus-visible{ outline:3px solid var(--accent-cyan); outline-offset:4px; }
+
+  .lot{
+    width:100%;
+    height:100%;
+    box-sizing:border-box;
+    display:grid;
+    gap:4%;
+    padding:5%;
+    background:var(--panel-raised);
+    border:1px solid var(--panel-line);
+    border-radius:14cqmin;
+  }
+
+  /* Cada célula é seu próprio container de consulta: a fonte é dimensionada
+     em relação ao tamanho real que a própria célula recebeu do grid (1fr),
+     então funciona pra qualquer N de colunas/linhas sem cálculo manual. */
+  .lot__cell{
+    all:unset;
+    container-type:inline-size;
+    box-sizing:border-box;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    overflow:hidden;
+    cursor:pointer;
+    background:linear-gradient(180deg, #171c22 0%, #10141a 100%);
+    border:1px solid var(--panel-line);
+    border-radius:20cqmin;
+    color:var(--text-primary);
+    font-family:ui-monospace,"SF Mono","Cascadia Code",monospace;
+    font-weight:600;
+    font-size:clamp(6px, 26cqw, 15px);
+    white-space:nowrap;
+    text-align:center;
+    transition:border-color .12s ease, background .12s ease;
+  }
+  .lot__cell:hover{ border-color:var(--accent-cyan); background:linear-gradient(180deg,#1a2128,#12171d); }
+  .lot__cell-label{ font-size:1em; line-height:1.1; }
+  .lot__cell-task{
+    font-size:0.6em;
+    line-height:1.1;
+    color:var(--accent-amber);
+    opacity:0.9;
+  }
+  .lot__cell:focus-visible{ outline:2px solid var(--accent-cyan); outline-offset:1px; }
+
+  /* --- modal de criação de lote ------------------------------------------ */
+  .modal-backdrop{
+    position:fixed;
+    inset:0;
+    background:rgba(0,0,0,0.6);
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    z-index:1000;
+  }
+  .modal-backdrop[hidden]{ display:none; }
+
+  /* O modal de olho/dev (lote expandido) usa a camada base (1000). Qualquer
+     modal que precise poder aparecer sobreposto a ele (bind de task,
+     confirmação de exclusão) usa a camada acima (1100). */
+  #taskIdBackdrop, #deleteBackdrop{ z-index:1100; }
+
+  .modal{
+    position:relative;
+    width:min(420px, 90vw);
+    background:var(--panel-raised);
+    border:1px solid var(--panel-line);
+    border-radius:16px;
+    padding:24px;
+    box-shadow:0 30px 60px -20px rgba(0,0,0,0.7);
+    display:flex;
+    flex-direction:column;
+    gap:16px;
+  }
+  .modal__close{
+    all:unset;
+    box-sizing:border-box;
+    position:absolute;
+    top:12px;
+    right:12px;
+    width:32px;
+    height:32px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    border-radius:50%;
+    background:var(--panel-base);
+    border:1px solid var(--panel-line);
+    color:var(--text-muted);
+    font-size:18px;
+    line-height:1;
+    cursor:pointer;
+  }
+  .modal__close:hover{ color:var(--text-primary); border-color:var(--icon-gray); }
+  .modal__close:focus-visible{ outline:2px solid var(--accent-cyan); outline-offset:2px; }
+  .modal__text{
+    margin:0;
+    font-size:14px;
+    line-height:1.5;
+    color:var(--text-muted);
+  }
+  .modal__text strong{ color:var(--text-primary); }
+  .modal__title{
+    margin:0;
+    font-size:20px;
+    font-weight:700;
+    color:var(--text-primary);
+  }
+
+  .field{ display:flex; flex-direction:column; gap:6px; }
+  .field__label{
+    font-size:12px;
+    letter-spacing:0.06em;
+    text-transform:uppercase;
+    color:var(--text-muted);
+  }
+  .field__input{
+    background:var(--panel-base);
+    border:1px solid var(--panel-line);
+    border-radius:8px;
+    padding:10px 12px;
+    color:var(--text-primary);
+    font-size:16px;
+  }
+  .field__input:focus-visible{ outline:2px solid var(--accent-cyan); outline-offset:1px; }
+  .field-row{ display:flex; gap:12px; }
+  .field-row .field{ flex:1; }
+  .field--checkbox{ flex-direction:row; align-items:center; gap:8px; }
+  .field--checkbox input{ width:18px; height:18px; accent-color:var(--accent-cyan); }
+  .field--checkbox span{ color:var(--text-primary); font-size:14px; }
+
+  .modal__actions{ display:flex; justify-content:flex-end; gap:10px; margin-top:8px; }
+  .btn{
+    all:unset;
+    box-sizing:border-box;
+    padding:10px 18px;
+    border-radius:8px;
+    font-weight:600;
+    font-size:14px;
+    cursor:pointer;
+  }
+  .btn--ghost{ color:var(--text-muted); border:1px solid var(--panel-line); }
+  .btn--ghost:hover{ color:var(--text-primary); border-color:var(--icon-gray); }
+  .btn--primary{ background:var(--accent-cyan); color:#04211c; }
+  .btn--primary:hover{ filter:brightness(1.08); }
+  .btn--danger{ background:var(--state-error); color:#2a0508; }
+  .btn--danger:hover{ filter:brightness(1.08); }
+  .btn--danger:disabled{ opacity:.4; cursor:not-allowed; filter:none; }
+
+  /* --- lote expandido (olho / modo desenvolvedor) ------------------------ */
+  .lot-view{
+    width:82vw;
+    height:82vh;
+    box-sizing:border-box;
+    background:var(--panel-raised);
+    border:1px solid var(--panel-line);
+    border-radius:20px;
+    box-shadow:0 40px 80px -20px rgba(0,0,0,0.75);
+    padding:28px;
+    display:flex;
+    flex-direction:column;
+    gap:20px;
+    position:relative;
+  }
+
+  .lot-view__close{
+    all:unset;
+    box-sizing:border-box;
+    position:absolute;
+    top:16px;
+    right:16px;
+    width:40px;
+    height:40px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    border-radius:50%;
+    background:var(--panel-base);
+    border:1px solid var(--panel-line);
+    color:var(--text-muted);
+    font-size:22px;
+    line-height:1;
+    cursor:pointer;
+  }
+  .lot-view__close:hover{ color:var(--text-primary); border-color:var(--icon-gray); }
+  .lot-view__close:focus-visible{ outline:2px solid var(--accent-cyan); outline-offset:2px; }
+
+  .lot-view__header{ display:flex; align-items:center; gap:14px; }
+  .lot-view__title{
+    font-family:"Arial Black","Helvetica Neue",Arial,sans-serif;
+    font-weight:900;
+    font-size:28px;
+    letter-spacing:0.02em;
+    color:var(--text-primary);
+  }
+  .lot-view__badge{
+    font-family:ui-monospace,"SF Mono","Cascadia Code",monospace;
+    font-size:12px;
+    font-weight:700;
+    letter-spacing:0.1em;
+    text-transform:uppercase;
+    color:#221604;
+    background:var(--accent-amber);
+    padding:4px 10px;
+    border-radius:999px;
+  }
+
+  .lot-view__grid{
+    container-type:size;
+    flex:1;
+    min-height:0;
+  }
+
+  /* --- toast de feedback -------------------------------------------------- */
+  .toast{
+    position:fixed;
+    left:50%;
+    bottom:28px;
+    transform:translate(-50%, 12px);
+    max-width:min(86vw, 640px);
+    padding:12px 22px;
+    border-radius:10px;
+    font-family:ui-monospace,"SF Mono","Cascadia Code",monospace;
+    font-size:14px;
+    letter-spacing:0.02em;
+    text-align:center;
+    color:var(--text-primary);
+    background:var(--panel-raised);
+    border:1px solid var(--panel-line);
+    border-left:4px solid var(--text-muted);
+    box-shadow:0 20px 40px -16px rgba(0,0,0,0.6);
+    opacity:0;
+    pointer-events:none;
+    transition:opacity .2s ease, transform .2s ease;
+    z-index:1200;
+  }
+  .toast.is-visible{ opacity:1; transform:translate(-50%, 0); }
+  .toast--success{ border-left-color:var(--accent-cyan); }
+  .toast--error{ border-left-color:var(--state-error); }
+  .toast--info{ border-left-color:var(--accent-amber); }
+
+  /* --- assinatura de marca (canto inferior direito) --------------------- */
+  .brand-footer{
+    position:fixed;
+    right:2cqw;
+    bottom:1.6cqh;
+    display:flex;
+    align-items:center;
+    gap:1cqw;
+    pointer-events:none;
+    z-index:10;
+  }
+  .brand-footer__logo{ height:3.4cqh; width:auto; color:var(--text-primary); display:block; }
+  .brand-footer__logo svg{ height:100%; width:auto; display:block; }
+  .brand-footer__text{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    font-size:1.3cqh;
+    letter-spacing:0.03em;
+    color:var(--text-muted);
+    white-space:nowrap;
+  }
+  .brand-footer__text strong{ color:var(--text-primary); font-weight:800; }
+</style>
+</head>
+<body>
+
+<div class="device">
+  <div class="cells">
+    <div class="cell cell--a">
+      <span class="cell__icon" aria-hidden="true">
+        <svg viewBox="0 0 32 32" fill="currentColor">
+          <path d="M 6.125 5 L 6 5.84375 L 4 19.84375 L 4 27 L 10 27 L 10 25 L 22 25 L 22 27 L 28 27 L 28 19.84375 L 26 5.84375 L 25.875 5 Z M 7.875 7 L 9.9375 7 L 9.0625 19 L 6.15625 19 Z M 11.9375 7 L 15 7 L 15 19 L 11.0625 19 Z M 17 7 L 20.0625 7 L 20.9375 19 L 17 19 Z M 22.0625 7 L 24.125 7 L 25.84375 19 L 22.9375 19 Z M 6 21 L 26 21 L 26 25 L 24 25 L 24 23 L 8 23 L 8 25 L 6 25 Z"/>
+        </svg>
+      </span>
+      <span class="cell__label">Célula-A</span>
+    </div>
+
+    <div class="mid-actions">
+      <button type="button" class="mid-btn mid-btn--home" id="homeCancelBtn" aria-label="Cancelar task">
+        <span class="mid-btn__circle" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10v9a1 1 0 0 0 1 1H9v-6h6v6h2.5a1 1 0 0 0 1-1v-9"/></svg>
+        </span>
+        <span class="mid-btn__label">Cancelar</span>
+      </button>
+
+      <button type="button" class="mid-btn mid-btn--estop" id="estopBtn" aria-label="Parada de emergência">
+        <span class="mid-btn__circle" aria-hidden="true">
+          <span class="mid-btn__square"></span>
+        </span>
+        <span class="mid-btn__label">Emergência</span>
+      </button>
+    </div>
+
+    <div class="cell cell--b">
+      <span class="cell__icon" aria-hidden="true">
+        <svg viewBox="0 0 32 32" fill="currentColor">
+          <path d="M 6.125 5 L 6 5.84375 L 4 19.84375 L 4 27 L 10 27 L 10 25 L 22 25 L 22 27 L 28 27 L 28 19.84375 L 26 5.84375 L 25.875 5 Z M 7.875 7 L 9.9375 7 L 9.0625 19 L 6.15625 19 Z M 11.9375 7 L 15 7 L 15 19 L 11.0625 19 Z M 17 7 L 20.0625 7 L 20.9375 19 L 17 19 Z M 22.0625 7 L 24.125 7 L 25.84375 19 L 22.9375 19 Z M 6 21 L 26 21 L 26 25 L 24 25 L 24 23 L 8 23 L 8 25 L 6 25 Z"/>
+        </svg>
+      </span>
+      <span class="cell__label">Célula-B</span>
+    </div>
+  </div>
+
+  <div class="workspace" id="workspace">
+    <div class="batch-grid" id="batchGrid"></div>
+  </div>
+</div>
+
+<div class="brand-footer" aria-hidden="true">
+  <span class="brand-footer__logo">
+    <svg viewBox="0 0 1148 350" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">
+<path d="M0 0 C13.33360492 -0.07077863 26.66637568 -0.07045544 40 0 C40.9822052 0.00517639 41.9644104 0.01035278 42.97637939 0.01568604 C48.8384721 0.05113812 54.69944322 0.11379843 60.56088257 0.20852661 C62.42295803 0.23596917 64.28514373 0.25680266 66.14736938 0.27072144 C79.66379669 0.38049226 90.64723772 1.36122133 101 11 C108.78082579 19.35718325 111.76003952 28.31164467 111.37890625 39.671875 C109.98264032 51.935984 100.53788367 60.86129011 92 69 C92.804375 69.94875 93.60875 70.8975 94.4375 71.875 C94.98019531 72.51566406 95.52289062 73.15632813 96.08203125 73.81640625 C97.43683322 75.35883864 98.83491859 76.86375861 100.26171875 78.33984375 C107.32406442 85.72904178 111.06522007 91.9690775 111.5625 102.3125 C111.18912447 112.53817178 107.51887699 121.68190437 100.38671875 129.05859375 C93.17140413 134.92767946 85.18116301 138.12255975 75.95654297 138.12939453 C74.73361542 138.13254669 73.51068787 138.13569885 72.2507019 138.13894653 C70.91453007 138.13715377 69.57835857 138.13510208 68.2421875 138.1328125 C66.85612979 138.13348739 65.4700722 138.13445896 64.08401489 138.13571167 C61.1704191 138.13718677 58.25685394 138.13504467 55.34326172 138.13037109 C51.66318642 138.12474745 47.98318462 138.12799239 44.30311203 138.13382339 C29.50338756 138.15360303 14.77099592 138.04676349 0 137 C0 132.38 0 127.76 0 123 C1.03817871 122.99589111 2.07635742 122.99178223 3.14599609 122.98754883 C7.0416659 122.96558109 10.93635074 122.91111324 14.83154297 122.84741211 C16.50918045 122.82438445 18.18695937 122.80987256 19.86474609 122.80444336 C33.75726529 122.95730164 33.75726529 122.95730164 46 117 C51.53201103 110.20355181 52.86075717 103.65606502 52 95 C49.9092687 88.57249463 44.84847015 84.78857428 39.3125 81.3125 C30.55600236 77.84294433 21.12129909 77.63675885 11.8125 77.375 C10.66974609 77.33632812 9.52699219 77.29765625 8.34960938 77.2578125 C5.56663844 77.16465866 2.78334255 77.08129671 0 77 C0 71.72 0 66.44 0 61 C3.14789063 60.96132812 3.14789063 60.96132812 6.359375 60.921875 C8.43485859 60.88325373 10.5101103 60.83815959 12.58544922 60.79248047 C14.00688244 60.76458408 15.42846176 60.74321696 16.85009766 60.72900391 C27.14047594 60.62007259 37.682522 60.23227841 46.0625 53.5625 C51.36320279 46.55189309 52.90951728 40.75245613 52 32 C50.13529142 25.25379317 45.81708703 21.56751041 40 18 C39.4225 17.63648437 38.845 17.27296875 38.25 16.8984375 C30.72283544 13.89279887 21.46203658 14.68429077 13.5 14.4375 C12.200625 14.39431641 10.90125 14.35113281 9.5625 14.30664062 C6.37510593 14.20117538 3.18756569 14.10014411 0 14 C0 9.38 0 4.76 0 0 Z " fill="#F70406" transform="translate(420,107)"/>
+<path d="M0 0 C0.92296875 0.28875 1.8459375 0.5775 2.796875 0.875 C19.80468915 6.94148148 34.14307942 20.94059983 42 37 C49.38458142 55.02468258 50.80191119 73.7054032 43.20263672 91.91015625 C35.1342031 109.99221461 20.55319211 123.88784191 2 131 C-7.14084086 134.38204173 -15.27329287 135.62883056 -25 135.5 C-26.16789063 135.51546875 -27.33578125 135.5309375 -28.5390625 135.546875 C-47.15381596 135.4643262 -64.26710017 127.28087912 -77.54541016 114.49121094 C-84.17374896 107.69599552 -89.37839117 99.76109784 -93 91 C-93.391875 90.13117188 -93.78375 89.26234375 -94.1875 88.3671875 C-99.68368828 74.0541972 -99.24070653 55.35561646 -93.53515625 41.2109375 C-93.02855469 40.15132812 -92.52195312 39.09171875 -92 38 C-91.50371094 36.96101563 -91.00742187 35.92203125 -90.49609375 34.8515625 C-80.77014926 16.61834609 -64.04533391 4.14180019 -44.5625 -2.1015625 C-29.37079731 -5.86432219 -14.77111228 -4.6851105 0 0 Z M-68.234375 29.57421875 C-77.94467533 42.36918216 -82.48209452 55.91652985 -81 72 C-77.63815455 88.70019443 -70.07097472 102.50804019 -55.8671875 112.24609375 C-45.90116838 118.3424733 -36.19688136 121.35945069 -24.5625 121.3125 C-23.37043945 121.33666992 -23.37043945 121.33666992 -22.15429688 121.36132812 C-8.24517768 121.37264555 6.00129283 113.9042781 15.8203125 104.375 C28.22606099 90.8576253 31.91539359 76.10603334 31.17480469 58.23291016 C30.15158072 45.1625102 22.86344639 32.86468732 13.45703125 24.03515625 C7.01706989 18.70094342 0.06442461 14.32753718 -8 12 C-8.61359375 11.79632813 -9.2271875 11.59265625 -9.859375 11.3828125 C-31.07107914 5.38105125 -53.92638861 13.09001765 -68.234375 29.57421875 Z " fill="var(--text-primary)" transform="translate(636,110)"/>
+<path d="M0 0 C0.92296875 0.28875 1.8459375 0.5775 2.796875 0.875 C19.80468915 6.94148148 34.14307942 20.94059983 42 37 C49.38458142 55.02468258 50.80191119 73.7054032 43.20263672 91.91015625 C35.1342031 109.99221461 20.55319211 123.88784191 2 131 C-7.14084086 134.38204173 -15.27329287 135.62883056 -25 135.5 C-26.16789063 135.51546875 -27.33578125 135.5309375 -28.5390625 135.546875 C-47.15381596 135.4643262 -64.26710017 127.28087912 -77.54541016 114.49121094 C-84.17374896 107.69599552 -89.37839117 99.76109784 -93 91 C-93.391875 90.13117188 -93.78375 89.26234375 -94.1875 88.3671875 C-99.68368828 74.0541972 -99.24070653 55.35561646 -93.53515625 41.2109375 C-93.02855469 40.15132812 -92.52195312 39.09171875 -92 38 C-91.50371094 36.96101563 -91.00742187 35.92203125 -90.49609375 34.8515625 C-80.77014926 16.61834609 -64.04533391 4.14180019 -44.5625 -2.1015625 C-29.37079731 -5.86432219 -14.77111228 -4.6851105 0 0 Z M-68.234375 29.57421875 C-77.94467533 42.36918216 -82.48209452 55.91652985 -81 72 C-77.63815455 88.70019443 -70.07097472 102.50804019 -55.8671875 112.24609375 C-45.90116838 118.3424733 -36.19688136 121.35945069 -24.5625 121.3125 C-23.37043945 121.33666992 -23.37043945 121.33666992 -22.15429688 121.36132812 C-8.24517768 121.37264555 6.00129283 113.9042781 15.8203125 104.375 C28.22606099 90.8576253 31.91539359 76.10603334 31.17480469 58.23291016 C30.15158072 45.1625102 22.86344639 32.86468732 13.45703125 24.03515625 C7.01706989 18.70094342 0.06442461 14.32753718 -8 12 C-8.61359375 11.79632813 -9.2271875 11.59265625 -9.859375 11.3828125 C-31.07107914 5.38105125 -53.92638861 13.09001765 -68.234375 29.57421875 Z " fill="var(--text-primary)" transform="translate(357,109)"/>
+<path d="M0 0 C0.97839844 0.36351563 1.95679688 0.72703125 2.96484375 1.1015625 C14.33557789 5.5466162 23.29111834 11.45321258 32 20 C32.94166016 20.90492188 32.94166016 20.90492188 33.90234375 21.828125 C37.81271495 25.90697024 40.56393706 30.44254604 43.25 35.375 C43.5795166 35.97521973 43.9090332 36.57543945 44.24853516 37.19384766 C49.18734565 46.65969058 50.55907168 55.56282306 50.5 66.1875 C50.49427979 67.38060791 50.48855957 68.57371582 50.48266602 69.80297852 C50.29514356 79.0812358 49.11633686 86.57879176 45 95 C44.50371094 96.03640625 44.00742187 97.0728125 43.49609375 98.140625 C33.95801731 116.06761204 18.13071177 127.84507691 -1 134 C-20.50573954 139.6835567 -41.60768462 136.98753672 -59.25 127.375 C-75.48844094 117.85425424 -87.3825551 102.60543814 -92.875 84.5625 C-97.0824945 65.52859632 -93.74465961 46.66478021 -84 30 C-81.86574793 26.7913953 -79.56612634 23.87228024 -77 21 C-76.39542969 20.31421875 -75.79085938 19.6284375 -75.16796875 18.921875 C-57.3099802 -0.13634495 -24.83190072 -9.96464716 0 0 Z " fill="var(--text-primary)" transform="translate(971,109)"/>
+<path d="M0 0 C38.61 0 77.22 0 117 0 C117 4.95 117 9.9 117 15 C100.83 15 84.66 15 68 15 C68 55.59 68 96.18 68 138 C62.72 138 57.44 138 52 138 C52 97.41 52 56.82 52 15 C34.84 15 17.68 15 0 15 C0 10.05 0 5.1 0 0 Z " fill="var(--text-primary)" transform="translate(665,107)"/>
+<path d="M0 0 C5.65999023 -0.02467467 11.31994932 -0.04284788 16.97998047 -0.05493164 C18.90641831 -0.05996787 20.83285231 -0.06679712 22.75927734 -0.07543945 C25.52442368 -0.08753608 28.28951958 -0.09323533 31.0546875 -0.09765625 C32.3516304 -0.10539818 32.3516304 -0.10539818 33.67477417 -0.11329651 C39.77225659 -0.11387171 39.77225659 -0.11387171 42 1 C42 5.62 42 10.24 42 15 C43.38574219 14.9071875 44.77148438 14.814375 46.19921875 14.71875 C48.02855956 14.64370012 49.8579937 14.57090128 51.6875 14.5 C53.05551758 14.39945313 53.05551758 14.39945313 54.45117188 14.296875 C57.17676285 14.21758508 59.37253735 14.25720571 62 15 C67.72724824 20.62120319 69.0433393 28.75581019 69.375 36.4375 C69.1579373 46.2595873 63.79810914 54.20189086 57 61 C54.41048555 61.14547834 51.95814609 61.18649052 49.375 61.125 C45.724375 61.063125 45.724375 61.063125 42 61 C42 66.61 42 72.22 42 78 C44.495625 77.835 46.99125 77.67 49.5625 77.5 C53.65450759 77.39865378 56.89917705 77.34990771 60.48046875 79.46484375 C62.34307634 81.5412606 63.67362795 83.54847023 65 86 C65.42667969 86.69738281 65.85335937 87.39476562 66.29296875 88.11328125 C69.90454669 94.85571514 70.04999086 102.12774027 68.45703125 109.51953125 C66.89947518 114.57083186 64.70977832 118.25788794 62 123 C55.4 123 48.8 123 42 123 C42 127.29 42 131.58 42 136 C37.49659864 138.25170068 37.49659864 138.25170068 33.8671875 138.23046875 C33.06893555 138.22917969 32.27068359 138.22789062 31.44824219 138.2265625 C30.59907227 138.21367187 29.74990234 138.20078125 28.875 138.1875 C28.00004883 138.18105469 27.12509766 138.17460937 26.22363281 138.16796875 C17.46660778 138.06720471 8.73593959 137.59083649 0 137 C0 132.38 0 127.76 0 123 C1.03817871 122.99589111 2.07635742 122.99178223 3.14599609 122.98754883 C7.0416659 122.96558109 10.93635074 122.91111324 14.83154297 122.84741211 C16.50918045 122.82438445 18.18695937 122.80987256 19.86474609 122.80444336 C33.75726529 122.95730164 33.75726529 122.95730164 46 117 C51.53201103 110.20355181 52.86075717 103.65606502 52 95 C49.9092687 88.57249463 44.84847015 84.78857428 39.3125 81.3125 C30.55600236 77.84294433 21.12129909 77.63675885 11.8125 77.375 C10.66974609 77.33632812 9.52699219 77.29765625 8.34960938 77.2578125 C5.56663844 77.16465866 2.78334255 77.08129671 0 77 C0 71.72 0 66.44 0 61 C3.14789063 60.96132812 3.14789063 60.96132812 6.359375 60.921875 C8.43485859 60.88325373 10.5101103 60.83815959 12.58544922 60.79248047 C14.00688244 60.76458408 15.42846176 60.74321696 16.85009766 60.72900391 C27.14047594 60.62007259 37.682522 60.23227841 46.0625 53.5625 C51.36320279 46.55189309 52.90951728 40.75245613 52 32 C50.13529142 25.25379317 45.81708703 21.56751041 40 18 C39.4225 17.63648437 38.845 17.27296875 38.25 16.8984375 C30.72283544 13.89279887 21.46203658 14.68429077 13.5 14.4375 C12.200625 14.39431641 10.90125 14.35113281 9.5625 14.30664062 C6.37510593 14.20117538 3.18756569 14.10014411 0 14 C0 9.38 0 4.76 0 0 Z " fill="var(--text-primary)" transform="translate(420,107)"/>
+<path d="M0 0 C6.90101816 -0.07467805 13.80179619 -0.1288505 20.703125 -0.16479492 C23.04626569 -0.17979438 25.38937873 -0.20020059 27.73242188 -0.22631836 C31.11855942 -0.26309285 34.50432278 -0.27981537 37.890625 -0.29296875 C38.92237854 -0.30845261 39.95413208 -0.32393646 41.01715088 -0.33988953 C53.42301884 -0.34270024 64.51646793 2.46652571 74 10.74609375 C81.01536683 18.01848911 84.25875804 26.59139056 84.5625 36.625 C84.07275822 48.63591726 79.66000825 55.80365368 71 64 C69.03891908 65.54969328 67.18130099 66.76952252 65 68 C69.56733723 76.07386178 74.45289169 83.84928385 79.64996338 91.53097534 C81.64401025 94.47954116 83.62551685 97.4364882 85.60546875 100.39453125 C85.99142212 100.97106949 86.37737549 101.54760773 86.77502441 102.14161682 C90.21696954 107.29762576 93.52675951 112.5260204 96.77416992 117.8059082 C99.91707212 122.91024903 103.22763174 127.88563317 106.6015625 132.83984375 C108 135 108 135 108 136 C92.17570755 137.50707547 92.17570755 137.50707547 87.59765625 134.3359375 C85.76602576 131.65790564 84.39768555 128.92831291 83 126 C81.58564963 123.66868376 80.15019832 121.36273031 78.6875 119.0625 C78.28337891 118.40894531 77.87925781 117.75539063 77.46289062 117.08203125 C73.14337815 110.10974013 68.56686277 103.31116967 64 96.5 C58.9248053 88.92299833 53.85190183 81.34798135 49 73.625 C48.60941406 73.00818359 48.21882813 72.39136719 47.81640625 71.75585938 C45.85605377 68.5999073 44.25763428 65.49779533 43 62 C44.27875 61.95875 45.5575 61.9175 46.875 61.875 C53.52267033 61.10957424 59.41780495 58.13172397 63.70703125 52.9296875 C67.90318408 46.37546608 68.5901118 40.7030665 68 33 C66.65978256 27.13654869 64.1659083 22.05052048 59.00100708 18.70527649 C52.18341923 14.98879158 46.55693042 14.26454537 38.8671875 14.29296875 C37.74933868 14.27784744 36.63148987 14.26272614 35.47976685 14.24714661 C31.94463558 14.20450454 28.41036208 14.19545384 24.875 14.1875 C22.46351923 14.1643376 20.05205859 14.13896868 17.640625 14.11132812 C11.76034161 14.04870714 5.88058709 14.0161886 0 14 C0 9.38 0 4.76 0 0 Z " fill="var(--text-primary)" transform="translate(163,108)"/>
+<path d="M0 0 C0 4.62 0 9.24 0 14 C-0.969375 14.0515625 -1.93875 14.103125 -2.9375 14.15625 C-18.21122688 15.31206842 -31.75647207 21.29852078 -42 33 C-52.34514238 46.64678356 -55.45817659 61.10978562 -54 78 C-52.23574897 86.74060367 -48.1907348 96.8092652 -41.8125 103.1875 C-41.214375 103.785625 -40.61625 104.38375 -40 105 C-40 105.66 -40 106.32 -40 107 C-39.41347656 107.27199219 -38.82695313 107.54398437 -38.22265625 107.82421875 C-36.04311667 108.97719136 -34.34090291 110.25442289 -32.4375 111.8125 C-22.78941571 119.17456432 -11.89663268 122.02219457 0 123 C0 127.62 0 132.24 0 137 C-18.32660705 137.73306428 -35.38497453 131.35741267 -49 119 C-49.68320312 118.39671875 -50.36640625 117.7934375 -51.0703125 117.171875 C-62.577176 106.40880116 -70.76013808 90.79311024 -71.3359375 74.953125 C-71.35965045 72.71883789 -71.37242579 70.48441146 -71.375 68.25 C-71.39949219 67.1465625 -71.42398438 66.043125 -71.44921875 64.90625 C-71.50909285 47.90200497 -63.69310418 32.66275234 -51.87890625 20.71875 C-37.38778987 7.03378799 -20.01138621 -0.80045545 0 0 Z " fill="var(--text-primary)" transform="translate(893,108)"/>
+<path d="M0 0 C5.28 0 10.56 0 16 0 C16 45.21 16 90.42 16 137 C10.72 137 5.44 137 0 137 C0 91.79 0 46.58 0 0 Z " fill="var(--text-primary)" transform="translate(792,108)"/>
+<path d="M0 0 C1.02802734 0.04833984 2.05605469 0.09667969 3.11523438 0.14648438 C4.18708984 0.20255859 5.25894531 0.25863281 6.36328125 0.31640625 C7.44673828 0.36861328 8.53019531 0.42082031 9.64648438 0.47460938 C12.32320716 0.60431841 14.99956013 0.73928558 17.67578125 0.87890625 C17.67578125 1.20890625 17.67578125 1.53890625 17.67578125 1.87890625 C11.07578125 1.87890625 4.47578125 1.87890625 -2.32421875 1.87890625 C-2.32421875 6.16890625 -2.32421875 10.45890625 -2.32421875 14.87890625 C-6.82762011 17.13060693 -6.82762011 17.13060693 -10.45703125 17.109375 C-11.2552832 17.10808594 -12.05353516 17.10679687 -12.87597656 17.10546875 C-13.72514648 17.09257812 -14.57431641 17.0796875 -15.44921875 17.06640625 C-16.32416992 17.05996094 -17.19912109 17.05351562 -18.10058594 17.046875 C-26.85761097 16.94611096 -35.58827916 16.46974274 -44.32421875 15.87890625 C-44.32421875 11.25890625 -44.32421875 6.63890625 -44.32421875 1.87890625 C-42.71196411 1.84132202 -42.71196411 1.84132202 -41.06713867 1.80297852 C-37.08068853 1.7088313 -33.09440966 1.6086284 -29.1081543 1.5065918 C-27.3826091 1.46327063 -25.65702182 1.42159352 -23.93139648 1.3815918 C-21.45153111 1.32382099 -18.97187703 1.26014622 -16.4921875 1.1953125 C-15.7202153 1.17860001 -14.9482431 1.16188751 -14.15287781 1.14466858 C-9.23689265 1.00858583 -4.91060533 -0.24417375 0 0 Z " fill="var(--text-primary)" transform="translate(464.32421875,228.12109375)"/>
+<path d="M0 0 C11.38923617 -0.11033706 22.64570132 0.04956543 34 1 C34 1.33 34 1.66 34 2 C23.44 2 12.88 2 2 2 C2 5.63 2 9.26 2 13 C15.86 13 29.72 13 44 13 C39.49885819 15.2505709 39.49885819 15.2505709 35.99755859 15.25878906 C34.83648087 15.26824554 34.83648087 15.26824554 33.65194702 15.27789307 C32.41270981 15.27182037 32.41270981 15.27182037 31.1484375 15.265625 C30.29319489 15.26753845 29.43795227 15.2694519 28.55679321 15.27142334 C26.75302841 15.27278202 24.94925373 15.26910776 23.14550781 15.26074219 C20.37803352 15.25001176 17.61120449 15.26066161 14.84375 15.2734375 C13.0911444 15.27211637 11.3385392 15.26955492 9.5859375 15.265625 C8.7557309 15.26967346 7.92552429 15.27372192 7.07015991 15.27789307 C1.22993635 15.22993635 1.22993635 15.22993635 -1 13 C-0.9765625 9.9609375 -0.9765625 9.9609375 -0.625 6.375 C-0.51414062 5.18648437 -0.40328125 3.99796875 -0.2890625 2.7734375 C-0.19367188 1.85820312 -0.09828125 0.94296875 0 0 Z " fill="#D7191C" transform="translate(462,230)"/>
+<path d="M0 0 C10.06351843 -0.10482832 19.96868172 0.27044958 30 1 C30 1.33 30 1.66 30 2 C20.76 2 11.52 2 2 2 C2 6.29 2 10.58 2 15 C3.96324219 14.96519531 5.92648437 14.93039063 7.94921875 14.89453125 C10.52863728 14.86639214 13.10806506 14.83909211 15.6875 14.8125 C16.98107422 14.78736328 18.27464844 14.76222656 19.60742188 14.73632812 C20.85458984 14.72666016 22.10175781 14.71699219 23.38671875 14.70703125 C24.53358154 14.6913208 25.68044434 14.67561035 26.86206055 14.65942383 C30.31618585 15.03431722 32.19295789 16.0067932 35 18 C32.39937213 19.30031393 31.55165879 18.75387709 28.75 18.0625 C19.32772003 16.17804401 9.5608647 16.8481063 0 17 C0 11.39 0 5.78 0 0 Z " fill="#C51416" transform="translate(462,168)"/>
+<path d="M0 0 C0.33 0 0.66 0 1 0 C1 4.62 1 9.24 1 14 C7.6 14 14.2 14 21 14 C21 14.33 21 14.66 21 15 C17.04204914 15.19625099 13.08363065 15.38051982 9.125 15.5625 C7.43310547 15.64661133 7.43310547 15.64661133 5.70703125 15.73242188 C4.63066406 15.78076172 3.55429687 15.82910156 2.4453125 15.87890625 C0.95281982 15.94960327 0.95281982 15.94960327 -0.56982422 16.02172852 C-3 16 -3 16 -5 15 C-5 12.69 -5 10.38 -5 8 C-4.34 8 -3.68 8 -3 8 C-3 7.34 -3 6.68 -3 6 C-2.34 6 -1.68 6 -1 6 C-0.67 4.02 -0.34 2.04 0 0 Z " fill="var(--text-primary)" transform="translate(461,108)"/>
+<path d="M0 0 C11.38923617 -0.11033706 22.64570132 0.04956543 34 1 C34 1.33 34 1.66 34 2 C23.44 2 12.88 2 2 2 C1.67 5.96 1.34 9.92 1 14 C0.34 13.67 -0.32 13.34 -1 13 C-0.67 8.71 -0.34 4.42 0 0 Z " fill="#A21A1D" transform="translate(462,230)"/>
+<path d="M0 0 C0.99 0.66 1.98 1.32 3 2 C6.14221967 1.68493373 6.14221967 1.68493373 9 1 C7.125 4.875 7.125 4.875 6 6 C7.32 6.66 8.64 7.32 10 8 C5.05 8 0.1 8 -5 8 C-3.68 7.34 -2.36 6.68 -1 6 C-1 5.01 -1 4.02 -1 3 C-0.67 2.01 -0.34 1.02 0 0 Z " fill="var(--text-primary)" transform="translate(467,160)"/>
+<path d="M0 0 C0.66 0.33 1.32 0.66 2 1 C2.10477512 6.78591511 1.99250545 12.29309366 1 18 C-0.32 18.33 -1.64 18.66 -3 19 C-3 19.66 -3 20.32 -3 21 C-3.66 20.67 -4.32 20.34 -5 20 C-4.360625 19.113125 -3.72125 18.22625 -3.0625 17.3125 C0.04329921 12.00081512 -0.18060488 6.00511242 0 0 Z " fill="#D62125" transform="translate(515,203)"/>
+<path d="M0 0 C0.66 0.99 1.32 1.98 2 3 C-1.82180842 7.4008703 -4.47371099 8.80805531 -10 10 C-10 9.34 -10 8.68 -10 8 C-8.3203125 6.81640625 -8.3203125 6.81640625 -6.125 5.5625 C-3.08869645 3.82669206 -2.00897332 3.01345998 0 0 Z " fill="#E3181A" transform="translate(512,157)"/>
+<path d="M0 0 C2.64 0 5.28 0 8 0 C7.67 1.65 7.34 3.3 7 5 C3.535 3.02 3.535 3.02 0 1 C0 0.67 0 0.34 0 0 Z " fill="var(--text-primary)" transform="translate(459,123)"/>
+<path d="M0 0 C2.475 0.99 2.475 0.99 5 2 C0.375 6.875 0.375 6.875 -3 8 C-3 7.34 -3 6.68 -3 6 C-2.34 6 -1.68 6 -1 6 C-0.67 4.02 -0.34 2.04 0 0 Z " fill="#E7171A" transform="translate(515,233)"/>
+<path d="M0 0 C0.66 0.33 1.32 0.66 2 1 C1 4 1 4 -0.8125 4.9375 C-1.534375 5.288125 -2.25625 5.63875 -3 6 C-4.37086915 7.29470975 -5.71340837 8.62150897 -7 10 C-7.66 9.67 -8.32 9.34 -9 9 C-6.03 6.03 -3.06 3.06 0 0 Z " fill="var(--text-primary)" transform="translate(563,123)"/>
+<path d="M0 0 C0.66 0 1.32 0 2 0 C2 1.65 2 3.3 2 5 C0.68 5.33 -0.64 5.66 -2 6 C-2 6.66 -2 7.32 -2 8 C-2.66 7.67 -3.32 7.34 -4 7 C-2.68 4.69 -1.36 2.38 0 0 Z " fill="#E31517" transform="translate(514,216)"/>
+<path d="M0 0 C0.66 0 1.32 0 2 0 C1.58578031 4.83256305 -0.46413986 6.82679218 -4 10 C-4 8.68 -4 7.36 -4 6 C-3.34 6 -2.68 6 -2 6 C-2 5.34 -2 4.68 -2 4 C-1.34 4 -0.68 4 0 4 C0 2.68 0 1.36 0 0 Z " fill="#E01C1A" transform="translate(527,153)"/>
+<path d="M0 0 C0.66 0.33 1.32 0.66 2 1 C1.34 2.65 0.68 4.3 0 6 C-1.65 5.67 -3.3 5.34 -5 5 C-3.35 3.35 -1.7 1.7 0 0 Z " fill="var(--text-primary)" transform="translate(853,119)"/>
+<path d="M0 0 C0.66 0.33 1.32 0.66 2 1 C2 1.99 2 2.98 2 4 C-0.5 5.6875 -0.5 5.6875 -3 7 C-2.38722388 4.03824877 -1.74627478 2.61941217 0 0 Z " fill="var(--text-primary)" transform="translate(233,167)"/>
+<path d="M0 0 C3.04470873 1.52235436 4.20270948 4.18424486 6 7 C4.35 6.67 2.7 6.34 1 6 C0.67 4.02 0.34 2.04 0 0 Z " fill="#E8191D" transform="translate(510,175)"/>
+<path d="M0 0 C0.33 1.32 0.66 2.64 1 4 C0.01 4.66 -0.98 5.32 -2 6 C-2.66 5.01 -3.32 4.02 -4 3 C-2.68 2.01 -1.36 1.02 0 0 Z " fill="var(--text-primary)" transform="translate(294,118)"/>
+    </svg>
+  </span>
+  <span class="brand-footer__text">Painel de Controle <strong>LIFTY FORKLIFT</strong></span>
+</div>
+
+<div class="modal-backdrop" id="modalBackdrop" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <h2 id="modalTitle" class="modal__title">Novo lote</h2>
+
+    <label class="field">
+      <span class="field__label">ID do lote</span>
+      <input type="text" id="lotId" class="field__input" maxlength="3" placeholder="A" autocomplete="off">
+    </label>
+
+    <div class="field-row">
+      <label class="field">
+        <span class="field__label">Colunas</span>
+        <input type="number" id="lotCols" class="field__input" min="1" max="20" value="3">
+      </label>
+      <label class="field">
+        <span class="field__label">Linhas</span>
+        <input type="number" id="lotRows" class="field__input" min="1" max="20" value="3">
+      </label>
+    </div>
+
+    <label class="field field--checkbox">
+      <input type="checkbox" id="lotReverse">
+      <span>Crescer da direita para a esquerda</span>
+    </label>
+
+    <div class="modal__actions">
+      <button type="button" class="btn btn--ghost" id="modalCancel">Cancelar</button>
+      <button type="button" class="btn btn--primary" id="modalCreate">Criar lote</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="devPassBackdrop" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="devPassTitle">
+    <h2 id="devPassTitle" class="modal__title">Acesso de desenvolvedor</h2>
+
+    <label class="field">
+      <span class="field__label">Senha</span>
+      <input type="password" id="devPassInput" class="field__input" autocomplete="off">
+    </label>
+
+    <div class="modal__actions">
+      <button type="button" class="btn btn--ghost" id="devPassCancel">Cancelar</button>
+      <button type="button" class="btn btn--primary" id="devPassSubmit">Entrar</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="taskIdBackdrop" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="taskIdTitle">
+    <h2 id="taskIdTitle" class="modal__title">Informe o ID da task</h2>
+
+    <label class="field">
+      <span class="field__label" id="taskIdSectionLabel">Seção</span>
+      <input type="number" id="taskIdInput" class="field__input" placeholder="ex: 71" autocomplete="off">
+    </label>
+
+    <div class="modal__actions">
+      <button type="button" class="btn btn--ghost" id="taskIdCancel">Cancelar</button>
+      <button type="button" class="btn btn--primary" id="taskIdSave">Salvar</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="deleteBackdrop" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="deleteTitle">
+    <button type="button" class="modal__close" id="deleteClose" aria-label="Fechar">&times;</button>
+    <h2 id="deleteTitle" class="modal__title">Remover lote</h2>
+    <p class="modal__text" id="deleteText">Digite <strong>excluir</strong> para remover o lote.</p>
+
+    <label class="field">
+      <span class="field__label">Confirmação</span>
+      <input type="text" id="deleteInput" class="field__input" placeholder="excluir" autocomplete="off">
+    </label>
+
+    <div class="modal__actions">
+      <button type="button" class="btn btn--ghost" id="deleteCancel">Cancelar</button>
+      <button type="button" class="btn btn--danger" id="deleteConfirm" disabled>Remover</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="lotViewBackdrop" hidden>
+  <div class="lot-view" role="dialog" aria-modal="true" aria-labelledby="lotViewTitle">
+    <button type="button" class="lot-view__close" id="lotViewClose" aria-label="Fechar">&times;</button>
+    <div class="lot-view__header">
+      <div class="lot-view__title" id="lotViewTitle">LOTE</div>
+      <div class="lot-view__badge" id="lotViewBadge" hidden>Modo desenvolvedor</div>
+    </div>
+    <div class="lot-view__grid" id="lotViewGrid"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  // -----------------------------------------------------------------------
+  // CONFIGURAÇÃO — validada na apresentação. Reaproveitar ao remontar a UI.
+  // -----------------------------------------------------------------------
+  const CONFIG = {
+    API_BASE: '/api/reeman-dispatch-service', // caminho relativo -> proxy local (server.py)
+    PROJECT_ID: 13,
+    TASK_ID_A_TO_B: 67,  // template "fast task" -> ponto A para ponto B
+    TASK_ID_B_TO_A: 68,  // template "fast task" -> ponto B para ponto A
+    TASK_ID_CHARGE: 69,  // template "fast task" -> base de carregamento
+    TASK_ID_HOME: 70,    // template "fast task" -> home
+  };
+
+  // -----------------------------------------------------------------------
+  // Camada de API — testada e funcionando na apresentação. Sem dependência
+  // de DOM: pode ser chamada de qualquer UI que a gente construir por cima.
+  // -----------------------------------------------------------------------
+  async function apiPost(path, body) {
+    const opts = { method: 'POST' };
+    if (body !== undefined) {
+      opts.headers = { 'Content-Type': 'application/json' };
+      opts.body = JSON.stringify(body);
+    }
+    const res = await fetch(CONFIG.API_BASE + path, opts);
+    let data = null;
+    try { data = await res.json(); } catch (e) { /* resposta vazia ou não-JSON */ }
+    if (!res.ok || !data || data.code !== 0) {
+      const msg = (data && data.message) || ('Falha HTTP ' + res.status);
+      throw new Error(msg);
+    }
+    return data;
+  }
+
+  async function runTask(taskId) {
+    if (!taskId) throw new Error('ID da task não configurado.');
+    return apiPost('/task-template/generic/task-fast/' + taskId, {});
+  }
+
+  async function cancelAllTasks() {
+    if (!CONFIG.PROJECT_ID) throw new Error('PROJECT_ID não configurado.');
+    return apiPost('/task-record/all-cancel/' + CONFIG.PROJECT_ID);
+  }
+
+  window.LIFTY = { CONFIG, apiPost, runTask, cancelAllTasks };
+})();
+</script>
+
+<script>
+(function () {
+  'use strict';
+
+  // -----------------------------------------------------------------------
+  // Construtor de lotes de armazenamento.
+  // 4 slots fixos (um por quartil). Cada slot vazio mostra um botão "+"; ao
+  // configurar um lote, o slot passa a mostrar: rótulo "LOTE - {id}", a
+  // matriz NxM de seções clicáveis (ID-1, ID-2, ...) e 3 ícones de ação
+  // ({ } dev, olho, lixeira). Estado só em memória — nada é persistido
+  // entre recarregamentos ainda.
+  //
+  // AVISO: a senha do modo desenvolvedor é checada aqui no cliente, só
+  // como uma trava simples de UI — qualquer pessoa com o devtools aberto
+  // consegue ver/ignorar isso. Não é segurança de verdade.
+  // -----------------------------------------------------------------------
+  const SLOT_COUNT = 4;
+  const DEV_PASSWORD = '33dev';
+  const lots = new Array(SLOT_COUNT).fill(null);
+  let activeSlot = null;
+  let pendingDevSlot = null;
+  let pendingBind = null; // { lot, label }
+  let pendingDeleteSlot = null;
+
+  const grid = document.getElementById('batchGrid');
+
+  const backdrop = document.getElementById('modalBackdrop');
+  const idInput = document.getElementById('lotId');
+  const colsInput = document.getElementById('lotCols');
+  const rowsInput = document.getElementById('lotRows');
+  const reverseInput = document.getElementById('lotReverse');
+
+  const devPassBackdrop = document.getElementById('devPassBackdrop');
+  const devPassInput = document.getElementById('devPassInput');
+
+  const taskIdBackdrop = document.getElementById('taskIdBackdrop');
+  const taskIdInput = document.getElementById('taskIdInput');
+  const taskIdSectionLabel = document.getElementById('taskIdSectionLabel');
+
+  const deleteBackdrop = document.getElementById('deleteBackdrop');
+  const deleteText = document.getElementById('deleteText');
+  const deleteInput = document.getElementById('deleteInput');
+  const deleteConfirmBtn = document.getElementById('deleteConfirm');
+
+  const lotViewBackdrop = document.getElementById('lotViewBackdrop');
+  const lotViewTitle = document.getElementById('lotViewTitle');
+  const lotViewBadge = document.getElementById('lotViewBadge');
+  const lotViewGrid = document.getElementById('lotViewGrid');
+
+  const toastEl = document.getElementById('toast');
+
+  // --- toast ---------------------------------------------------------------
+  let toastTimer = null;
+  function showToast(message, kind) {
+    toastEl.textContent = message;
+    toastEl.className = 'toast is-visible toast--' + (kind || 'info');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.className = 'toast'; }, 3500);
+  }
+
+  // --- cancelar (botão home) / parada de emergência --------------------------
+  // A API não expõe cancelamento de uma task específica em andamento — só
+  // /task-record/all-cancel/{projectId}, que cancela tudo de uma vez (ver
+  // window.LIFTY.cancelAllTasks). Então "cancelar a task atual, se possível"
+  // hoje sempre cai direto no fallback: cancela todas. Se o fabricante
+  // expuser no futuro um endpoint de cancelamento pontual (por
+  // taskRecordId), é aqui que ele entraria, tentado antes do fallback.
+  function handleCancelAction(sourceLabel) {
+    window.LIFTY.cancelAllTasks()
+      .then(function () { showToast(sourceLabel + ': task(s) cancelada(s).', 'success'); })
+      .catch(function (err) { showToast('Erro ao cancelar (' + sourceLabel + '): ' + err.message, 'error'); });
+  }
+
+  // --- numeração das seções -------------------------------------------------
+  function cellNumber(row, col, cols, reverse) {
+    return reverse ? (row * cols + (cols - col)) : (row * cols + col + 1);
+  }
+
+  // Monta a grade de seções de um lote. onCellClick(lot, label) decide o que
+  // acontece ao clicar — o mesmo builder serve pra visão reduzida e pra
+  // expandida, então o comportamento é sempre idêntico nas duas.
+  function buildLotGrid(lot, onCellClick, showTaskId) {
+    const lotEl = document.createElement('div');
+    lotEl.className = 'lot';
+    lotEl.style.gridTemplateColumns = 'repeat(' + lot.cols + ', 1fr)';
+    lotEl.style.gridTemplateRows = 'repeat(' + lot.rows + ', 1fr)';
+
+    for (let r = 0; r < lot.rows; r++) {
+      for (let c = 0; c < lot.cols; c++) {
+        const n = cellNumber(r, c, lot.cols, lot.reverse);
+        const label = lot.id + '-' + n;
+        const taskId = lot.tasks[label];
+
+        const cell = document.createElement('button');
+        cell.type = 'button';
+        cell.className = 'lot__cell';
+        cell.setAttribute('aria-label', 'Seção ' + label + (taskId ? (', task ' + taskId) : ''));
+
+        const labelSpan = document.createElement('span');
+        labelSpan.className = 'lot__cell-label';
+        labelSpan.textContent = label;
+        cell.appendChild(labelSpan);
+
+        // Modo desenvolvedor: mostra o ID da task já vinculada, se houver.
+        if (showTaskId && taskId) {
+          const idSpan = document.createElement('span');
+          idSpan.className = 'lot__cell-task';
+          idSpan.textContent = '#' + taskId;
+          cell.appendChild(idSpan);
+        }
+
+        cell.addEventListener('click', function () { onCellClick(lot, label); });
+        lotEl.appendChild(cell);
+      }
+    }
+    return lotEl;
+  }
+
+  // --- clique numa seção: modo normal (dispara a task vinculada) -----------
+  function handleSectionRun(lot, label) {
+    const taskId = lot.tasks[label];
+    if (!taskId) {
+      showToast('Nenhuma task vinculada a ' + label + '.', 'info');
+      return;
+    }
+    window.LIFTY.runTask(taskId)
+      .then(function () { showToast('Task enviada: ' + label, 'success'); })
+      .catch(function (err) { showToast('Erro ao enviar ' + label + ': ' + err.message, 'error'); });
+  }
+
+  // --- clique numa seção: modo desenvolvedor (bind de task) ----------------
+  function handleSectionBind(lot, label) {
+    pendingBind = { lot: lot, label: label };
+    taskIdSectionLabel.textContent = 'Seção ' + label;
+    taskIdInput.value = lot.tasks[label] || '';
+    taskIdBackdrop.hidden = false;
+    taskIdInput.focus();
+  }
+
+  // --- grade principal (4 slots) --------------------------------------------
+  function renderBatchGrid() {
+    grid.innerHTML = '';
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const lot = lots[i];
+
+      if (!lot) {
+        const square = document.createElement('div');
+        square.className = 'lot-card__square';
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'slot-add';
+        btn.setAttribute('aria-label', 'Criar novo lote');
+        btn.textContent = '+';
+        btn.addEventListener('click', function () { openCreateModal(i); });
+        square.appendChild(btn);
+        grid.appendChild(square);
+        continue;
+      }
+
+      const card = document.createElement('div');
+      card.className = 'lot-card';
+
+      const label = document.createElement('div');
+      label.className = 'lot-card__label';
+      label.textContent = 'LOTE - ' + lot.id;
+      card.appendChild(label);
+
+      const square = document.createElement('div');
+      square.className = 'lot-card__square';
+      square.appendChild(buildLotGrid(lot, handleSectionRun));
+      card.appendChild(square);
+
+      const actions = document.createElement('div');
+      actions.className = 'lot-card__actions';
+
+      const devBtn = document.createElement('button');
+      devBtn.type = 'button';
+      devBtn.className = 'icon-btn';
+      devBtn.setAttribute('aria-label', 'Seção de desenvolvedor');
+      devBtn.innerHTML = '<span class="icon-btn__glyph">{ }</span>';
+      devBtn.addEventListener('click', function () { requestDevAccess(i); });
+      actions.appendChild(devBtn);
+
+      const eyeBtn = document.createElement('button');
+      eyeBtn.type = 'button';
+      eyeBtn.className = 'icon-btn';
+      eyeBtn.setAttribute('aria-label', 'Ampliar lote ' + lot.id);
+      eyeBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 12S5.5 5 12 5s10.5 7 10.5 7-4 7-10.5 7S1.5 12 1.5 12Z"/><circle cx="12" cy="12" r="3"/></svg>';
+      eyeBtn.addEventListener('click', function () { openLotView(lot, false); });
+      actions.appendChild(eyeBtn);
+
+      const trashBtn = document.createElement('button');
+      trashBtn.type = 'button';
+      trashBtn.className = 'icon-btn icon-btn--danger';
+      trashBtn.setAttribute('aria-label', 'Remover lote ' + lot.id);
+      trashBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V4.5A1.5 1.5 0 0 1 10.5 3h3A1.5 1.5 0 0 1 15 4.5V7"/><path d="M6.5 7l.8 12.1A2 2 0 0 0 9.3 21h5.4a2 2 0 0 0 2-1.9L18 7"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>';
+      trashBtn.addEventListener('click', function () { openDeleteModal(i); });
+      actions.appendChild(trashBtn);
+
+      card.appendChild(actions);
+      grid.appendChild(card);
+    }
+  }
+
+  // --- modal: novo lote ------------------------------------------------------
+  function openCreateModal(slotIndex) {
+    activeSlot = slotIndex;
+    idInput.value = '';
+    colsInput.value = 3;
+    rowsInput.value = 3;
+    reverseInput.checked = false;
+    backdrop.hidden = false;
+    idInput.focus();
+  }
+  function closeCreateModal() {
+    backdrop.hidden = true;
+    activeSlot = null;
+  }
+  document.getElementById('modalCancel').addEventListener('click', closeCreateModal);
+  backdrop.addEventListener('click', function (e) { if (e.target === backdrop) closeCreateModal(); });
+  document.getElementById('modalCreate').addEventListener('click', function () {
+    const id = idInput.value.trim().toUpperCase();
+    const cols = parseInt(colsInput.value, 10);
+    const rows = parseInt(rowsInput.value, 10);
+
+    if (!id) { idInput.focus(); return; }
+    if (!cols || cols < 1 || !rows || rows < 1) return;
+    if (activeSlot === null) return;
+
+    lots[activeSlot] = { id: id, cols: cols, rows: rows, reverse: reverseInput.checked, tasks: {} };
+    closeCreateModal();
+    renderBatchGrid();
+  });
+
+  // --- modal: senha de desenvolvedor ------------------------------------------
+  function requestDevAccess(slotIndex) {
+    pendingDevSlot = slotIndex;
+    devPassInput.value = '';
+    devPassBackdrop.hidden = false;
+    devPassInput.focus();
+  }
+  function closeDevPassModal() {
+    devPassBackdrop.hidden = true;
+    pendingDevSlot = null;
+  }
+  function submitDevPass() {
+    if (devPassInput.value === DEV_PASSWORD) {
+      const lot = lots[pendingDevSlot];
+      closeDevPassModal();
+      openLotView(lot, true);
+    } else {
+      showToast('Senha incorreta.', 'error');
+      devPassInput.value = '';
+      devPassInput.focus();
+    }
+  }
+  document.getElementById('devPassCancel').addEventListener('click', closeDevPassModal);
+  document.getElementById('devPassSubmit').addEventListener('click', submitDevPass);
+  devPassBackdrop.addEventListener('click', function (e) { if (e.target === devPassBackdrop) closeDevPassModal(); });
+  devPassInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') submitDevPass(); });
+
+  // --- modal: ID da task (bind de seção) --------------------------------------
+  function closeTaskIdModal() {
+    taskIdBackdrop.hidden = true;
+    pendingBind = null;
+  }
+  function submitTaskId() {
+    if (!pendingBind) return;
+    const val = taskIdInput.value.trim();
+    pendingBind.lot.tasks[pendingBind.label] = val ? parseInt(val, 10) : null;
+    showToast((val ? 'Task vinculada a ' : 'Vínculo removido de ') + pendingBind.label + '.', 'success');
+    closeTaskIdModal();
+    renderLotViewGrid(); // atualiza a grade por trás na hora, sem precisar fechar/reabrir
+  }
+  document.getElementById('taskIdCancel').addEventListener('click', closeTaskIdModal);
+  document.getElementById('taskIdSave').addEventListener('click', submitTaskId);
+  taskIdBackdrop.addEventListener('click', function (e) { if (e.target === taskIdBackdrop) closeTaskIdModal(); });
+  taskIdInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') submitTaskId(); });
+
+  // --- modal: remover lote (exige digitar "excluir") --------------------------
+  function openDeleteModal(slotIndex) {
+    pendingDeleteSlot = slotIndex;
+    const lot = lots[slotIndex];
+    deleteText.innerHTML = 'Digite <strong>excluir</strong> para remover o lote ' + lot.id + '. Isso também apaga os vínculos de task configurados.';
+    deleteInput.value = '';
+    deleteConfirmBtn.disabled = true;
+    deleteBackdrop.hidden = false;
+    deleteInput.focus();
+  }
+  function closeDeleteModal() {
+    deleteBackdrop.hidden = true;
+    pendingDeleteSlot = null;
+  }
+  function confirmDelete() {
+    if (deleteConfirmBtn.disabled || pendingDeleteSlot === null) return;
+    lots[pendingDeleteSlot] = null;
+    closeDeleteModal();
+    renderBatchGrid();
+  }
+  deleteInput.addEventListener('input', function () {
+    deleteConfirmBtn.disabled = deleteInput.value.trim().toLowerCase() !== 'excluir';
+  });
+  deleteInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') confirmDelete(); });
+  document.getElementById('deleteCancel').addEventListener('click', closeDeleteModal);
+  document.getElementById('deleteClose').addEventListener('click', closeDeleteModal);
+  deleteConfirmBtn.addEventListener('click', confirmDelete);
+  deleteBackdrop.addEventListener('click', function (e) { if (e.target === deleteBackdrop) closeDeleteModal(); });
+
+  // --- lote expandido (olho / dev) --------------------------------------------
+  let currentLotView = null; // { lot, devMode } — visão aberta no momento, se houver
+
+  function renderLotViewGrid() {
+    if (!currentLotView) return;
+    lotViewGrid.innerHTML = '';
+    lotViewGrid.appendChild(buildLotGrid(
+      currentLotView.lot,
+      currentLotView.devMode ? handleSectionBind : handleSectionRun,
+      currentLotView.devMode
+    ));
+  }
+
+  function openLotView(lot, devMode) {
+    currentLotView = { lot: lot, devMode: devMode };
+    lotViewTitle.textContent = 'LOTE - ' + lot.id;
+    lotViewBadge.hidden = !devMode;
+    renderLotViewGrid();
+    lotViewBackdrop.hidden = false;
+  }
+  function closeLotView() {
+    lotViewBackdrop.hidden = true;
+    currentLotView = null;
+  }
+  document.getElementById('lotViewClose').addEventListener('click', closeLotView);
+  lotViewBackdrop.addEventListener('click', function (e) { if (e.target === lotViewBackdrop) closeLotView(); });
+
+  document.getElementById('homeCancelBtn').addEventListener('click', function () { handleCancelAction('Cancelar'); });
+  document.getElementById('estopBtn').addEventListener('click', function () { handleCancelAction('Emergência'); });
+
+  // --- fechar qualquer modal com Esc ------------------------------------------
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    if (!deleteBackdrop.hidden) closeDeleteModal();
+    else if (!taskIdBackdrop.hidden) closeTaskIdModal();
+    else if (!lotViewBackdrop.hidden) closeLotView();
+    else if (!devPassBackdrop.hidden) closeDevPassModal();
+    else if (!backdrop.hidden) closeCreateModal();
+  });
+
+  renderBatchGrid();
+})();
+</script>
+
+</body>
+</html>
