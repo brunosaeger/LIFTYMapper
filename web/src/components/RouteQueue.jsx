@@ -9,11 +9,12 @@ function RouteRow({ pickup, dropoff, removeLabel, onRemove }) {
   );
 }
 
-// "Rota em andamento": a task já disparada pro robô (no máximo uma por vez).
-// Cancelar aqui para o robô de verdade (mesmo mecanismo do botão de
-// emergência da versão anterior — cancela tudo no dispatch-service).
-// "Próximas rotas": fila local, nunca chegou a ser enviada pro robô — cancelar
-// aqui só tira da fila, não afeta nada em execução.
+// "Rota em andamento": a task rodando agora no robô (no máximo uma). Cancelar
+// aqui cancela SÓ ela — a próxima da fila assume o lugar na hora, o robô não
+// para nem volta pra carga.
+// "Próximas rotas": a 1ª pode já ter sido disparada pro robô como "próxima"
+// (pendingRoute) e o resto é fila local; cancelar qualquer uma não afeta a
+// rota em andamento.
 export default function RouteQueue({ currentRoute, queue, onCancelCurrent, onRemoveQueued }) {
   return (
     <div className="route-queue">
@@ -24,7 +25,7 @@ export default function RouteQueue({ currentRoute, queue, onCancelCurrent, onRem
             <RouteRow
               pickup={currentRoute.pickup}
               dropoff={currentRoute.dropoff}
-              removeLabel="Cancelar rota em andamento (para o robô)"
+              removeLabel="Cancelar rota em andamento (a próxima assume)"
               onRemove={onCancelCurrent}
             />
           </ul>
@@ -39,12 +40,12 @@ export default function RouteQueue({ currentRoute, queue, onCancelCurrent, onRem
           <p className="points-panel__empty">Fila vazia.</p>
         ) : (
           <ul className="route-queue__list route-queue__list--scroll">
-            {queue.map((route) => (
+            {queue.map((route, i) => (
               <RouteRow
                 key={route.id}
                 pickup={route.pickup}
                 dropoff={route.dropoff}
-                removeLabel="Remover da fila"
+                removeLabel={i === 0 ? 'Cancelar próxima rota' : 'Remover da fila'}
                 onRemove={() => onRemoveQueued(route.id)}
               />
             ))}

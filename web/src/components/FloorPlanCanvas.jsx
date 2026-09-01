@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Stage, Layer, Image as KonvaImage, Rect, Text, Line, Group, Transformer } from 'react-konva';
+import { Stage, Layer, Image as KonvaImage, Rect, Text, Line, Circle, Group, Transformer } from 'react-konva';
 import useImage from 'use-image';
 import Konva from 'konva';
 import { useContainerSize } from '../hooks/useContainerSize';
@@ -10,8 +10,23 @@ import isoViewUrl from '../assets/isometric.jpg';
 
 const VIEW_URLS = { top: topViewUrl, iso: isoViewUrl };
 
+// Referência estável pra "nenhum nome selecionado" — literal `[]` inline
+// criaria um array novo a cada render, o que só geraria trabalho à toa nas
+// comparações de props do Konva.
+const EMPTY_NAMES = [];
+
 const ZOOM_STEP = 1.08;
 const MAX_ZOOM_MULT = 8; // múltiplo do "encaixar na tela" — teto de quanto dá pra aproximar
+// Piso de zoom: múltiplo do "encaixar na tela" — o quanto dá pra AFASTAR
+// além do encaixe (metade do tamanho de encaixe). Usado tanto pelo slider
+// vertical (bolinha no fundo) quanto pelo clamp de roda/pinça.
+const MIN_ZOOM_MULT = 0.5;
+// Slider vertical de zoom (a barrinha alta do lado direito, embaixo dos 4
+// botões): posição da bolinha = nível de zoom. CENTRO = zoom default
+// (encaixe), topo = MAX_ZOOM_MULT×, fundo = MIN_ZOOM_MULT×. Mapeamento
+// exponencial (cada fração de curso multiplica a escala pelo mesmo fator).
+const SLIDER_MAX_MULT = MAX_ZOOM_MULT;
+const SLIDER_MIN_MULT = MIN_ZOOM_MULT;
 const LOT_FILL_ALPHA = 0.32;
 // Tamanho padrão de célula ao criar um lote novo (px "de conteúdo", ou seja,
 // pixel real do floorplan.jpg, não pixel de tela). Extraído dos 3 lotes que
@@ -49,6 +64,38 @@ function markerColors(mode, { isSelected, isPickup, isDropoff }) {
   }
   if (isSelected) return { fill: COLORS.panelRaisedHi, stroke: COLORS.accentAmber };
   return { fill: COLORS.panelRaised, stroke: COLORS.accentCyanDim };
+}
+
+// Cor de um PONTO AVULSO ("lote curinga" de uma célula só). Tem cor própria
+// — laranja (COLORS.accentOrange) — do mesmo jeito que um lote colorido tem
+// a dele, e pelo mesmo motivo visual: preenchimento semitransparente na cor
+// cheia + borda numa versão escurecida (ver lotCellColors). O destaque de
+// Ponto a Ponto continua vencendo, pra seleção nunca ficar ambígua.
+function pointMarkerColors(mode, { isSelected, isPickup, isDropoff }) {
+  if (mode === 'ptp') {
+    if (isPickup) return { fill: COLORS.accentCyanDim, stroke: COLORS.accentCyan };
+    if (isDropoff) return { fill: COLORS.accentAmberDim, stroke: COLORS.accentAmber };
+  }
+  // Em edit, o ponto selecionado mantém a borda âmbar de sempre — é a
+  // mesma afordância de seleção que os lotes usam, e só aparece no modo
+  // desenvolvedor.
+  if (mode === 'edit' && isSelected) return { fill: COLORS.panelRaisedHi, stroke: COLORS.accentAmber };
+  // Borda escurecida, mas BEM menos que a de lote (0.22 contra os 0.4
+  // padrão): aqui o escurecimento não serve pra separar de vizinho — ponto
+  // avulso não tem — e sim só pra dar contraste ao X de ocupação, desenhado
+  // na cor cheia por cima (com borda e X na mesma cor, o contorno do X
+  // perde a função e ele some). Nos 0.4 padrão a borda cai pra ~27% de
+  // luminosidade e o laranja lê como marrom queimado.
+  return { fill: hexToRgba(COLORS.accentOrange, LOT_FILL_ALPHA), stroke: darkenHex(COLORS.accentOrange, 0.22) };
+}
+
+// Cor do X de ocupação num ponto avulso — mesma lógica de occupiedColor
+// (cor cheia, nunca a diluída do fill nem a escurecida da borda).
+function pointOccupiedColor(mode, { isSelected, isPickup, isDropoff }) {
+  if (mode === 'ptp' && isPickup) return COLORS.accentCyan;
+  if (mode === 'ptp' && isDropoff) return COLORS.accentAmber;
+  if (mode === 'edit' && isSelected) return COLORS.accentAmber;
+  return COLORS.accentOrange;
 }
 
 // Cor de uma célula de lote: destaque de Ponto a Ponto (pickup/dropoff)
@@ -156,7 +203,59 @@ function usePtpScale(nodeRef, targetScale) {
   }, [nodeRef, targetScale]);
 }
 
-function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, isHovered, isOccupied, isPreviewing, onSelect, onChange, onHoverEnter, onHoverLeave, onPressStart }) {
+// Número de ordem dentro da sequência ("Lotes em sequência", ver MainApp.jsx)
+// — o balãozinho ao lado do quadrado que diz "esse é o 1º, esse é o 2º...".
+// Sem ele o operador não teria como saber em que ordem montou a fila, já que
+// todos os quadrados selecionados ficam pintados da MESMA cor (azul pra
+// origem, laranja pra destino) e a ordem é justamente o que torna a
+// sequência válida ou inválida.
+//
+// Contra-rotaciona/contra-escala igual ao rótulo de nome logo abaixo: o
+// lote pode estar girado/esticado no mapa, mas o número precisa continuar
+// legível na horizontal e do mesmo tamanho em qualquer lote.
+function SeqBadge({ seq, size, color, rotation = 0, scaleX = 1, scaleY = 1 }) {
+  if (!seq) return null;
+  const r = Math.max(7, size * 0.36);
+  // Fica FORA do quadrado, à direita e na mesma linha horizontal que ele
+  // (não num canto). "À direita" aqui é à direita NA TELA, não no eixo
+  // local do lote: uma "coluna" é um lote rotacionado, e no eixo local o
+  // lado direito é justamente onde fica a célula VIZINHA — o número
+  // acabaria em cima dela. Então o deslocamento é pensado em coordenadas
+  // de tela (dist, 0) e convertido de volta pro sistema local do lote,
+  // desfazendo rotação e escala: local = R(-θ)·(dist,0) ÷ escala.
+  const rad = (rotation * Math.PI) / 180;
+  const dist = size / 2 + r + 4;
+  const sx = scaleX || 1;
+  const sy = scaleY || 1;
+  return (
+    <Group
+      x={(dist * Math.cos(rad)) / sx}
+      y={(-dist * Math.sin(rad)) / sy}
+      rotation={-rotation}
+      scaleX={1 / sx}
+      scaleY={1 / sy}
+      listening={false}
+    >
+      <Circle radius={r} fill={COLORS.panelBase} stroke={color} strokeWidth={1.5} />
+      <Text
+        text={String(seq)}
+        fontFamily="ui-monospace, 'SF Mono', 'Cascadia Code', monospace"
+        fontSize={r * 1.2}
+        fontStyle="bold"
+        fill={color}
+        align="center"
+        verticalAlign="middle"
+        width={r * 4}
+        height={r * 2}
+        x={-r * 2}
+        y={-r}
+        listening={false}
+      />
+    </Group>
+  );
+}
+
+function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNumber, isHovered, isOccupied, isPreviewing, showName, onSelect, onChange, onHoverEnter, onHoverLeave, onPressStart }) {
   const groupRef = useRef(null);
   const trRef = useRef(null);
   const editable = mode === 'edit';
@@ -171,8 +270,8 @@ function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, isHov
 
   usePtpScale(groupRef, gestureActive ? ptpTargetScale(isHovered, isPickup || isDropoff) : 1);
 
-  const { fill, stroke } = markerColors(mode, { isSelected, isPickup, isDropoff });
-  const xColor = occupiedColor(mode, null, { isSelected, isPickup, isDropoff });
+  const { fill, stroke } = pointMarkerColors(mode, { isSelected, isPickup, isDropoff });
+  const xColor = pointOccupiedColor(mode, { isSelected, isPickup, isDropoff });
 
   // Edição: clique seleciona na hora (comportamento de sempre). Ponto a
   // Ponto: seleção não acontece mais no clique — só ao soltar o
@@ -214,6 +313,8 @@ function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, isHov
           strokeWidth={2}
         />
         {isOccupied && <XMark size={size} color={xColor} outlineColor={stroke} opacity={isPreviewing ? 0.5 : 1} />}
+        <SeqBadge seq={seqNumber} size={size} color={stroke} rotation={point.rotation} />
+        {showName && (
         <Text
           text={point.name}
           fontFamily="ui-monospace, 'SF Mono', 'Cascadia Code', monospace"
@@ -226,6 +327,7 @@ function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, isHov
           rotation={-point.rotation}
           listening={false}
         />
+        )}
       </Group>
       {editable && isSelected && (
         <Transformer
@@ -244,7 +346,7 @@ function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, isHov
 // Uma célula de lote — extraída em componente próprio (em vez de inline no
 // .map() de LotMarker) porque precisa da sua própria ref+efeito pra animar o
 // crescimento no modo Ponto a Ponto, e hooks não podem viver dentro de loop.
-function LotCell({ name, index, cellSize, fill, stroke, xColor, showName, isOccupied, isPreviewing, lotRotation, lotScaleX, lotScaleY, gestureActive, isHovered, isSelectedEndpoint, onHoverEnter, onHoverLeave, onPressStart }) {
+function LotCell({ name, index, cellSize, fill, stroke, xColor, showName, isOccupied, isPreviewing, seqNumber, lotRotation, lotScaleX, lotScaleY, gestureActive, isHovered, isSelectedEndpoint, onHoverEnter, onHoverLeave, onPressStart }) {
   const cellRef = useRef(null);
   usePtpScale(cellRef, gestureActive ? ptpTargetScale(isHovered, isSelectedEndpoint) : 1);
 
@@ -269,6 +371,14 @@ function LotCell({ name, index, cellSize, fill, stroke, xColor, showName, isOccu
         strokeWidth={2}
       />
       {isOccupied && <XMark size={cellSize} color={xColor} outlineColor={stroke} opacity={isPreviewing ? 0.5 : 1} />}
+      <SeqBadge
+        seq={seqNumber}
+        size={cellSize}
+        color={stroke}
+        rotation={lotRotation}
+        scaleX={lotScaleX}
+        scaleY={lotScaleY}
+      />
       {showName && (
         <Text
           text={name}
@@ -293,7 +403,7 @@ function LotCell({ name, index, cellSize, fill, stroke, xColor, showName, isOccu
 // única unidade arrastável/rotacionável/redimensionável. Em Ponto a Ponto,
 // cada célula tem sua própria animação de hover (ver LotCell) — a seleção em
 // si acontece ao soltar o mouse/dedo, tratada no Stage.
-function LotMarker({ lot, cellSize, mode, isSelected, pickupName, dropoffName, hoverName, occupiedNames, previewingNames, onSelectLot, onHoverEnter, onHoverLeave, onPressStart, onChange, isPreview }) {
+function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames, hoverName, occupiedNames, previewingNames, onSelectLot, onHoverEnter, onHoverLeave, onPressStart, onChange, isPreview }) {
   const groupRef = useRef(null);
   const trRef = useRef(null);
   const editable = mode === 'edit' && !isPreview;
@@ -338,8 +448,19 @@ function LotMarker({ lot, cellSize, mode, isSelected, pickupName, dropoffName, h
       >
         {Array.from({ length: lot.count }).map((_, i) => {
           const name = lotCellName(lot.prefix, i);
-          const isPickup = name === pickupName;
-          const isDropoff = name === dropoffName;
+          // Índice na sequência (ver SeqBadge/MainApp) — em modo normal as
+          // listas têm no máximo 1 nome, então isso equivale ao antigo
+          // `name === pickupName`, só que já preparado pra vários.
+          const pickupIdx = pickupNames.indexOf(name);
+          const dropoffIdx = dropoffNames.indexOf(name);
+          const isPickup = pickupIdx !== -1;
+          const isDropoff = dropoffIdx !== -1;
+          // Só numera quando existe sequência de verdade (2+): com um par
+          // simples — e principalmente com a ROTA ATUAL destacada depois do
+          // envio — o número não acrescenta nada e só poluiria o mapa.
+          const seqNumber = isPickup && pickupNames.length > 1 ? pickupIdx + 1
+            : isDropoff && dropoffNames.length > 1 ? dropoffIdx + 1
+            : null;
           const { fill, stroke } = lotCellColors(mode, lot, { isSelected, isPickup, isDropoff });
           const xColor = occupiedColor(mode, lot, { isSelected, isPickup, isDropoff });
           return (
@@ -354,6 +475,7 @@ function LotMarker({ lot, cellSize, mode, isSelected, pickupName, dropoffName, h
               showName={lot.namesVisible || isPreview}
               isOccupied={occupiedNames.includes(name)}
               isPreviewing={!!previewingNames && previewingNames.has(name)}
+              seqNumber={seqNumber}
               lotRotation={lot.rotation}
               lotScaleX={lot.scaleX}
               lotScaleY={lot.scaleY}
@@ -396,8 +518,10 @@ export default function FloorPlanCanvas({
   onSelectPoint,
   selectedLotId,
   onSelectLot,
-  pickupName,
-  dropoffName,
+  // Listas (não nomes soltos) porque o modo "Lotes em sequência" seleciona
+  // vários de uma vez — ver MainApp.jsx. No modo normal vêm com 0 ou 1 nome.
+  pickupNames,
+  dropoffNames,
   onPointToPointClick,
   view,
   onToggleView,
@@ -407,6 +531,8 @@ export default function FloorPlanCanvas({
   onToggleMarkMode,
   ptpModeActive,
   onTogglePtpMode,
+  emergencyActive,
+  onToggleEmergency,
 }) {
   const containerRef = useRef(null);
   const { width: containerWidth, height: containerHeight } = useContainerSize(containerRef);
@@ -419,6 +545,7 @@ export default function FloorPlanCanvas({
   // pra converter clique↔fração muda.
   const [stageScale, setStageScale] = useState(0); // 0 = ainda não inicializado
   const [stagePos, setStagePos] = useState({ x: 0, y: 0 });
+  const stageRef = useRef(null);
   // Guarda PRA QUAL vista o zoom/pan já foi centralizado — trocar de vista
   // (imagem diferente, dimensões diferentes) precisa reinicializar o
   // enquadramento, não só na primeira vez que a Stage aparece.
@@ -438,9 +565,146 @@ export default function FloorPlanCanvas({
     initializedForRef.current = view;
   }, [baseScale, containerWidth, containerHeight, image, view]);
 
+  // Botão de reset (ícone de refresh) — reaplica o MESMO enquadramento
+  // "encaixar na tela" que o efeito acima já calcula na primeira vez que a
+  // vista aparece. Ação pontual (um clique), não um gesto de alta
+  // frequência como o pinça/roda — setState direto é suficiente aqui, sem
+  // precisar do caminho imperativo do Konva.
+  function handleResetView() {
+    if (!baseScale) return;
+    setStageScale(baseScale);
+    setStagePos({
+      x: (containerWidth - image.width * baseScale) / 2,
+      y: (containerHeight - image.height * baseScale) / 2,
+    });
+  }
+
   function clampScale(s) {
-    const min = baseScale || 0.01;
-    return Math.max(min, Math.min(s, min * MAX_ZOOM_MULT));
+    const fit = baseScale || 0.01;
+    return Math.max(fit * MIN_ZOOM_MULT, Math.min(s, fit * MAX_ZOOM_MULT));
+  }
+
+  // --- zoom: slider vertical (posição = nível de zoom) --------------------
+  // A bolinha é a "porcentagem" de zoom: CENTRO = zoom default (o mesmo
+  // "encaixar na tela" de quando a página abre / do botão de refresh),
+  // topo = mais zoom (até SLIDER_MAX_MULT×), fundo = menos zoom (até
+  // SLIDER_MIN_MULT×, mais aberto que o encaixe). A bolinha FICA onde é
+  // deixada — não volta pro centro — e acompanha também o zoom feito por
+  // roda/pinça (posição derivada de stageScale, ver useEffect abaixo).
+  //
+  // Mapeamento log/exponencial (não linear): assim cada fração igual de
+  // curso multiplica a escala pelo mesmo fator, que é como zoom "sente"
+  // constante — mesma ideia do wheel/pinça, que multiplicam a escala.
+  //
+  // "O ponto de zoom é a parte do mapa onde o usuário soltou o clique (ou
+  // dedo) pela última vez" — guardado em COORDENADAS DE CONTEÚDO (px da
+  // imagem, invariante a zoom/pan), atualizado a cada mover/soltar do
+  // ponteiro sobre o canvas (rememberFocal). O slider mantém esse ponto
+  // fixo na tela enquanto reescala.
+  const focalContentRef = useRef(null);
+  const zoomDraggingRef = useRef(false);
+  const knobRef = useRef(null);
+  const sliderRef = useRef(null);
+  const sliderTrackRef = useRef(null);
+
+  // A classe "is-active" (barra 100% + bolinha maior) é alternada por
+  // classList, NÃO por estado: um setState no meio do arrasto re-renderizaria
+  // a <Stage> com o stageScale/stagePos antigos (só sincronizam no soltar) e o
+  // react-konva reverteria por um frame o transform que mutamos direto —
+  // mesmo motivo do pinça adiar o setState pro fim do gesto.
+  function setSliderActive(on) {
+    sliderRef.current?.classList.toggle('is-active', on);
+  }
+
+  function rememberFocal(stage) {
+    if (!stage) return;
+    const p = stage.getPointerPosition();
+    if (!p) return;
+    focalContentRef.current = toContent(p, stage);
+  }
+
+  function setKnobVisual(frac) {
+    if (knobRef.current) knobRef.current.style.top = frac * 100 + '%';
+  }
+
+  // fração da barra [0 topo .. 1 fundo]  ->  escala absoluta do Stage
+  function sliderFracToScale(frac) {
+    const base = baseScale || 0.01;
+    const t = (0.5 - frac) * 2; // [-1 fundo .. +1 topo]
+    const mult = t >= 0
+      ? Math.pow(SLIDER_MAX_MULT, t)
+      : Math.pow(1 / SLIDER_MIN_MULT, t); // t<0: (1/0.5)^t = 0.5^|t|
+    return base * mult;
+  }
+
+  // escala absoluta do Stage  ->  fração da barra (posição da bolinha)
+  function sliderScaleToFrac(scale) {
+    const base = baseScale || 0.01;
+    const r = scale / base;
+    const t = r >= 1
+      ? Math.log(r) / Math.log(SLIDER_MAX_MULT)
+      : Math.log(r) / Math.log(1 / SLIDER_MIN_MULT);
+    return Math.max(0, Math.min(1, 0.5 - t / 2));
+  }
+
+  // Enquanto NÃO se arrasta o slider, a bolinha reflete o zoom atual — pega
+  // o zoom inicial, o botão de refresh (ambos = centro) e roda/pinça.
+  useEffect(() => {
+    if (zoomDraggingRef.current || !baseScale) return;
+    setKnobVisual(sliderScaleToFrac(stageScale));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stageScale, baseScale]);
+
+  function zoomFracFromEvent(e) {
+    const rect = sliderTrackRef.current?.getBoundingClientRect();
+    if (!rect) return 0.5;
+    return Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+  }
+
+  // Aplica a escala correspondente à posição da bolinha, mantendo o ponto
+  // focal (último toque no mapa) parado na tela. Muta o node do Konva DIRETO
+  // (sem setState) durante o arrasto — o estado React só sincroniza ao
+  // soltar (handleZoomPointerUp), mesmo padrão do pinça.
+  function applyZoomFromFrac(frac) {
+    setKnobVisual(frac);
+    const stage = stageRef.current;
+    if (!stage) return;
+    const oldScale = stage.scaleX();
+    const newScale = sliderFracToScale(frac);
+    if (newScale === oldScale) return;
+    const focal = focalContentRef.current ||
+      toContent({ x: containerWidth / 2, y: containerHeight / 2 }, stage);
+    const sx = focal.x * oldScale + stage.x();
+    const sy = focal.y * oldScale + stage.y();
+    stage.scale({ x: newScale, y: newScale });
+    stage.position({ x: sx - focal.x * newScale, y: sy - focal.y * newScale });
+    stage.batchDraw();
+  }
+
+  function handleZoomPointerDown(e) {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    zoomDraggingRef.current = true;
+    setSliderActive(true);
+    applyZoomFromFrac(zoomFracFromEvent(e));
+  }
+
+  function handleZoomPointerMove(e) {
+    if (!zoomDraggingRef.current) return;
+    applyZoomFromFrac(zoomFracFromEvent(e));
+  }
+
+  function handleZoomPointerUp(e) {
+    if (!zoomDraggingRef.current) return;
+    zoomDraggingRef.current = false;
+    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* ponteiro já foi */ }
+    setSliderActive(false);
+    // Sincroniza o estado React com o transform aplicado direto no node —
+    // mesma sincronia do fim do pinça (handleTouchEnd).
+    const stage = stageRef.current;
+    if (stage) {
+      setStageScale(stage.scaleX());
+      setStagePos({ x: stage.x(), y: stage.y() });
+    }
   }
 
   // lotDraftRef espelha lotDraft (estado, só pra re-renderizar o preview).
@@ -580,6 +844,7 @@ export default function FloorPlanCanvas({
   }
 
   function commitOnRelease() {
+    rememberFocal(stageRef.current); // "onde soltou o clique/dedo pela última vez"
     finishLotDrag();
     if (mode === 'mark') {
       if (paintPathRef.current.length > 0 && paintTargetRef.current !== null) {
@@ -649,6 +914,7 @@ export default function FloorPlanCanvas({
   function handleStageMouseDown(e) {
     wasPanningRef.current = false; // novo gesto começando — ver onDragStart do Stage
     const stage = e.target.getStage();
+    rememberFocal(stage); // ponto focal do slider de zoom = último toque no mapa
     const startedOnMarker = e.target !== stage;
 
     // Clicar e arrastar deve sempre poder mover o mapa (pan), em qualquer
@@ -684,9 +950,10 @@ export default function FloorPlanCanvas({
   }
 
   function handleStageMouseMove(e) {
+    const stage = e.target.getStage();
+    rememberFocal(stage); // segue o ponteiro/dedo pelo mapa (ver stepZoom)
     const draft = lotDraftRef.current;
     if (!draft) return;
-    const stage = e.target.getStage();
     const pointer = stage.getPointerPosition();
     if (!pointer) return;
     const pos = toContent(pointer, stage);
@@ -708,6 +975,11 @@ export default function FloorPlanCanvas({
   }
 
   // --- zoom: roda do mouse, centrado no cursor ------------------------------
+  // Muta o node do Konva direto ANTES de sincronizar o estado React — o
+  // redesenho já acontece na hora (Konva), setState só reconcilia os
+  // mesmos valores depois (barato, idempotente). Mesmo raciocínio do
+  // pinça abaixo, só que aqui sem precisar adiar pro fim do gesto (wheel
+  // não tem "gesto" contínuo do jeito que touchmove tem).
   function handleWheel(e) {
     e.evt.preventDefault();
     const stage = e.target.getStage();
@@ -720,11 +992,15 @@ export default function FloorPlanCanvas({
     };
     const direction = e.evt.deltaY > 0 ? -1 : 1;
     const newScale = clampScale(direction > 0 ? oldScale / ZOOM_STEP : oldScale * ZOOM_STEP);
-    setStageScale(newScale);
-    setStagePos({
+    const newPos = {
       x: pointer.x - pointTo.x * newScale,
       y: pointer.y - pointTo.y * newScale,
-    });
+    };
+    stage.scale({ x: newScale, y: newScale });
+    stage.position(newPos);
+    stage.batchDraw();
+    setStageScale(newScale);
+    setStagePos(newPos);
   }
 
   // --- zoom: pinça de dois dedos no touch -----------------------------------
@@ -770,16 +1046,35 @@ export default function FloorPlanCanvas({
       y: (center.y - stage.y()) / oldScale,
     };
     const newScale = clampScale(oldScale * (dist / pinchRef.current.dist));
-    setStageScale(newScale);
-    setStagePos({
+    const newPos = {
       x: center.x - pointTo.x * newScale,
       y: center.y - pointTo.y * newScale,
-    });
+    };
+    // Muta o node do Konva DIRETO, sem passar por setState — era essa a
+    // causa do zoom "engasgado"/aos saltos: touchmove dispara dezenas de
+    // vezes por segundo, e cada setState força o React a re-renderizar a
+    // árvore inteira (reconciliação + Konva reaplicando props) só pra
+    // mudar 4 números. Num tablet mais fraco o React não acompanha esse
+    // ritmo, os eventos se acumulam e o navegador passa a agrupar/atrasar
+    // os touchmove seguintes — visualmente isso é exatamente "não
+    // acompanha o dedo, dá um zoom abrupto e estático". stage.scale/
+    // position+batchDraw é só redesenho de canvas, muito mais barato, e é
+    // pra isso que existe. stageScale/stagePos (estado React) só
+    // sincronizam no FIM do gesto — ver handleTouchEnd.
+    stage.scale({ x: newScale, y: newScale });
+    stage.position(newPos);
+    stage.batchDraw();
     pinchRef.current = { dist, center };
   }
 
   function handleTouchEnd(e) {
     if (e.evt.touches.length < 2) {
+      const stage = e.target.getStage();
+      // Sincroniza o estado React com o transform que o Konva já aplicou
+      // direto durante o gesto (ver handleTouchMove) — uma vez só, aqui,
+      // não a cada frame do pinça.
+      setStageScale(stage.scaleX());
+      setStagePos({ x: stage.x(), y: stage.y() });
       pinchRef.current = { dist: 0, center: null };
       pinchRectRef.current = null; // próximo pinça recalcula do zero
     }
@@ -800,7 +1095,32 @@ export default function FloorPlanCanvas({
     >
       <button
         type="button"
-        className="view-toggle"
+        className={'emergency-toggle' + (emergencyActive ? ' is-active' : '')}
+        onClick={onToggleEmergency}
+        aria-label={emergencyActive ? 'Liberar parada de emergência' : 'Parada de emergência — parar o robô'}
+        aria-pressed={emergencyActive}
+        title={emergencyActive ? 'Liberar parada de emergência' : 'Parada de emergência'}
+      >
+        <svg viewBox="0 0 48 48" fill="currentColor" aria-hidden="true">
+          <path d="M43.4,15.1,32.9,4.6A2,2,0,0,0,31.5,4h-15a2,2,0,0,0-1.4.6L4.6,15.1A2,2,0,0,0,4,16.5v15a2,2,0,0,0,.6,1.4L15.1,43.4a2,2,0,0,0,1.4.6h15a2,2,0,0,0,1.4-.6L43.4,32.9a2,2,0,0,0,.6-1.4v-15A2,2,0,0,0,43.4,15.1ZM24,34a2,2,0,1,1,2-2A2,2,0,0,1,24,34Zm2-8a2,2,0,0,1-4,0V16a2,2,0,0,1,4,0Z" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        className="view-toggle reset-toggle"
+        onClick={handleResetView}
+        aria-label="Resetar posição e zoom do mapa"
+        title="Resetar posição/zoom"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="23 4 23 10 17 10" />
+          <polyline points="1 20 1 14 7 14" />
+          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        className="view-toggle eye-toggle"
         onClick={onToggleView}
         aria-label={view === 'top' ? 'Mudar pra visão isométrica' : 'Mudar pra vista de cima'}
         title={view === 'top' ? 'Ver isométrico' : 'Ver de cima'}
@@ -832,8 +1152,23 @@ export default function FloorPlanCanvas({
           <path fillRule="evenodd" clipRule="evenodd" d="M101.41,37.05c-1.95,2.14-4.22,4.05-6.77,5.6c-0.31,0.23-0.74,0.26-1.09,0.03c-3.76-2.39-6.93-5.27-9.41-8.4 c-3.43-4.3-5.59-9.07-6.33-13.66c-0.75-4.66-0.05-9.14,2.27-12.79C81,6.4,82.17,5.08,83.59,3.95c3.27-2.6,7-3.98,10.73-3.95 c3.58,0.03,7.12,1.36,10.18,4.15c1.08,0.98,1.98,2.09,2.72,3.31c2.49,4.11,3.03,9.34,1.93,14.65 C108.07,27.36,105.39,32.69,101.41,37.05L101.41,37.05L101.41,37.05z M9.82,64.7h8.72c1.45,0,2.57,0.36,3.35,1.08 c0.78,0.72,1.17,1.61,1.17,2.67c0,0.89-0.28,1.66-0.83,2.29c-0.37,0.43-0.91,0.76-1.62,1.01c1.08,0.26,1.88,0.7,2.39,1.34 c0.51,0.63,0.76,1.43,0.76,2.39c0,0.78-0.18,1.48-0.54,2.11c-0.36,0.62-0.86,1.12-1.49,1.48c-0.39,0.22-0.98,0.39-1.77,0.49 c-1.05,0.14-1.74,0.21-2.09,0.21H9.82V64.7L9.82,64.7z M14.51,70.62h2.03c0.73,0,1.23-0.13,1.52-0.38 c0.28-0.25,0.43-0.61,0.43-1.09c0-0.44-0.14-0.78-0.43-1.03c-0.28-0.25-0.78-0.37-1.49-0.37h-2.06V70.62L14.51,70.62z M14.51,76.53 h2.37c0.8,0,1.37-0.14,1.7-0.43c0.33-0.28,0.49-0.66,0.49-1.14c0-0.45-0.16-0.8-0.49-1.07c-0.33-0.27-0.9-0.41-1.71-0.41h-2.36 V76.53L14.51,76.53z M96.62,21.82h-5.27l-0.76,2.48h-4.75l5.67-15.07h5.1l5.65,15.07h-4.87L96.62,21.82L96.62,21.82z M95.64,18.56 l-1.64-5.41l-1.65,5.41H95.64L95.64,18.56z M23.88,92.06c-1.95,2.14-4.22,4.05-6.77,5.6c-0.31,0.23-0.74,0.26-1.09,0.03 c-3.76-2.4-6.93-5.27-9.41-8.4C3.19,85,1.03,80.23,0.29,75.63c-0.75-4.66-0.05-9.14,2.27-12.78c0.91-1.44,2.08-2.75,3.51-3.88 c3.27-2.6,7-3.98,10.72-3.95c3.58,0.03,7.12,1.36,10.18,4.15c1.08,0.98,1.98,2.09,2.72,3.31c2.49,4.11,3.03,9.34,1.93,14.65 C30.54,82.37,27.86,87.7,23.88,92.06L23.88,92.06L23.88,92.06z M17.07,103.04c4.51,0,8.32,3.02,9.52,7.14h59.97 c2.96,0,5.66-1.21,7.62-3.17c1.96-1.96,3.17-4.65,3.17-7.62l0,0c0-2.96-1.21-5.66-3.17-7.62c-1.96-1.96-4.65-3.17-7.62-3.17H65.58 v0c-4.71,0-8.99-1.92-12.09-5.02c-3.1-3.1-5.02-7.38-5.02-12.09l0,0c0-4.71,1.92-8.99,5.02-12.09c3.1-3.1,7.38-5.02,12.09-5.02 h18.97c1.3-3.96,5.03-6.82,9.42-6.82c5.48,0,9.92,4.44,9.92,9.92c0,5.48-4.44,9.92-9.92,9.92c-4.35,0-8.04-2.8-9.38-6.69H65.58 c-2.96,0-5.66,1.21-7.62,3.17c-1.96,1.96-3.17,4.65-3.17,7.62l0,0c0,2.96,1.21,5.66,3.17,7.62c1.94,1.94,4.61,3.15,7.55,3.17v0 h21.06c4.71,0,8.99,1.92,12.09,5.02c3.1,3.1,5.02,7.38,5.02,12.09l0,0c0,4.71-1.92,8.99-5.02,12.09c-3.1,3.1-7.38,5.02-12.09,5.02 H26.34c-1.43,3.73-5.04,6.37-9.27,6.37c-5.48,0-9.92-4.44-9.92-9.92C7.15,107.48,11.59,103.04,17.07,103.04L17.07,103.04z" />
         </svg>
       </button>
+      <div className="zoom-slider" ref={sliderRef} aria-hidden="true">
+        <span className="zoom-slider__end">+</span>
+        <div
+          className="zoom-slider__track"
+          ref={sliderTrackRef}
+          onPointerDown={handleZoomPointerDown}
+          onPointerMove={handleZoomPointerMove}
+          onPointerUp={handleZoomPointerUp}
+          onPointerCancel={handleZoomPointerUp}
+        >
+          <div className="zoom-slider__knob" ref={knobRef} />
+        </div>
+        <span className="zoom-slider__end">&minus;</span>
+      </div>
       {stageScale > 0 && image && (
         <Stage
+          ref={stageRef}
           width={containerWidth}
           height={containerHeight}
           scaleX={stageScale}
@@ -870,8 +1205,8 @@ export default function FloorPlanCanvas({
                 cellSize={l.cellSize || DEFAULT_CELL_SIZE}
                 mode={mode}
                 isSelected={l.id === selectedLotId}
-                pickupName={pickupName}
-                dropoffName={dropoffName}
+                pickupNames={pickupNames}
+                dropoffNames={dropoffNames}
                 hoverName={hoveredName}
                 occupiedNames={effectiveOccupied}
                 previewingNames={previewingNames}
@@ -894,11 +1229,17 @@ export default function FloorPlanCanvas({
                 size={DEFAULT_CELL_SIZE}
                 mode={mode}
                 isSelected={p.id === selectedId}
-                isPickup={p.name === pickupName}
-                isDropoff={p.name === dropoffName}
+                isPickup={pickupNames.includes(p.name)}
+                isDropoff={dropoffNames.includes(p.name)}
+                seqNumber={
+                  pickupNames.length > 1 && pickupNames.includes(p.name) ? pickupNames.indexOf(p.name) + 1
+                    : dropoffNames.length > 1 && dropoffNames.includes(p.name) ? dropoffNames.indexOf(p.name) + 1
+                    : null
+                }
                 isHovered={hoveredName === p.name}
                 isOccupied={effectiveOccupied.includes(p.name)}
                 isPreviewing={previewingNames.has(p.name)}
+                showName={!!p.namesVisible}
                 onSelect={onSelectPoint}
                 onHoverEnter={handleHoverEnter}
                 onHoverLeave={handleHoverLeave}
@@ -926,8 +1267,8 @@ export default function FloorPlanCanvas({
                 cellSize={DEFAULT_CELL_SIZE}
                 mode={mode}
                 isSelected={false}
-                pickupName={null}
-                dropoffName={null}
+                pickupNames={EMPTY_NAMES}
+                dropoffNames={EMPTY_NAMES}
                 hoverName={null}
                 occupiedNames={occupiedNames}
                 onSelectLot={() => {}}

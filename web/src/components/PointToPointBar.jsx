@@ -6,20 +6,68 @@ import blueTexture from '../assets/pallet-blue.png';
 // altura no ponto de PICKUP pra alinhar o garfo corretamente; o de madeira
 // fica rente ao chão (altura 0, o comportamento que já existia antes dessa
 // feature). Azul vem selecionado por padrão porque é o mais comum na planta.
-export default function PointToPointBar({ pickupName, dropoffName, onClear, onSend, sending, willQueue, palletType, onPalletTypeChange }) {
+export default function PointToPointBar({
+  pickupNames, dropoffNames, onClear, onSend, sending, willQueue,
+  palletType, onPalletTypeChange,
+  sequenceMode, onToggleSequenceMode, activeSlot, onActiveSlotChange,
+}) {
+  const countsMatch = pickupNames.length === dropoffNames.length;
+  const hasSelection = pickupNames.length > 0 || dropoffNames.length > 0;
+  // Em sequência, exigir contagens iguais é o que garante que todo pallet
+  // pego tem pra onde ir (ver CONTEXT.md, "Lotes em sequência") — decisão
+  // do usuário: bloquear o envio até bater, em vez de mandar pela metade.
+  const canSend = pickupNames.length > 0 && dropoffNames.length > 0 && countsMatch;
+  const sendLabel = sending ? 'Enviando…'
+    : willQueue ? 'Adicionar à fila'
+    : pickupNames.length > 1 ? 'Enviar ' + pickupNames.length + ' tasks'
+    : 'Enviar task';
+
+  // Em modo sequência os slots viram BOTÕES (clicar troca qual está
+  // recebendo as seleções do mapa); no modo normal continuam sendo só
+  // visores passivos, como sempre foram.
+  function renderSlot(kind, label, names) {
+    const isActive = sequenceMode && activeSlot === kind;
+    const className = 'ptp-bar__slot'
+      + (sequenceMode ? ' ptp-bar__slot--clickable' : '')
+      + (isActive ? ' is-active is-active--' + kind : '');
+    const text = names.length ? names.join(', ') : '—';
+    const content = (
+      <>
+        <span className={'ptp-bar__slot-label ptp-bar__slot-label--' + kind}>
+          {label}{names.length > 1 ? ' (' + names.length + ')' : ''}
+        </span>
+        <span className="ptp-bar__slot-value">{text}</span>
+      </>
+    );
+    if (!sequenceMode) return <div className={className}>{content}</div>;
+    return (
+      <button type="button" className={className} onClick={() => onActiveSlotChange(kind)}>
+        {content}
+      </button>
+    );
+  }
+
   return (
     <div className="ptp-bar">
       <h2 className="points-panel__title">Ponto a Ponto</h2>
-      <p className="ptp-bar__hint">Clique num ponto pra origem (coleta), depois noutro pra destino (entrega).</p>
+      <p className="ptp-bar__hint">
+        {sequenceMode
+          ? 'Selecione as origens em ordem, clique em DESTINO e selecione os destinos na mesma quantidade.'
+          : 'Clique num ponto pra origem (coleta), depois noutro pra destino (entrega).'}
+      </p>
 
-      <div className="ptp-bar__slot">
-        <span className="ptp-bar__slot-label ptp-bar__slot-label--pickup">Origem (PICKUP)</span>
-        <span className="ptp-bar__slot-value">{pickupName || '—'}</span>
-      </div>
-      <div className="ptp-bar__slot">
-        <span className="ptp-bar__slot-label ptp-bar__slot-label--dropoff">Destino (UNLOAD)</span>
-        <span className="ptp-bar__slot-value">{dropoffName || '—'}</span>
-      </div>
+      {renderSlot('pickup', 'Origem (PICKUP)', pickupNames)}
+      {renderSlot('dropoff', 'Destino (UNLOAD)', dropoffNames)}
+
+      <label className="ptp-bar__sequence">
+        <input type="checkbox" checked={sequenceMode} onChange={onToggleSequenceMode} />
+        Lotes em sequência
+      </label>
+      {sequenceMode && hasSelection && !countsMatch && (
+        <p className="ptp-bar__sequence-warn">
+          {pickupNames.length} origem(ns) / {dropoffNames.length} destino(s) — precisa bater pra enviar.
+        </p>
+      )}
 
       <div className="ptp-bar__pallet">
         <h3 className="ptp-bar__pallet-title">Escolha o modelo de pallet</h3>
@@ -44,16 +92,16 @@ export default function PointToPointBar({ pickupName, dropoffName, onClear, onSe
       </div>
 
       <div className="ptp-bar__actions">
-        <button type="button" className="ptp-bar__clear" onClick={onClear} disabled={!pickupName && !dropoffName}>
+        <button type="button" className="ptp-bar__clear" onClick={onClear} disabled={!hasSelection}>
           Limpar seleção
         </button>
         <button
           type="button"
           className="ptp-bar__send"
           onClick={onSend}
-          disabled={!pickupName || !dropoffName || sending}
+          disabled={!canSend || sending}
         >
-          {sending ? 'Enviando…' : willQueue ? 'Adicionar à fila' : 'Enviar task'}
+          {sendLabel}
         </button>
       </div>
     </div>

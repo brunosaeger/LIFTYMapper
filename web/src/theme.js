@@ -8,6 +8,18 @@ const DARK_COLORS = {
   panelLine: '#262e38',
   accentAmber: '#f5a524',
   accentAmberDim: '#8a611c',
+  // Cor própria dos PONTOS AVULSOS ("lotes curinga" de uma célula só, ver
+  // CONTEXT.md). Laranja de propósito mais avermelhado que accentAmber
+  // (#f5a524, que é bem amarelado): o âmbar já significa "destino/unload
+  // selecionado", e os dois precisam ser distinguíveis à primeira vista
+  // num mapa cheio. Só existe aqui, sem par em index.css — ponto avulso é
+  // desenhado só no canvas (Konva), nunca em HTML.
+  // Medido: o âmbar está em matiz 37°. Um laranja "normal" (#f97316, 25°)
+  // fica a só 12° dele com a mesma luminosidade — indistinguível num
+  // quadrado de ~12px. Este está a 22°, separando por matiz sem escurecer
+  // demais: descer a luminosidade resolvia o contraste mas puxava pro
+  // marrom (já testado com #e35205, que ficou queimado demais).
+  accentOrange: '#f4610a',
   accentCyan: '#2dd4bf',
   accentCyanDim: '#1c766c',
   textPrimary: '#edeff3',

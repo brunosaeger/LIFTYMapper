@@ -5,7 +5,7 @@ const SAVE_LABEL = {
   error: 'Erro ao salvar',
 };
 
-export default function Toolbar({ mode, onModeChange, addTool, onStartAddPoint, onStartAddLot, onCancelAdd, saveStatus, theme, onToggleTheme, devMode, onDevButtonClick }) {
+export default function Toolbar({ mode, onModeChange, addTool, onStartAddPoint, onStartAddLot, onCancelAdd, saveStatus, theme, onToggleTheme, devMode, onDevButtonClick, user, onLogout }) {
   return (
     <header className="toolbar">
       <div className="toolbar__brand">
@@ -13,30 +13,49 @@ export default function Toolbar({ mode, onModeChange, addTool, onStartAddPoint, 
         <span>LIFTY MAPPER</span>
       </div>
 
-      {/* "Editar pontos", "Histórico" e os botões de + Ponto/+ Lote abaixo só
-          existem dentro do modo desenvolvedor (ver App.jsx: DEV_PASSWORD,
-          botão "{ }" no fim da toolbar) — sem ele, mode nunca chega a 'edit'
-          nem 'history' por nenhum caminho alcançável da UI. */}
-      {devMode && (
+      {/* "Editar pontos" é só modo desenvolvedor (ver MainApp.jsx:
+          DEV_PASSWORD, botão "{ }" no fim da toolbar) — sem ele, mode nunca
+          chega em 'edit' por nenhum caminho alcançável da UI, nem pra
+          admin. "Histórico" e "Usuários" são acesso de ADMIN por definição
+          (sessão de verdade, user.isAdmin) — mas continuam valendo em modo
+          desenvolvedor também (dev sempre viu o histórico). São duas
+          travas diferentes (uma de UI só pra edição de pontos/lotes, uma
+          de conta de verdade). */}
+      {(devMode || user?.isAdmin) && (
         <div className="toolbar__modes" role="tablist">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode === 'edit'}
-            className={'toolbar__mode' + (mode === 'edit' ? ' is-active' : '')}
-            onClick={() => onModeChange('edit')}
-          >
-            Editar pontos
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode === 'history'}
-            className={'toolbar__mode' + (mode === 'history' ? ' is-active' : '')}
-            onClick={() => onModeChange('history')}
-          >
-            Histórico
-          </button>
+          {devMode && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === 'edit'}
+              className={'toolbar__mode' + (mode === 'edit' ? ' is-active' : '')}
+              onClick={() => onModeChange('edit')}
+            >
+              Editar pontos
+            </button>
+          )}
+          {(devMode || user?.isAdmin) && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === 'history'}
+              className={'toolbar__mode' + (mode === 'history' ? ' is-active' : '')}
+              onClick={() => onModeChange('history')}
+            >
+              Histórico
+            </button>
+          )}
+          {user?.isAdmin && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === 'users'}
+              className={'toolbar__mode' + (mode === 'users' ? ' is-active' : '')}
+              onClick={() => onModeChange('users')}
+            >
+              Usuários
+            </button>
+          )}
         </div>
       )}
 
@@ -87,6 +106,14 @@ export default function Toolbar({ mode, onModeChange, addTool, onStartAddPoint, 
         >
           {'{ }'}
         </button>
+        {user && (
+          <div className="toolbar__user">
+            <span className="toolbar__username">{user.username}{user.isAdmin ? ' (admin)' : ''}</span>
+            <button type="button" className="toolbar__logout" onClick={onLogout} title="Sair" aria-label="Sair">
+              ⏻
+            </button>
+          </div>
+        )}
       </div>
     </header>
   );

@@ -128,6 +128,39 @@
   color: var(--accent-cyan);
 }
 
+.toolbar__user {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 12px;
+  border-left: 1px solid var(--panel-line);
+}
+
+.toolbar__username {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.toolbar__logout {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--panel-line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.toolbar__logout:hover {
+  color: var(--state-error);
+  background: var(--panel-raised-hi);
+}
+
 /* --- modal: senha do modo desenvolvedor ------------------------------------ */
 .dev-modal__backdrop {
   position: fixed;
@@ -213,6 +246,66 @@
   font-weight: 600;
 }
 
+/* --- tela de login (ver LoginScreen.jsx) ----------------------------------
+   Ao contrário do dev-modal (que fica SOBRE o app), esta ocupa a tela
+   inteira — enquanto não há sessão, MainApp não chega a montar (ver
+   App.jsx), então não existe "atrás" pra mostrar. */
+.login-screen {
+  height: 100vh;
+  width: 100vw;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel-base);
+}
+
+.login-screen__card {
+  width: 320px;
+  max-width: calc(100vw - 32px);
+  background: var(--panel-raised);
+  border: 1px solid var(--panel-line);
+  border-radius: 12px;
+  padding: 28px 24px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.login-screen__brand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-family: 'Arial Black', 'Helvetica Neue', Arial, sans-serif;
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+
+.login-screen__title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0 0 4px;
+  text-align: center;
+}
+
+.login-screen__submit {
+  border: 1px solid var(--accent-cyan-dim);
+  background: var(--accent-cyan-dim);
+  color: var(--text-primary);
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+.login-screen__submit:disabled {
+  opacity: 0.6;
+}
+
 /* --- body layout ---------------------------------------------------------- */
 .app__body {
   flex: 1;
@@ -237,10 +330,61 @@
   cursor: crosshair;
 }
 
-/* --- botão flutuante: trocar vista de cima / isométrica -------------------- */
-.view-toggle {
+/* --- parada de emergência (canto superior esquerdo) -----------------------
+   Repouso: só o ícone vermelho a 70%. Ativa: cor cheia + halo vermelho/rosa
+   claro pulsando atrás. Clicar de novo libera. O estado real vem do
+   servidor (/api/live-state), então todos os tablets mostram igual. */
+.emergency-toggle {
   position: absolute;
   top: 12px;
+  left: 12px;
+  z-index: 11;
+  width: 86px;
+  height: 86px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--panel-line);
+  background: var(--panel-raised);
+  color: var(--state-error);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.7;
+  cursor: pointer;
+  transition: opacity 0.15s ease, box-shadow 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+}
+
+.emergency-toggle svg {
+  width: 48px;
+  height: 48px;
+}
+
+.emergency-toggle:hover {
+  opacity: 0.85;
+}
+
+.emergency-toggle.is-active {
+  opacity: 1;
+  background: rgba(244, 91, 105, 0.18);
+  border-color: var(--state-error);
+  animation: emergency-pulse 1.3s ease-in-out infinite;
+}
+
+@keyframes emergency-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(244, 91, 105, 0.30), 0 0 14px 4px rgba(244, 91, 105, 0.40); }
+  50%      { box-shadow: 0 0 0 5px rgba(244, 91, 105, 0.45), 0 0 24px 8px rgba(244, 91, 105, 0.65); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .emergency-toggle.is-active { animation: none; box-shadow: 0 0 0 4px rgba(244, 91, 105, 0.40), 0 0 20px 6px rgba(244, 91, 105, 0.55); }
+}
+
+/* --- botões flutuantes empilhados (reset/olho/marcar/ponto-a-ponto) --------
+   .view-toggle é só a base compartilhada (tamanho, forma, cor) — cada botão
+   pega sua própria posição via modificador, empilhados de cima pra baixo em
+   passos de 76px (56px do botão + 20px de respiro). */
+.view-toggle {
+  position: absolute;
   right: 12px;
   z-index: 10;
   width: 56px;
@@ -265,8 +409,16 @@
   opacity: 0.75;
 }
 
+.reset-toggle {
+  top: 12px;
+}
+
+.eye-toggle {
+  top: 88px; /* logo abaixo do reset-toggle (56px + 12px de topo + 20px de respiro) */
+}
+
 .mark-toggle {
-  top: 88px; /* logo abaixo do view-toggle (56px + 12px de topo + 20px de respiro) */
+  top: 164px; /* logo abaixo do eye-toggle (88px + 56px + 20px de respiro) */
 }
 
 .mark-toggle.is-active {
@@ -276,7 +428,7 @@
 }
 
 .ptp-toggle {
-  top: 164px; /* logo abaixo do mark-toggle (88px + 56px + 20px de respiro) */
+  top: 240px; /* logo abaixo do mark-toggle (164px + 56px + 20px de respiro) */
 }
 
 .ptp-toggle svg {
@@ -292,6 +444,83 @@
 
 .view-toggle:active {
   opacity: 1;
+}
+
+/* --- slider vertical de zoom (logo abaixo da pilha de botões flutuantes) ---
+   Posição da bolinha = nível de zoom: CENTRO = zoom default (encaixe, igual
+   ao abrir a página / botão de refresh), pra cima = mais zoom, pra baixo =
+   menos. A bolinha FICA onde é solta (não volta pro centro) e também
+   acompanha o zoom feito por roda/pinça. Lógica em FloorPlanCanvas.jsx
+   (sliderFracToScale / handleZoomPointer*). Barra translúcida em repouso,
+   100% quando o ponteiro/dedo encosta nela. */
+.zoom-slider {
+  position: absolute;
+  right: 12px;
+  top: 316px; /* ptp-toggle termina em 296 (240 + 56) + 20 de respiro */
+  width: 56px;
+  height: 640px;
+  max-height: calc(100% - 340px); /* nunca passa da borda inferior do mapa */
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+  opacity: 0.5;
+  transition: opacity 0.15s ease;
+  touch-action: none; /* o arrasto vertical é nosso, não scroll da página */
+}
+
+.zoom-slider:hover,
+.zoom-slider.is-active {
+  opacity: 1;
+}
+
+.zoom-slider__end {
+  flex: none;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text-primary);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.zoom-slider__track {
+  position: relative;
+  flex: 1;
+  width: 6px;
+  border-radius: 3px;
+  background: var(--panel-line);
+  cursor: pointer;
+}
+
+.zoom-slider__knob {
+  position: absolute;
+  left: 50%;
+  top: 50%; /* JS sobrescreve style.top (posição = nível de zoom) */
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--text-primary);
+  border: 1px solid var(--panel-line);
+  transform: translate(-50%, -50%);
+  /* transition curta só no `top` pra a bolinha deslizar suave quando o zoom
+     muda por roda/pinça — NÃO é mola: ela nunca volta sozinha pro centro */
+  transition: top 0.1s linear, transform 0.12s ease;
+}
+
+/* área de toque maior que o disco visível (touchscreen) */
+.zoom-slider__knob::before {
+  content: '';
+  position: absolute;
+  inset: -14px;
+}
+
+/* durante o arrasto: acompanha o dedo sem atraso (sem transition de posição)
+   e cresce um pouco */
+.zoom-slider.is-active .zoom-slider__knob {
+  transition: transform 0.12s ease;
+  transform: translate(-50%, -50%) scale(1.2);
 }
 
 /* --- side panels (points/lots list / point-to-point) ----------------------- */
@@ -507,6 +736,62 @@
   background: var(--panel-raised-hi);
 }
 
+/* --- filtro por data (ícone de calendário, "Histórico de rotas") ---------
+   O <input type="date"> real fica por baixo, invisível (opacity:0) mas
+   ocupando o MESMO espaço do ícone — é ele quem recebe o toque/clique
+   (pointer-events normal), o SVG por cima é só decoração
+   (pointer-events:none) pra deixar passar o toque até o input. Tocar em
+   qualquer parte dele abre o calendário nativo do navegador/SO — em
+   Android Chrome isso acontece direto no toque, sem precisar de JS. */
+.history-panel__calendar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  margin-bottom: 10px;
+}
+
+.history-panel__date-input {
+  position: absolute;
+  inset: 0;
+  width: 28px;
+  height: 28px;
+  opacity: 0;
+  cursor: pointer;
+  padding: 0;
+  border: none;
+}
+
+.history-panel__calendar-icon {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.history-panel__filter-tag {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 12px;
+  color: var(--accent-cyan);
+  background: var(--accent-cyan-dim);
+  border-radius: 6px;
+  padding: 3px 4px 3px 8px;
+}
+
+.history-panel__filter-clear {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px;
+}
+
 .history-panel__list {
   flex: 1;
   min-height: 0;
@@ -577,6 +862,110 @@
   color: var(--text-primary);
 }
 
+/* --- usuários (painel "Usuários", só pra quem logou como admin) ----------- */
+.users-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.users-panel__list {
+  gap: 10px;
+}
+
+.users-panel__row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--panel-line);
+  border-radius: 8px;
+  background: var(--panel-base);
+}
+
+.users-panel__row.is-locked {
+  border-color: var(--state-error);
+}
+
+.users-panel__row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.users-panel__name-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.users-panel__lock {
+  flex: none;
+  border: none;
+  background: transparent;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px;
+}
+
+.users-panel__username {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.users-panel__admin-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.users-panel__row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.users-panel__row-actions .points-panel__input {
+  flex: 1;
+}
+
+.users-panel__btn {
+  flex: none;
+  border: 1px solid var(--accent-cyan-dim);
+  background: transparent;
+  color: var(--accent-cyan);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.users-panel__btn:disabled,
+.points-panel__delete:disabled {
+  opacity: 0.4;
+}
+
+.users-panel__new {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--panel-line);
+}
+
+.users-panel__new-title {
+  font-family: 'Arial Black', 'Helvetica Neue', Arial, sans-serif;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0;
+}
+
 /* --- point-to-point bar ---------------------------------------------------- */
 .ptp-bar__hint {
   font-size: 12.5px;
@@ -609,6 +998,48 @@
 .ptp-bar__slot-value {
   font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
   font-size: 14px;
+  word-break: break-word; /* uma sequência longa (A, A2, A3, A4...) quebra em vez de estourar a sidebar */
+}
+
+/* --- "Lotes em sequência" (ver PointToPointBar/MainApp) --------------------
+   Em sequência os slots viram botões: clicar troca qual está recebendo as
+   seleções do mapa. O slot ATIVO ganha borda na cor do seu papel — a mesma
+   cor com que os quadrados selecionados aparecem no mapa (ciano = coleta,
+   âmbar = entrega), pra ligar visualmente "onde estou clicando" com "o que
+   está sendo pintado". */
+.ptp-bar__slot--clickable {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.ptp-bar__slot.is-active--pickup {
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 0 1px var(--accent-cyan);
+}
+
+.ptp-bar__slot.is-active--dropoff {
+  border-color: var(--accent-amber);
+  box-shadow: 0 0 0 1px var(--accent-amber);
+}
+
+.ptp-bar__sequence {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+  cursor: pointer;
+}
+
+.ptp-bar__sequence-warn {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--accent-amber);
+  margin: -4px 0 10px;
 }
 
 .ptp-bar__pallet {

@@ -23,13 +23,15 @@ function normalizeView(raw) {
 // task no robô), mas cada vista guarda sua própria posição/rotação/lote.
 // Nada é copiado automaticamente de uma vista pra outra.
 //
-// occupied (marcação de ocupação) é GLOBAL, não por vista — representa um
-// fato físico do armazém (tem pallet ali ou não agora), não uma calibração
-// visual. É uma lista de nomes, válida nas duas vistas ao mesmo tempo.
+// A marcação de ocupação (occupied) NÃO mora mais aqui — ver
+// hooks/useLiveState.js. Ela virou estado compartilhado ao vivo entre
+// dispositivos (polling + mutação cirúrgica no servidor, ver CONTEXT.md,
+// "Fila de rotas compartilhada"), diferente de pontos/lotes, que continuam
+// só localmente editados (modo desenvolvedor) e salvos em snapshot
+// debounced como sempre.
 export function useCalibration() {
   const [view, setView] = useState('top'); // 'top' | 'iso'
   const [data, setData] = useState({ top: EMPTY_VIEW_DATA, iso: EMPTY_VIEW_DATA });
-  const [occupied, setOccupied] = useState([]); // nomes marcados como ocupados
   const [status, setStatus] = useState('loading'); // loading | idle | saving | error
   const saveTimer = useRef(null);
   const loadedRef = useRef(false);
@@ -47,7 +49,6 @@ export function useCalibration() {
           top: normalizeView(isNewFormat ? loaded.top : loaded),
           iso: normalizeView(isNewFormat ? loaded.iso : null),
         });
-        setOccupied(Array.isArray(loaded && loaded.occupied) ? loaded.occupied : []);
         setStatus('idle');
         loadedRef.current = true;
       })
@@ -64,12 +65,15 @@ export function useCalibration() {
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
       setStatus('saving');
-      saveCalibration({ ...data, occupied })
+      // occupied não é lido/escrito daqui — GET manda o que já está salvo
+      // (server.py preserva o campo), e as mutações de ocupação passam
+      // pelos endpoints cirúrgicos em useLiveState.js, nunca por aqui.
+      saveCalibration(data)
         .then(() => setStatus('idle'))
         .catch(() => setStatus('error'));
     }, 500);
     return () => clearTimeout(saveTimer.current);
-  }, [data, occupied]);
+  }, [data]);
 
   // --- pontos avulsos (sempre na vista ativa) --------------------------------
   const addPoint = useCallback((x, y) => {
@@ -77,7 +81,9 @@ export function useCalibration() {
     setData((prev) => {
       const cur = prev[view];
       const name = 'ponto-' + (cur.points.length + 1);
-      return { ...prev, [view]: { ...cur, points: [...cur.points, { id, name, x, y, rotation: 0 }] } };
+      // namesVisible começa false: o padrão é o nome ESCONDIDO no mapa,
+      // igual aos lotes — liga no olho do PointsPanel quando precisar.
+      return { ...prev, [view]: { ...cur, points: [...cur.points, { id, name, x, y, rotation: 0, namesVisible: false }] } };
     });
     return id;
   }, [view]);
@@ -124,45 +130,10 @@ export function useCalibration() {
     });
   }, [view]);
 
-  // --- ocupação (global, independente de vista) ------------------------------
-  const toggleOccupied = useCallback((name) => {
-    setOccupied((prev) => (prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]));
-  }, []);
-
-  // Versão determinística do toggle, pra marcação automática (Caso 2, ver
-  // CONTEXT.md) — a sondagem de progresso da task chama isso a cada tick
-  // enquanto a condição valer, então precisa ser idempotente (nunca
-  // desmarcar/remarcar em falso se rodar mais de uma vez pro mesmo nome).
-  const setOccupiedState = useCallback((name, isOccupied) => {
-    setOccupied((prev) => {
-      const has = prev.includes(name);
-      if (isOccupied === has) return prev;
-      return isOccupied ? [...prev, name] : prev.filter((n) => n !== name);
-    });
-  }, []);
-
-  // Versão em lote — commit único do gesto de "pintar arrastando" no modo
-  // mark (ver FloorPlanCanvas): todos os nomes tocados durante o arrasto
-  // viram a MESMA ação de uma vez (decidida pelo primeiro quadrado tocado),
-  // um único setState em vez de N chamadas sequenciais.
-  const setOccupiedMany = useCallback((names, isOccupied) => {
-    setOccupied((prev) => {
-      const set = new Set(prev);
-      let changed = false;
-      for (const name of names) {
-        if (isOccupied === set.has(name)) continue;
-        if (isOccupied) set.add(name); else set.delete(name);
-        changed = true;
-      }
-      return changed ? Array.from(set) : prev;
-    });
-  }, []);
-
   return {
     view, setView,
     points: data[view].points, addPoint, updatePoint, removePoint,
     lots: data[view].lots, addLot, updateLot, removeLot,
-    occupied, toggleOccupied, setOccupiedState, setOccupiedMany,
     status,
   };
 }

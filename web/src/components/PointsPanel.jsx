@@ -1,4 +1,4 @@
-export default function PointsPanel({ points, selectedId, onSelect, onRename, onDelete }) {
+export default function PointsPanel({ points, selectedId, onSelect, onRename, onDelete, onToggleNames }) {
   return (
     <div className="points-panel">
       <h2 className="points-panel__title">Pontos avulsos ({points.length})</h2>
@@ -21,6 +21,24 @@ export default function PointsPanel({ points, selectedId, onSelect, onRename, on
               onClick={(e) => e.stopPropagation()}
               aria-label={'Nome do ponto'}
             />
+            {/* Mesmo olho dos lotes (ver LotsPanel) — nome do ponto começa
+                ESCONDIDO no mapa e só aparece se ligarem aqui. */}
+            <button
+              type="button"
+              className={'lots-panel__eye' + (p.namesVisible ? ' is-active' : '')}
+              aria-label={(p.namesVisible ? 'Ocultar' : 'Mostrar') + ' nome do ponto no mapa'}
+              aria-pressed={!!p.namesVisible}
+              title="Mostrar/ocultar nome do ponto no mapa"
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleNames(p.id);
+              }}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M1.5 12S5.5 5 12 5s10.5 7 10.5 7-4 7-10.5 7S1.5 12 1.5 12Z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+            </button>
             <button
               type="button"
               className="points-panel__delete"

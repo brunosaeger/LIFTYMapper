@@ -11,8 +11,21 @@ node_modules/
 # existirem (ver EMPTY_CALIBRATION em server.py).
 calibration.json
 route_log.json
+queue_state.json
+
+# Login — users.json tem hash de senha (nunca texto puro, mas ainda assim
+# não é pra commitar) e session_secret.key é a chave que assina os cookies
+# de sessão (perder ela derruba todo mundo logado, vazar ela permite forjar
+# sessão de qualquer usuário). Ambos gerados sozinhos pelo server.py no
+# primeiro boot se não existirem.
+users.json
+session_secret.key
 
 # Editor / SO
 .vscode/
 .idea/
 .DS_Store
+
+# Claude Code — settings.json (allowlist do projeto) É pra commitar; o
+# .local.json é por-máquina (permissões que cada dev aceitou na sua)
+.claude/settings.local.json

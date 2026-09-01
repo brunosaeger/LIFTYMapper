@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run build)",
+      "Bash(python3 -m py_compile /home/sup/liftyapi/server.py)"
+    ]
+  }
+}
