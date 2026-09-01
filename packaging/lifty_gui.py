@@ -12,12 +12,17 @@ packaging/lifty.spec + .github/workflows/build-exe.yml).
 """
 import json
 import socket
+import sys
 import tkinter as tk
 import webbrowser
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-import server  # o server.py da raiz do repo; PyInstaller empacota junto
+# server.py vive na raiz do repo (um nível acima). No .exe empacotado os
+# dois ficam lado a lado e isso é no-op; rodando `python3 packaging/lifty_gui.py`
+# em dev, garante que o import acha.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import server  # noqa: E402
 
 CONFIG_FILE = server._app_dir() / "lifty_config.json"
 LOCAL_URL = f"http://localhost:{server.LISTEN_PORT}"
