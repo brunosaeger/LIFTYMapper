@@ -1217,13 +1217,24 @@ Mudanças no `server.py`:
 reais nem no robô real): start → responde → stop → porta liberada →
 restart → responde; `_start_queue_thread` idempotente (não duplica
 thread); após stop final só sobra a MainThread; `set_robot_host`
-normaliza certo; CLI (`python3 server.py`) sobe e responde. **Falta**: o
-build de verdade no Actions (Windows) e o teste do `.exe` na mão.
+normaliza certo; CLI (`python3 server.py`) sobe e responde.
+
+**CI falhou na 1ª tentativa (2026-09-01, run de ~48s, exit 1)** — RETOMAR
+AQUI. NÃO é o npm: `npm ci` + `npm run build` reproduzidos no Linux,
+ambos passam (lockfileVersion 3, deps batem, Node 20.20). O erro está na
+etapa seguinte, o **PyInstaller** (`pyinstaller packaging/lifty.spec`) —
+suspeitas, em ordem: (1) sintaxe da spec pra PyInstaller 6.11.1
+(`PYZ(a.pure)` / assinatura do `EXE` onefile / kwargs do `Analysis`);
+(2) `icon='packaging/LIFTY.ico'` resolvido a partir do CWD; (3)
+`datas=[('web/dist','web/dist')]`. Próximo passo: pegar o log da etapa
+vermelha do Actions, OU instalar pyinstaller no Linux e rodar a spec
+(gera ELF inútil, mas reproduz erro de spec/Analysis). O aviso "Node.js
+20 is deprecated" no run é do runtime das *actions*, não do nosso
+`node-version` — ignorar.
 
 **Em aberto pra quando pegar o `.exe` na mão:**
 - `console=True` no spec — decidir quando virar `False`.
-- Se `web/package-lock.json` não estiver commitado, `npm ci` no CI quebra
-  (usar `npm install` como fallback).
+- `web/package-lock.json` está commitado (conferido) — `npm ci` ok.
 - Testar no Windows: firewall, X→barra de tarefas, "Sair", persistência
   do `lifty_config.json`, os 5 json nascendo ao lado do `.exe`.
 
