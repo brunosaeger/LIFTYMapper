@@ -1169,43 +1169,63 @@ ainda NADA implementado):
    (com spec file, bundlando `web/dist` como dado) → artefato/`.exe`
    publicado.
 
-**Ajustes técnicos necessários no `server.py` pra rodar "congelado"**
-(PyInstaller `--onefile` extrai os recursos empacotados pra uma pasta
-temporária em tempo de execução, `sys._MEIPASS`):
-- Os 5 arquivos de dado (`calibration.json`, `route_log.json`,
-  `users.json`, `session_secret.key`, `queue_state.json`) precisam ficar
-  gravados AO LADO DO `.exe` de verdade (`Path(sys.executable).parent`
-  quando congelado), nunca dentro da pasta temporária de extração (que
-  some quando o app fecha). `web/dist` (só leitura) pode continuar vindo
-  de dentro do pacote (`sys._MEIPASS`) sem problema.
-- Precisa de um helper tipo `_app_dir()` que devolve
-  `Path(sys.executable).parent` se `getattr(sys, 'frozen', False)`, senão
-  `Path(__file__).parent` (comportamento atual, dev) — usado em todos os
-  `Path(__file__).parent / "xxx.json"` que hoje existem.
-
 **Fricção esperada, não é bug**: no primeiro uso, o Firewall do Windows
 vai perguntar se libera o app na rede (precisa, pros tablets alcançarem)
 — avisar o usuário disso, não tentar "resolver" programaticamente.
 
-**Decisões tomadas (2026-09-01):**
-- **Fechar o `.exe` DE VERDADE**: a janela vai ter um **botão "Sair"
-  separado** do X. X só minimiza pra barra de tarefas (servidor segue
-  rodando); "Sair" derruba `ThreadingHTTPServer.shutdown()` + a thread da
-  fila e encerra o processo.
-- **Ícone**: `LIFTY.ico` (fornecido pelo usuário, estava em
-  `~/Documents/LIFTY.ico`) — copiar pro repo (ex: `packaging/LIFTY.ico`) e
-  apontar o `--icon` do PyInstaller pra ele.
+### IMPLEMENTADO (2026-09-01) — falta só rodar o build
 
-**Ainda em aberto:**
-- A thread de fundo da fila de rotas (`_start_queue_thread`, ver "Fila de
-  rotas compartilhada") também precisa nascer/morrer junto com o
-  liga/desliga do botão de power, não só o `ThreadingHTTPServer` — hoje
-  ela roda um `while True` com `daemon=True` assumindo o processo inteiro
-  vive/morre junto; com o power button controlando start/stop dentro do
-  MESMO processo longo-vivo do `.exe`, precisa de um jeito de
-  parar/reiniciar essa thread também (não só a HTTP), senão desligar e
-  religar o servidor pelo botão deixaria uma thread de fila órfã rodando
-  ou duplicada.
+Arquivos novos:
+- **`packaging/lifty_gui.py`** — a GUI tkinter (stdlib). `import server`,
+  campo de IP (persiste em `lifty_config.json` ao lado do `.exe` via
+  `server._app_dir()`), botão de power (vermelho `LIGAR` ↔ verde
+  `DESLIGAR`), mostra o IP de LAN pros tablets (truque do socket UDP),
+  abre o navegador em `localhost:8000` ao ligar. **X só minimiza**
+  (`root.protocol("WM_DELETE_WINDOW", root.iconify)`); **botão "Sair"
+  separado** encerra de verdade (`server.stop_server()` + `destroy()`).
+- **`packaging/lifty.spec`** — PyInstaller onefile. Entry
+  `lifty_gui.py`, bundla `web/dist` como `datas`, `icon=packaging/LIFTY.ico`.
+  `console=True` por enquanto (ver prints do server.py no teste) — trocar
+  pra `False` no release.
+- **`packaging/LIFTY.ico`** — ícone (fornecido pelo usuário).
+- **`.github/workflows/build-exe.yml`** — `windows-latest`, dispara na mão
+  (aba Actions) ou por tag `v*`. checkout → node 20 → `npm ci && npm run
+  build` → python 3.12 → `pip install pyinstaller==6.11.1` → `pyinstaller
+  packaging/lifty.spec` → sobe `dist/LIFTY.exe` como artefato
+  `LIFTY-windows`.
+
+Mudanças no `server.py`:
+- **`_app_dir()`** (pasta do `.exe` quando `sys.frozen`, senão
+  `Path(__file__).parent`) — usado nos 5 arquivos de dado
+  (`calibration`/`route_log`/`queue_state`/`users`/`session_secret`).
+  **`_bundle_dir()`** (`sys._MEIPASS` quando frozen) — usado só no
+  `STATIC_DIR` (`web/dist`, só leitura).
+- **`set_robot_host(host)`** — troca `ROBOT_HOST` em runtime, normaliza
+  (`192.168.1.5` → `http://192.168.1.5/`). `_robot_call`/`_proxy` leem o
+  global fresco a cada chamada, então pega na hora.
+- **`start_server()` / `stop_server()` / `is_running()`** — ciclo de vida
+  in-process pro botão de power. `serve_forever` numa thread daemon;
+  `stop_server` faz `shutdown()` + `server_close()` + para a thread da
+  fila. O `__main__` (CLI, `python3 server.py`) usa os MESMOS —
+  `start_server()` e fica em `while is_running(): sleep(1)`.
+- **Thread da fila parável**: `_queue_stop` (Event) + `_queue_thread`;
+  o loop usa `_queue_stop.wait(interval)` no lugar de `time.sleep`,
+  `_start_queue_thread` é idempotente, `_stop_queue_thread` faz
+  `join(timeout=12)`. Religar pelo botão não deixa thread órfã/duplicada.
+
+**Testado no Linux** (isolado, com stub do robô, sem tocar nos arquivos
+reais nem no robô real): start → responde → stop → porta liberada →
+restart → responde; `_start_queue_thread` idempotente (não duplica
+thread); após stop final só sobra a MainThread; `set_robot_host`
+normaliza certo; CLI (`python3 server.py`) sobe e responde. **Falta**: o
+build de verdade no Actions (Windows) e o teste do `.exe` na mão.
+
+**Em aberto pra quando pegar o `.exe` na mão:**
+- `console=True` no spec — decidir quando virar `False`.
+- Se `web/package-lock.json` não estiver commitado, `npm ci` no CI quebra
+  (usar `npm install` como fallback).
+- Testar no Windows: firewall, X→barra de tarefas, "Sair", persistência
+  do `lifty_config.json`, os 5 json nascendo ao lado do `.exe`.
 
 ### Rede: hotspot de celular como infraestrutura de teste
 

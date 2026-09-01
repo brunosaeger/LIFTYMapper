@@ -1,0 +1,49 @@
+name: Build LIFTY.exe
+
+# PyInstaller não faz cross-compile Linux->Windows, então o .exe é gerado
+# aqui num runner Windows de verdade. Dispara na mão (aba Actions ->
+# "Build LIFTY.exe" -> "Run workflow") ou empurrando uma tag v*.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build do front (web/dist)
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instala PyInstaller
+        run: pip install "pyinstaller==6.11.1"
+
+      - name: Gera o .exe
+        run: pyinstaller packaging/lifty.spec
+
+      - name: Publica o artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: LIFTY-windows
+          path: dist/LIFTY.exe
+          if-no-files-found: error

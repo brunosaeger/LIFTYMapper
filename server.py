@@ -41,6 +41,7 @@ import http.cookies
 import http.server
 import json
 import secrets
+import sys
 import threading
 import time
 import urllib.error
@@ -48,6 +49,28 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+
+
+# --- onde ficam os arquivos ------------------------------------------------
+# Quando empacotado com PyInstaller (--onefile), os recursos embutidos são
+# extraídos pra uma pasta TEMPORÁRIA (sys._MEIPASS) que some quando o app
+# fecha. Então:
+#   _bundle_dir() -> recursos SÓ-LEITURA que vêm dentro do pacote (web/dist)
+#   _app_dir()    -> onde LER/ESCREVER dado que precisa persistir (os 5
+#                    arquivos json/key) — a pasta do próprio .exe, ao lado
+#                    dele, NUNCA a temporária.
+# Em desenvolvimento (rodando `python3 server.py`), os dois são a pasta
+# deste script — comportamento de sempre.
+def _bundle_dir():
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS)  # noqa: SLF001 — API do PyInstaller
+    return Path(__file__).parent
+
+
+def _app_dir():
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).parent
 
 # ---------------------------------------------------------------------------
 # CONFIGURAÇÃO — confirme o IP do robô antes da demo (ver seção 1.1 do PDF /
@@ -57,6 +80,22 @@ ROBOT_HOST = "http://192.168.43.74/"
 LISTEN_PORT = 8000
 # ---------------------------------------------------------------------------
 
+
+def set_robot_host(host):
+    """Troca o IP/host do robô em tempo de execução (a GUI do .exe chama
+    isso com o que o usuário digitou). Aceita `192.168.1.5`,
+    `http://192.168.1.5` ou `http://192.168.1.5/` — normaliza pra forma com
+    esquema e barra final, que é o que _robot_call/_proxy esperam."""
+    global ROBOT_HOST
+    host = (host or "").strip()
+    if not host:
+        return
+    if "://" not in host:
+        host = "http://" + host
+    if not host.endswith("/"):
+        host += "/"
+    ROBOT_HOST = host
+
 API_PREFIX = "/api/reeman-dispatch-service"
 CALIBRATION_PATH = "/api/calibration"
 # Sempre absoluto, nunca relativo ao diretório de trabalho do processo —
@@ -65,8 +104,8 @@ CALIBRATION_PATH = "/api/calibration"
 # CWD diferente da raiz do projeto (ex: de dentro de web/) com STATIC_DIR
 # relativo fazia ele procurar em web/web/dist e servir 404 pra tudo,
 # inclusive a própria index.html — bug real, já aconteceu.
-STATIC_DIR = str(Path(__file__).parent / "web" / "dist")
-CALIBRATION_FILE = Path(__file__).parent / "calibration.json"
+STATIC_DIR = str(_bundle_dir() / "web" / "dist")
+CALIBRATION_FILE = _app_dir() / "calibration.json"
 EMPTY_CALIBRATION = b'{"top":{"points":[],"lots":[]},"iso":{"points":[],"lots":[]},"occupied":[]}'
 CALIBRATION_LOCK = threading.Lock()  # protege leitura+escrita de calibration.json (full-snapshot E as mutações cirúrgicas de occupied abaixo)
 
@@ -78,7 +117,7 @@ CALIBRATION_LOCK = threading.Lock()  # protege leitura+escrita de calibration.js
 # React só manda pickup/dropoff/taskName; quem carimba requestedAt/
 # completedAt é sempre este servidor.
 ROUTE_LOG_PATH = "/api/route-log"
-ROUTE_LOG_FILE = Path(__file__).parent / "route_log.json"
+ROUTE_LOG_FILE = _app_dir() / "route_log.json"
 ROUTE_LOG_MAX_ENTRIES = 500  # roda 24/7 num armazém, sem manutenção — evita o arquivo crescer pra sempre
 ROUTE_LOG_LOCK = threading.Lock()  # ThreadingHTTPServer atende requisições em paralelo; protege o ciclo ler-modificar-escrever do arquivo
 
@@ -154,7 +193,7 @@ def log_route_completed(entry_id, status):
 # CALIBRATION_LOCK ao mesmo tempo (só a thread de fundo, ao marcar ocupação
 # como parte de avançar a fila) SEMPRE pega QUEUE_LOCK primeiro,
 # CALIBRATION_LOCK depois — nunca a ordem inversa em lugar nenhum do código.
-QUEUE_STATE_FILE = Path(__file__).parent / "queue_state.json"
+QUEUE_STATE_FILE = _app_dir() / "queue_state.json"
 QUEUE_LOCK = threading.Lock()
 QUEUE_POLL_INTERVAL_SECONDS = 4  # mesmo intervalo que o front usava pra sondar (POLL_INTERVAL_MS)
 # Parada de emergência: quando ativa, a thread de fundo sonda MAIS RÁPIDO pra
@@ -691,17 +730,81 @@ def _reconcile_queue_state_on_startup():
             print("Estado da fila reconciliado com o robô ao subir (a rota salva já tinha terminado/sido cancelada enquanto o servidor estava fora do ar).")
 
 
+# Thread de fundo da fila — parável, pro botão de power da GUI do .exe:
+# desligar o servidor precisa MATAR essa thread também, senão religar
+# deixaria duas rodando (sondagem/promoção duplicada). `_queue_stop` é um
+# Event; `wait(interval)` acorda cedo quando ele é setado, em vez de
+# `time.sleep` que ignoraria o pedido de parada por até QUEUE_POLL segundos.
+_queue_thread = None
+_queue_stop = threading.Event()
+
+
 def _start_queue_thread():
+    global _queue_thread
+    if _queue_thread is not None and _queue_thread.is_alive():
+        return  # já rodando — idempotente
+    _queue_stop.clear()
+
     def _loop():
         interval = QUEUE_POLL_INTERVAL_SECONDS
-        while True:
-            time.sleep(interval)
+        while not _queue_stop.wait(interval):
             try:
                 interval = _queue_tick() or QUEUE_POLL_INTERVAL_SECONDS
             except Exception as err:
                 print("Erro inesperado na sondagem da fila: %s" % err)
                 interval = QUEUE_POLL_INTERVAL_SECONDS
-    threading.Thread(target=_loop, daemon=True).start()
+
+    _queue_thread = threading.Thread(target=_loop, daemon=True)
+    _queue_thread.start()
+
+
+def _stop_queue_thread():
+    global _queue_thread
+    _queue_stop.set()
+    if _queue_thread is not None:
+        # join generoso: um tick pode estar no meio de uma chamada ao robô
+        # (timeout 10s) segurando o QUEUE_LOCK.
+        _queue_thread.join(timeout=12)
+        if _queue_thread.is_alive():
+            print("Aviso: a thread da fila não encerrou a tempo (chamada ao robô presa?) — segue como daemon.")
+        _queue_thread = None
+
+
+# --- ciclo de vida do servidor (pro botão de power da GUI) ----------------
+# O modo CLI (python3 server.py) e a GUI do .exe usam o MESMO start_server/
+# stop_server. serve_forever roda numa thread pra start_server não bloquear
+# (a GUI precisa seguir respondendo); o CLI só fica dormindo enquanto
+# is_running().
+_httpd = None
+
+
+def start_server(robot_host=None, port=None):
+    global _httpd
+    if _httpd is not None:
+        return  # já no ar
+    if robot_host:
+        set_robot_host(robot_host)
+    listen_port = port or LISTEN_PORT
+    _bootstrap_users_if_missing()
+    _reconcile_queue_state_on_startup()
+    _start_queue_thread()
+    handler = functools.partial(Handler, directory=STATIC_DIR)
+    _httpd = http.server.ThreadingHTTPServer(("0.0.0.0", listen_port), handler)
+    threading.Thread(target=_httpd.serve_forever, daemon=True).start()
+
+
+def stop_server():
+    global _httpd
+    if _httpd is None:
+        return
+    srv, _httpd = _httpd, None
+    srv.shutdown()
+    srv.server_close()
+    _stop_queue_thread()
+
+
+def is_running():
+    return _httpd is not None
 
 
 # Login (múltiplos operadores, cada um via tablet — ver CONTEXT.md, "Sistema
@@ -715,9 +818,9 @@ def _start_queue_thread():
 # (ver CONTEXT.md) — a senha trafega em claro dentro dessa rede, troca
 # consciente pra esse contexto, mas o cookie de sessão pelo menos não pode
 # ser forjado sem conhecer a chave secreta guardada só no servidor.
-USERS_FILE = Path(__file__).parent / "users.json"
+USERS_FILE = _app_dir() / "users.json"
 USERS_LOCK = threading.Lock()
-SESSION_SECRET_FILE = Path(__file__).parent / "session_secret.key"
+SESSION_SECRET_FILE = _app_dir() / "session_secret.key"
 SESSION_COOKIE_NAME = "lifty_session"
 SESSION_MAX_AGE_SECONDS = 30 * 24 * 3600  # 30 dias — tablet de uso diário, não vale reforçar login toda hora
 PBKDF2_ITERATIONS = 200_000
@@ -1519,18 +1622,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     if not (Path(STATIC_DIR) / "index.html").exists():
         print(f"AVISO: {STATIC_DIR}/index.html não encontrado — rode 'npm run build' dentro de web/ antes.")
-    _bootstrap_users_if_missing()
-    _reconcile_queue_state_on_startup()
-    _start_queue_thread()
-    handler = functools.partial(Handler, directory=STATIC_DIR)
-    with http.server.ThreadingHTTPServer(("0.0.0.0", LISTEN_PORT), handler) as httpd:
-        print(f"Painel disponivel em      http://localhost:{LISTEN_PORT}")
-        print(f"Proxy encaminhando {API_PREFIX} -> {ROBOT_HOST}{API_PREFIX}")
-        print(f"Calibração persistida em  {CALIBRATION_FILE}")
-        print(f"Histórico de rotas em     {ROUTE_LOG_FILE}")
-        print(f"Usuários persistidos em   {USERS_FILE}")
-        print(f"Fila de rotas em          {QUEUE_STATE_FILE}")
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            print("\nEncerrado.")
+    start_server()
+    print(f"Painel disponivel em      http://localhost:{LISTEN_PORT}")
+    print(f"Proxy encaminhando {API_PREFIX} -> {ROBOT_HOST}{API_PREFIX}")
+    print(f"Calibração persistida em  {CALIBRATION_FILE}")
+    print(f"Histórico de rotas em     {ROUTE_LOG_FILE}")
+    print(f"Usuários persistidos em   {USERS_FILE}")
+    print(f"Fila de rotas em          {QUEUE_STATE_FILE}")
+    try:
+        while is_running():
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nEncerrando...")
+        stop_server()
