@@ -2,6 +2,11 @@
 __pycache__/
 *.pyc
 
+# PyInstaller (saída do build do .exe — gerada pelo CI, ver packaging/)
+/build/
+/dist/
+*.spec.bak
+
 # Node (web/ já tem seu próprio .gitignore com node_modules/dist, isso é
 # reforço caso algo rode a partir da raiz)
 node_modules/

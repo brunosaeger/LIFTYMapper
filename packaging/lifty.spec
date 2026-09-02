@@ -1,25 +1,29 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller spec — gera LIFTY.exe (onefile) a partir da GUI tkinter.
 #
-# Rodar SEMPRE da raiz do repo (o web/dist já tem que existir, buildado):
-#     cd web && npm run build && cd ..
+# Rodar de qualquer lugar (o CI faz `pyinstaller packaging/lifty.spec`):
+#     cd web && npm run build && cd ..     # gera web/dist ANTES
 #     pyinstaller packaging/lifty.spec
 #
+# PyInstaller resolve caminhos relativos à pasta DO SPEC (packaging/), não ao
+# CWD — por isso tudo aqui é absoluto, montado a partir de SPECPATH (que o
+# PyInstaller injeta = pasta deste .spec) e subindo um nível pra raiz do repo.
+#
 # O que entra no .exe:
-#   - packaging/lifty_gui.py  (entrypoint) + server.py (import)
-#   - web/dist/**             (o app React buildado, servido estático)
-#   - LIFTY.ico               (ícone do executável)
+#   - packaging/lifty_gui.py (entrypoint) + server.py (import, na raiz)
+#   - web/dist/**            (o app React buildado, servido estático)
+#   - LIFTY.ico              (ícone do executável)
 # Os 5 arquivos de dado (calibration/route_log/queue_state/users/session_secret)
-# NÃO entram — server.py os cria/lê ao lado do .exe em runtime (ver _app_dir).
+# NÃO entram — server.py os cria/lê ao lado do .exe em runtime (_app_dir).
 import os
 
-ROOT = os.path.abspath(os.getcwd())
+ROOT = os.path.abspath(os.path.join(SPECPATH, os.pardir))
 
 a = Analysis(
-    ['packaging/lifty_gui.py'],
-    pathex=[ROOT],
+    [os.path.join(ROOT, 'packaging', 'lifty_gui.py')],
+    pathex=[ROOT],  # pra achar server.py na raiz
     binaries=[],
-    datas=[('web/dist', 'web/dist')],
+    datas=[(os.path.join(ROOT, 'web', 'dist'), 'web/dist')],
     hiddenimports=['server'],
     hookspath=[],
     hooksconfig={},
@@ -45,9 +49,8 @@ exe = EXE(
     # console=True mostra os prints do server.py (reconciliação, erros da
     # fila, senha do admin no 1º boot) numa janelinha preta. Deixe assim
     # enquanto está testando; troque pra False quando quiser o "plug and
-    # play" limpo (aí a senha do 1º admin só sai no messagebox / precisa
-    # olhar users.json).
+    # play" limpo.
     console=True,
     disable_windowed_traceback=False,
-    icon='packaging/LIFTY.ico',
+    icon=os.path.join(ROOT, 'packaging', 'LIFTY.ico'),
 )
