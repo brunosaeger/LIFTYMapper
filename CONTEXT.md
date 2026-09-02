@@ -1188,6 +1188,14 @@ Arquivos novos:
   `console=True` por enquanto (ver prints do server.py no teste) — trocar
   pra `False` no release.
 - **`packaging/LIFTY.ico`** — ícone (fornecido pelo usuário).
+- **`packaging/calibration.seed.json`** — o mapa JÁ calibrado (28 lotes +
+  11 pontos na `top`, 28 lotes na `iso`, `occupied` vazio) embutido como
+  "de fábrica". Num install NOVO (sem `calibration.json` ao lado do
+  `.exe`), `_seed_calibration_if_missing` em `server.py` copia ele pro
+  lugar. Install que já tem mapa **nunca** é sobrescrito — trocar o `.exe`
+  não mexe na calibração de quem já usa, e edições persistem local. Pra
+  atualizar o de fábrica: `cp calibration.json packaging/calibration.seed.json`
+  e rebuildar.
 - **`.github/workflows/build-exe.yml`** — `windows-latest`, dispara na mão
   (aba Actions) ou por tag `v*`. checkout → node 20 → `npm ci && npm run
   build` → python 3.12 → `pip install pyinstaller==6.11.1` → `pyinstaller
@@ -1198,8 +1206,11 @@ Mudanças no `server.py`:
 - **`_app_dir()`** (pasta do `.exe` quando `sys.frozen`, senão
   `Path(__file__).parent`) — usado nos 5 arquivos de dado
   (`calibration`/`route_log`/`queue_state`/`users`/`session_secret`).
-  **`_bundle_dir()`** (`sys._MEIPASS` quando frozen) — usado só no
-  `STATIC_DIR` (`web/dist`, só leitura).
+  **`_bundle_dir()`** (`sys._MEIPASS` quando frozen) — usado no
+  `STATIC_DIR` (`web/dist`) e no `calibration.seed.json` (só leitura).
+- **`_seed_calibration_if_missing()`** — pré-carrega o mapa de fábrica num
+  install novo (ver `packaging/calibration.seed.json` acima). Roda no
+  `start_server()`, junto do `_bootstrap_users_if_missing()`.
 - **`set_robot_host(host)`** — troca `ROBOT_HOST` em runtime, normaliza
   (`192.168.1.5` → `http://192.168.1.5/`). `_robot_call`/`_proxy` leem o
   global fresco a cada chamada, então pega na hora.

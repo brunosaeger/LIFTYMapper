@@ -23,7 +23,13 @@ a = Analysis(
     [os.path.join(ROOT, 'packaging', 'lifty_gui.py')],
     pathex=[ROOT],  # pra achar server.py na raiz
     binaries=[],
-    datas=[(os.path.join(ROOT, 'web', 'dist'), 'web/dist')],
+    datas=[
+        (os.path.join(ROOT, 'web', 'dist'), 'web/dist'),
+        # mapa "de fábrica" — server.py copia pro lado do .exe num install
+        # novo (_seed_calibration_if_missing); install que já tem mapa não é
+        # tocado.
+        (os.path.join(ROOT, 'packaging', 'calibration.seed.json'), '.'),
+    ],
     hiddenimports=['server'],
     hookspath=[],
     hooksconfig={},

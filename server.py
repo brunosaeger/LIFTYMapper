@@ -380,6 +380,36 @@ def _write_calibration(data):
     CALIBRATION_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
 
+def _seed_file():
+    """calibration.json "de fábrica" embutida no pacote — o mapa que já foi
+    calibrado (lotes/pontos: mesmo nome, cor, posição). Usada só pra
+    pré-popular um install NOVO (ver _seed_calibration_if_missing)."""
+    for c in (_bundle_dir() / "calibration.seed.json",              # .exe congelado
+              _bundle_dir() / "packaging" / "calibration.seed.json"):  # dev, rodando da raiz
+        if c.exists():
+            return c
+    return None
+
+
+def _seed_calibration_if_missing():
+    """Num install novo (não existe calibration.json ao lado do .exe), copia
+    a versão de fábrica embutida. Install que JÁ tem calibração nunca é
+    tocado — então trocar o .exe por um novo não mexe no mapa de quem já
+    calibrou, e edições continuam persistindo local. Pra atualizar o mapa
+    de fábrica: copiar calibration.json -> packaging/calibration.seed.json
+    e rebuildar."""
+    if CALIBRATION_FILE.exists():
+        return
+    seed = _seed_file()
+    if seed is None:
+        return
+    try:
+        CALIBRATION_FILE.write_bytes(seed.read_bytes())
+        print(f"Mapa pré-carregado do exemplo de fábrica -> {CALIBRATION_FILE}")
+    except OSError as err:
+        print(f"Aviso: não deu pra pré-carregar o mapa de fábrica: {err}")
+
+
 # --- Caso 2 (marcação automática de ocupação) — mutação cirúrgica ----------
 # Substituem o caminho antigo (snapshot completo de calibration.json vindo
 # do cliente) especificamente pra ocupação — full-snapshot sem lock era uma
@@ -785,6 +815,7 @@ def start_server(robot_host=None, port=None):
     if robot_host:
         set_robot_host(robot_host)
     listen_port = port or LISTEN_PORT
+    _seed_calibration_if_missing()
     _bootstrap_users_if_missing()
     _reconcile_queue_state_on_startup()
     _start_queue_thread()
