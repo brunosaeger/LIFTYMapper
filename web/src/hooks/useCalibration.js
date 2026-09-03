@@ -1,8 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { loadCalibration, saveCalibration } from '../api/lifty';
+import { loadCalibration, saveCalibration, savePalletHeights as savePalletHeightsApi } from '../api/lifty';
 import { generateId } from '../utils';
 
 const EMPTY_VIEW_DATA = { points: [], lots: [] };
+// "Altura de pallets" (sub-seção do editor). blueBase = andar de baixo do
+// pallet azul (o valor que o azul já recebia, 8); blueTop = 2º andar do
+// "pallet de cima" (sem padrão de fábrica — persiste o último salvo).
+// Madeira não empilha, não usa nada disso.
+const DEFAULT_PALLET_HEIGHTS = { blueBase: 8, blueTop: 8 };
+
+function normalizePalletHeights(raw) {
+  const r = raw && typeof raw === 'object' ? raw : {};
+  const num = (v, d) => (Number.isFinite(Number(v)) ? Math.max(0, Math.round(Number(v))) : d);
+  return {
+    blueBase: num(r.blueBase, DEFAULT_PALLET_HEIGHTS.blueBase),
+    blueTop: num(r.blueTop, DEFAULT_PALLET_HEIGHTS.blueTop),
+  };
+}
 
 function normalizeView(raw) {
   if (raw && Array.isArray(raw.points) && Array.isArray(raw.lots)) {
@@ -32,6 +46,7 @@ function normalizeView(raw) {
 export function useCalibration() {
   const [view, setView] = useState('top'); // 'top' | 'iso'
   const [data, setData] = useState({ top: EMPTY_VIEW_DATA, iso: EMPTY_VIEW_DATA });
+  const [palletHeights, setPalletHeights] = useState(DEFAULT_PALLET_HEIGHTS);
   const [status, setStatus] = useState('loading'); // loading | idle | saving | error
   const saveTimer = useRef(null);
   const loadedRef = useRef(false);
@@ -49,6 +64,7 @@ export function useCalibration() {
           top: normalizeView(isNewFormat ? loaded.top : loaded),
           iso: normalizeView(isNewFormat ? loaded.iso : null),
         });
+        setPalletHeights(normalizePalletHeights(loaded && loaded.palletHeights));
         setStatus('idle');
         loadedRef.current = true;
       })
@@ -130,10 +146,26 @@ export function useCalibration() {
     });
   }, [view]);
 
+  // Altura de pallets: mutação cirúrgica no servidor (não passa pelo save
+  // debounced de pontos/lotes). Otimista + reconcilia com o que o servidor
+  // devolve; em erro, volta pro valor anterior.
+  const savePalletHeights = useCallback(async (next) => {
+    const optimistic = normalizePalletHeights({ ...palletHeights, ...next });
+    setPalletHeights(optimistic);
+    try {
+      const applied = await savePalletHeightsApi(next);
+      setPalletHeights(normalizePalletHeights(applied));
+    } catch (err) {
+      setPalletHeights(palletHeights); // rollback
+      throw err;
+    }
+  }, [palletHeights]);
+
   return {
     view, setView,
     points: data[view].points, addPoint, updatePoint, removePoint,
     lots: data[view].lots, addLot, updateLot, removeLot,
+    palletHeights, savePalletHeights,
     status,
   };
 }

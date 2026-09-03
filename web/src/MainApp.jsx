@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import Toolbar from './components/Toolbar';
 import PointsPanel from './components/PointsPanel';
 import LotsPanel from './components/LotsPanel';
+import PalletHeightsPanel from './components/PalletHeightsPanel';
 import PointToPointBar from './components/PointToPointBar';
 import RouteQueue from './components/RouteQueue';
 import OccupancyPanel from './components/OccupancyPanel';
@@ -49,6 +50,7 @@ export default function MainApp({ user, onLogout }) {
     view, setView,
     points, addPoint, updatePoint, removePoint,
     lots, addLot, updateLot, removeLot,
+    palletHeights, savePalletHeights,
     status: saveStatus,
   } = useCalibration();
   // Estado ao vivo compartilhado entre dispositivos (ver CONTEXT.md, "Fila
@@ -127,6 +129,10 @@ export default function MainApp({ user, onLogout }) {
   // agora", independente de qual origem/destino está selecionado no
   // momento.
   const [palletType, setPalletType] = useState('blue'); // 'wood' | 'blue'
+  // "Pallet de cima": 2º andar do pallet azul de dois níveis (layer 3,
+  // altura configurável no editor). Só faz sentido com azul. Também NÃO é
+  // resetado por resetSelection — é preferência de sessão, igual palletType.
+  const [palletTop, setPalletTop] = useState(false);
   const [sending, setSending] = useState(false);
 
   function resetSelection() {
@@ -483,7 +489,9 @@ export default function MainApp({ user, onLogout }) {
       // fosse enviada uma a uma, porque no instante do envio a origem
       // anterior ainda está ocupada — o robô nem começou). Ver
       // /api/queue/enqueue-batch em server.py.
-      const { slot } = await enqueueRoutes({ pairs, palletType });
+      // palletTop só vale pra azul; o servidor ignora pra madeira, mas
+      // manda limpo mesmo assim.
+      const { slot } = await enqueueRoutes({ pairs, palletType, palletTop: palletType === 'blue' && palletTop });
       const label = pairs.length > 1
         ? pairs.length + ' rotas enviadas em sequência: ' + pairs.map((p) => p.pickup + '→' + p.dropoff).join(', ')
         : TOAST_BY_SLOT[slot] + pairs[0].pickup + ' → ' + pairs[0].dropoff;
@@ -603,6 +611,7 @@ export default function MainApp({ user, onLogout }) {
 
         {mode === 'edit' && (
           <aside className="sidebar">
+            <PalletHeightsPanel heights={palletHeights} onSave={savePalletHeights} />
             <PointsPanel
               points={points}
               selectedId={selectedId}
@@ -633,6 +642,8 @@ export default function MainApp({ user, onLogout }) {
               willQueue={!!currentRoute}
               palletType={palletType}
               onPalletTypeChange={setPalletType}
+              palletTop={palletTop}
+              onPalletTopChange={setPalletTop}
               sequenceMode={sequenceMode}
               onToggleSequenceMode={handleToggleSequenceMode}
               activeSlot={activeSlot}

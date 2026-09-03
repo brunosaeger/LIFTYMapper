@@ -8,7 +8,7 @@ import blueTexture from '../assets/pallet-blue.png';
 // feature). Azul vem selecionado por padrão porque é o mais comum na planta.
 export default function PointToPointBar({
   pickupNames, dropoffNames, onClear, onSend, sending, willQueue,
-  palletType, onPalletTypeChange,
+  palletType, onPalletTypeChange, palletTop, onPalletTopChange,
   sequenceMode, onToggleSequenceMode, activeSlot, onActiveSlotChange,
 }) {
   const countsMatch = pickupNames.length === dropoffNames.length;
@@ -89,6 +89,18 @@ export default function PointToPointBar({
             <span className="ptp-bar__pallet-label">Azul</span>
           </button>
         </div>
+        {/* Só pro azul: o pallet de dois níveis. Marcado = pega o 2º andar
+            (layer 3, altura configurada no editor). Madeira não empilha. */}
+        {palletType === 'blue' && (
+          <label className="ptp-bar__pallet-top">
+            <input
+              type="checkbox"
+              checked={!!palletTop}
+              onChange={(e) => onPalletTopChange(e.target.checked)}
+            />
+            Pallet de cima
+          </label>
+        )}
       </div>
 
       <div className="ptp-bar__actions">

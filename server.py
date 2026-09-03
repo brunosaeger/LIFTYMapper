@@ -106,7 +106,7 @@ CALIBRATION_PATH = "/api/calibration"
 # inclusive a própria index.html — bug real, já aconteceu.
 STATIC_DIR = str(_bundle_dir() / "web" / "dist")
 CALIBRATION_FILE = _app_dir() / "calibration.json"
-EMPTY_CALIBRATION = b'{"top":{"points":[],"lots":[]},"iso":{"points":[],"lots":[]},"occupied":[]}'
+EMPTY_CALIBRATION = b'{"top":{"points":[],"lots":[]},"iso":{"points":[],"lots":[]},"occupied":[],"palletHeights":{"blueBase":8,"blueTop":8}}'
 CALIBRATION_LOCK = threading.Lock()  # protege leitura+escrita de calibration.json (full-snapshot E as mutações cirúrgicas de occupied abaixo)
 
 # Histórico de rotas (modo desenvolvedor, painel "Histórico" no app React) —
@@ -208,6 +208,7 @@ QUEUE_REMOVE_QUEUED_PATH = "/api/queue/remove-queued"
 QUEUE_EMERGENCY_PATH = "/api/queue/emergency"
 OCCUPIED_SET_PATH = "/api/occupied/set"
 OCCUPIED_SET_MANY_PATH = "/api/occupied/set-many"
+PALLET_HEIGHTS_PATH = "/api/pallet-heights"
 
 # --- cliente do dispatch service do robô (porta de src/api/lifty.js) ------
 # Antes, essas chamadas viviam no navegador (lifty.js) e passavam pelo
@@ -219,9 +220,46 @@ ROBOT_TARGET_MAP = "eecc4a9068e11bd9086538383a38c67d"
 ROBOT_SUPPORT_TYPES = ["犀牛2.0"]
 # Ver CONTEXT.md, "Diferenciação de pallets": o campo height que fica no
 # topo da ação PICKUP NÃO é o que a plataforma usa pra alinhar o pallet —
-# fica sempre 0; o valor de verdade mora em params.PALLET_LAYER.
-PICKUP_PALLET_LAYER = {"wood": None, "blue": {"height": 8, "layer": 2}}
-PALLET_NAME_SUFFIX = {"wood": "", "blue": "MT"}
+# fica sempre 0; o valor de verdade mora em params.PALLET_LAYER
+# ({height, layer}).
+#
+# Madeira: sem params, height 0 (não empilha — inalterado).
+# Azul, andar de baixo: layer 2, altura = palletHeights.blueBase (config,
+#   default 8) — "Altura do pallet azul padrão" no editor.
+# Azul, "Pallet de cima" (checkbox no Ponto a Ponto): layer 3, altura =
+#   palletHeights.blueTop (config, sem padrão de fábrica fixo — persiste o
+#   último valor que o admin salvou). O 2º andar do pallet azul de 2 níveis.
+PALLET_BASE_HEIGHT_DEFAULT = 8
+PALLET_BASE_LAYER = 2
+PALLET_TOP_LAYER = 3
+
+
+def _coerce_height(value, fallback):
+    try:
+        h = int(round(float(value)))
+    except (TypeError, ValueError):
+        return fallback
+    return max(0, h)
+
+
+def _pallet_heights(cal):
+    """Sempre devolve as duas alturas com valor válido, mesmo se o
+    calibration.json for antigo (sem a chave) ou tiver campo faltando."""
+    ph = cal.get("palletHeights") if isinstance(cal, dict) else None
+    ph = ph if isinstance(ph, dict) else {}
+    return {
+        "blueBase": _coerce_height(ph.get("blueBase"), PALLET_BASE_HEIGHT_DEFAULT),
+        "blueTop": _coerce_height(ph.get("blueTop"), PALLET_BASE_HEIGHT_DEFAULT),
+    }
+
+
+def _pallet_pickup_params(pallet_type, pallet_top, heights):
+    if pallet_type != "blue":
+        return None  # madeira: params null, height 0 — como sempre foi
+    h = heights or {}
+    if pallet_top:
+        return {"PALLET_LAYER": {"height": _coerce_height(h.get("blueTop"), PALLET_BASE_HEIGHT_DEFAULT), "layer": PALLET_TOP_LAYER}}
+    return {"PALLET_LAYER": {"height": _coerce_height(h.get("blueBase"), PALLET_BASE_HEIGHT_DEFAULT), "layer": PALLET_BASE_LAYER}}
 
 
 class RobotError(Exception):
@@ -241,8 +279,21 @@ def _robot_call(method, path, body=None):
     return parsed.get("data")
 
 
-def robot_route_task_name(pickup, dropoff, pallet_type):
-    return pickup + "to" + dropoff + PALLET_NAME_SUFFIX.get(pallet_type, "")
+# O nome do template CODIFICA o "recipe" da rota (ver CONTEXT.md): rotas com
+# params de PICKUP diferentes precisam de templates diferentes, senão
+# reaproveitar o nome rodaria o pallet com a altura errada. Como a altura
+# do azul virou configurável, ela entra no nome também.
+#   madeira:        A1toB2
+#   azul, baixo:    A1toB2MT<h>        (ex A1toB2MT8)
+#   azul, de cima:  A1toB2MT<h>C       (ex A1toB2MT12C)  — "C" de cima, layer 3
+def robot_route_task_name(pickup, dropoff, pallet_type, pallet_top=False, heights=None):
+    base = pickup + "to" + dropoff
+    if pallet_type != "blue":
+        return base
+    h = heights or {}
+    if pallet_top:
+        return base + "MT" + str(_coerce_height(h.get("blueTop"), PALLET_BASE_HEIGHT_DEFAULT)) + "C"
+    return base + "MT" + str(_coerce_height(h.get("blueBase"), PALLET_BASE_HEIGHT_DEFAULT))
 
 
 def robot_find_task_template_id(name):
@@ -275,16 +326,16 @@ def robot_run_task(template_id):
 # (o dispatch rejeita nome duplicado) — mesmo raciocínio de
 # createAndRunRoute em lifty.js. Devolve o taskName (usado depois pra sondar
 # o registro de execução mais recente).
-def robot_create_and_run_route(pickup, dropoff, pallet_type):
-    name = robot_route_task_name(pickup, dropoff, pallet_type)
+def robot_create_and_run_route(pickup, dropoff, pallet_type, pallet_top=False, heights=None):
+    name = robot_route_task_name(pickup, dropoff, pallet_type, pallet_top, heights)
     template_id = robot_find_task_template_id(name)
     if not template_id:
-        pallet_layer = PICKUP_PALLET_LAYER.get(pallet_type)
+        pickup_params = _pallet_pickup_params(pallet_type, pallet_top, heights)
         task_action_list = [
             {
                 "targetMap": ROBOT_TARGET_MAP, "targetArea": "", "targetPoint": pickup,
                 "height": 0, "action": "PICKUP", "groupId": 1, "serialNumber": 1,
-                "params": {"PALLET_LAYER": pallet_layer} if pallet_layer else None,
+                "params": pickup_params,
             },
             {
                 "targetMap": ROBOT_TARGET_MAP, "targetArea": "", "targetPoint": dropoff,
@@ -578,7 +629,10 @@ def _fire_route(route, as_pending):
             charge_task_id = robot_find_active_charge_task_id()
         except Exception:
             charge_task_id = None
-    task_name = robot_create_and_run_route(route["pickup"], route["dropoff"], route.get("palletType", "wood"))
+    task_name = robot_create_and_run_route(
+        route["pickup"], route["dropoff"], route.get("palletType", "wood"),
+        route.get("palletTop", False), route.get("palletHeights"),
+    )
     if charge_task_id:
         try:
             robot_cancel_task_record(charge_task_id)
@@ -1030,6 +1084,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not self._require_auth():
                 return
             self._occupied_set_many()
+        elif self.path == PALLET_HEIGHTS_PATH:
+            if not self._require_auth():
+                return
+            self._pallet_heights_set()
         elif self.path == LOGIN_PATH:
             self._login()
         elif self.path == LOGOUT_PATH:
@@ -1327,8 +1385,35 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # ocupação ao vivo de todo mundo.
             current = _read_calibration()
             data["occupied"] = current.get("occupied") or []
+            # palletHeights: mesmo raciocínio do occupied — mutação cirúrgica
+            # própria (/api/pallet-heights), o cliente não manda no snapshot,
+            # então preserva o que já está em disco.
+            data["palletHeights"] = _pallet_heights(current)
             CALIBRATION_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
         self._relay(200, "application/json", b'{"ok":true}')
+
+    # Altura do pallet azul (editor, modo desenvolvedor, sub-seção "Altura de
+    # pallets"). Mutação cirúrgica só da chave palletHeights do
+    # calibration.json — não reenvia pontos/lotes. blueBase = andar de baixo
+    # (layer 2, "Altura do pallet azul padrão"); blueTop = 2º andar do pallet
+    # de cima (layer 3, "Altura do segundo pallet"). Madeira não usa nada
+    # disso (não empilha).
+    def _pallet_heights_set(self):
+        try:
+            payload = self._read_json_body()
+        except json.JSONDecodeError as err:
+            self._relay(400, "application/json", json.dumps({"error": str(err)}, ensure_ascii=False).encode("utf-8"))
+            return
+        with CALIBRATION_LOCK:
+            cal = _read_calibration()
+            heights = _pallet_heights(cal)  # começa do que já está salvo
+            if "blueBase" in payload:
+                heights["blueBase"] = _coerce_height(payload.get("blueBase"), heights["blueBase"])
+            if "blueTop" in payload:
+                heights["blueTop"] = _coerce_height(payload.get("blueTop"), heights["blueTop"])
+            cal["palletHeights"] = heights
+            CALIBRATION_FILE.write_text(json.dumps(cal, ensure_ascii=False, indent=2))
+        self._relay(200, "application/json", json.dumps({"ok": True, "palletHeights": heights}).encode("utf-8"))
 
     # --- histórico de rotas (painel "Histórico", modo desenvolvedor) --------
     # A gravação (log_route_requested/log_route_completed, lá em cima) não
@@ -1373,6 +1458,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             payload = self._read_json_body()
             pairs = payload["pairs"]
             pallet_type = payload.get("palletType", "wood")
+            pallet_top = bool(payload.get("palletTop", False))
             if not isinstance(pairs, list) or not pairs:
                 raise ValueError("pairs precisa ser uma lista não vazia")
             for pair in pairs:
@@ -1392,6 +1478,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._relay(400, "application/json", json.dumps({"error": error}, ensure_ascii=False).encode("utf-8"))
             return
 
+        # As alturas do pallet azul são capturadas AGORA (no enfileiramento) e
+        # viajam junto de cada rota — igual a palletType/user. Se o admin
+        # mudar a altura depois, rota que já está na fila mantém a que tinha
+        # quando foi montada (ver CONTEXT.md, mesma lógica de palletType).
+        heights = _pallet_heights(cal)
+
         # groupId só existe quando há sequência de verdade: com um par só
         # não há "resto do grupo" pra cancelar se ele falhar.
         group_id = secrets.token_hex(8) if len(pairs) > 1 else None
@@ -1400,6 +1492,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "pickup": pair["pickup"],
             "dropoff": pair["dropoff"],
             "palletType": pallet_type,
+            "palletTop": pallet_top,
+            "palletHeights": heights,
             "user": requester["username"],
             "groupId": group_id,
         } for pair in pairs]

@@ -63,3 +63,17 @@ export async function saveCalibration(calibration) {
   });
   if (!res.ok) throw new Error('Falha ao salvar calibração (HTTP ' + res.status + ')');
 }
+
+// Altura do pallet azul (sub-seção "Altura de pallets" do editor). Mutação
+// cirúrgica só dessa chave no calibration.json — não passa pelo snapshot
+// debounced de pontos/lotes. Devolve { blueBase, blueTop } já aplicado.
+export async function savePalletHeights(heights) {
+  const res = await fetch('/api/pallet-heights', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(heights),
+  });
+  if (!res.ok) throw new Error('Falha ao salvar altura dos pallets (HTTP ' + res.status + ')');
+  const data = await res.json();
+  return data.palletHeights;
+}

@@ -770,5 +770,9 @@
       }
     ]
   },
-  "occupied": []
+  "occupied": [],
+  "palletHeights": {
+    "blueBase": 8,
+    "blueTop": 8
+  }
 }

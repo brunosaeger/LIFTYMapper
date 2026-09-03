@@ -150,7 +150,7 @@ planta baixa. Sem router (é uma tela só, com "modos").
   nosso próprio `server.py`.
 - `src/api/auth.js` — login/logout/sessão + CRUD de usuários, todas contra
   o nosso próprio `server.py` (ver "Sistema de login" abaixo).
-- `src/components/`: `Toolbar`, `PointsPanel`, `LotsPanel`, `PointToPointBar`,
+- `src/components/`: `Toolbar`, `PointsPanel`, `LotsPanel`, `PalletHeightsPanel`, `PointToPointBar`,
   `RouteQueue`, `OccupancyPanel`, `HistoryPanel`, `UsersPanel`,
   `DevModeModal`, `LoginScreen`, `Toast` — peças da UI, veja cada uma.
 - `src/theme.js` — paleta de cores em hex (Konva não lê CSS custom
@@ -330,9 +330,11 @@ persiste entre reloads (trava de sessão, não preferência salva).
 
 Com o modo ativo: libera a aba **"Editar pontos"** + **"Histórico"** e os
 botões **"+ Ponto"**/**"+ Lote"** no Toolbar — todos escondidos por
-completo sem ele. Sair do modo (clicar em `{ }` de novo, sem pedir senha —
-senha só é exigida pra ENTRAR) força o modo de volta pro `ptp` se estava
-em `edit`/`history`.
+completo sem ele. A aba "Editar pontos" tem três sub-seções, nessa ordem:
+**"Altura de pallets"** (`PalletHeightsPanel`, ver "Diferenciação de
+pallets"), **"Pontos avulsos"**, **"Lotes"**. Sair do modo (clicar em
+`{ }` de novo, sem pedir senha — senha só é exigida pra ENTRAR) força o
+modo de volta pro `ptp` se estava em `edit`/`history`.
 
 **Importante**: só esconder os botões não bastaria — o modo padrão do app
 era `edit` antes dessa mudança, o que tornaria a trava inútil (o app já
@@ -762,31 +764,66 @@ resetado por `resetSelection()` — é uma preferência de sessão
 ("com que pallet estou trabalhando agora"), não amarrada à seleção de
 origem/destino atual.
 
-**Lógica** (`lifty.js`):
+**Lógica** (hoje toda no `server.py` — `_pallet_pickup_params` /
+`robot_route_task_name` / `robot_create_and_run_route`; era em `lifty.js`
+antes da fila virar dona do servidor):
 - **CUIDADO, já erramos isso uma vez**: o campo `height` que fica direto no
   topo da ação PICKUP **NÃO é o que a plataforma usa** pra alinhar o
   pallet — esse fica sempre `0`, pallet nenhum muda ele. O valor de
-  verdade mora dentro de `params.PALLET_LAYER` (dois campos juntos,
-  `height` **e** `layer`) — descoberto inspecionando o JSON real que a
-  plataforma gera ao criar o template manualmente. Colocar o valor no
-  campo de topo faz a plataforma marcar a checkbox de "0cm" na tela de
-  criação de tarefa mesmo pedindo 8cm.
-  `PICKUP_PALLET_LAYER = { wood: null, blue: { height: 8, layer: 2 } }` —
-  madeira manda `params: null` (igual todo template de antes dessa
-  feature), azul manda `params: { PALLET_LAYER: { height: 8, layer: 2 } }`.
-  Só o PICKUP leva isso, o UNLOAD nunca (não foi pedido pro dropoff, `params`
-  do UNLOAD é sempre `null`).
-- `PALLET_NAME_SUFFIX = { wood: '', blue: 'MT' }` — pallet azul acrescenta
-  `MT` (Metal) no nome do template/rota (`routeTaskName`), ex:
-  `A1toB2MT`. Isso faz a mesma origem→destino virar **dois templates
-  separados** dependendo do pallet (a altura de PICKUP faz parte do
-  "recipe" da rota, não dá pra reaproveitar o nome de antes) — e por
-  construção, todo template já existente (sem sufixo, `height:0`) continua
-  servindo pra madeira sem precisar de migração nenhuma.
-- `palletType` é capturado **no momento em que a rota é montada**
-  (`handleEnqueueRoute`, guardado junto no objeto da rota) — não é relido
-  depois, então trocar o pallet selecionado não afeta rotas que já estão
-  na fila local esperando pra disparar.
+  verdade mora dentro de `params.PALLET_LAYER` (`height` **e** `layer`) —
+  descoberto inspecionando o JSON real da plataforma. Colocar o valor no
+  campo de topo faz a plataforma marcar "0cm" mesmo pedindo 8.
+- Só o PICKUP leva `params`, o UNLOAD nunca (`params` do UNLOAD é sempre
+  `null`).
+
+**Três variantes de PICKUP (2026-09-02, "Pallet de cima"):**
+- **madeira** → `params: null`, `height: 0` — não empilha, inalterado.
+- **azul, andar de baixo** → `PALLET_LAYER: { height: <blueBase>, layer: 2 }`.
+  `blueBase` é configurável (default 8) — campo "Altura do pallet azul
+  padrão" no editor.
+- **azul, "Pallet de cima"** (checkbox no Ponto a Ponto, `palletTop`) →
+  `PALLET_LAYER: { height: <blueTop>, layer: 3 }`. O 2º andar do pallet
+  azul de dois níveis; `blueTop` é configurável e SEM padrão de fábrica
+  fixo — o valor exibido é sempre o último salvo (o usuário vai calibrar
+  em testes). `layer: 3` = "terceiro nível".
+
+**Configuração das alturas** — `calibration.json` ganhou uma chave global
+`palletHeights: { blueBase, blueTop }` (ao lado de `top`/`iso`/`occupied`).
+- Editada na sub-seção **"Altura de pallets"** do editor (modo
+  desenvolvedor), ANTES de "Pontos avulsos" e "Lotes" —
+  `PalletHeightsPanel.jsx`. Dois campos, salva no blur (Enter também) via
+  `POST /api/pallet-heights` (mutação cirúrgica só dessa chave, sob
+  `CALIBRATION_LOCK` — mesmo padrão de `/api/occupied/*`). `_save_calibration`
+  (pontos/lotes) **preserva** `palletHeights` do disco, o cliente nem manda
+  no snapshot.
+- Operador comum (sem modo desenvolvedor) NÃO acessa esses valores — só a
+  checkbox "Pallet de cima". Ela some quando "Madeira" está selecionado.
+- Leitura tolerante: `_pallet_heights(cal)` / `normalizePalletHeights` dão
+  os dois valores mesmo com `calibration.json` antigo (sem a chave). Não
+  precisa migração.
+
+**Nome do template codifica a altura** (`robot_route_task_name`), porque a
+altura configurável faz o "recipe" mudar e templates são reaproveitados
+por nome:
+- madeira → `A1toB2`
+- azul baixo → `A1toB2MT<blueBase>`   (ex `A1toB2MT8`)
+- azul de cima → `A1toB2MT<blueTop>C` (ex `A1toB2MT12C`, `C` de cima)
+
+Isso ORFANOU os templates antigos `A1toB2MT` (sem número) — cada rota azul
+recria o template uma vez na 1ª vez após o deploy. Mudar uma altura no
+editor tem o mesmo efeito: gera templates novos, os antigos ficam sem uso
+no dispatch (raro, ação de admin).
+
+- `palletType` **e agora `palletTop` + `palletHeights`** são capturados no
+  ENFILEIRAMENTO (`_queue_enqueue_batch`, guardados no objeto da rota em
+  `queue_state.json`) — não relidos depois. Mudar o pallet selecionado ou
+  a altura no editor não afeta rota que já está na fila.
+
+**Testado** (stub capturando os payloads de `task-template/create`): as 3
+variantes geram nome + `PALLET_LAYER` corretos; `/api/pallet-heights`
+persiste; `_save_calibration` preserva; madeira ignora `palletTop`; rota
+na fila mantém a altura de quando foi montada mesmo se o admin mudar
+depois.
 
 ## Investigação pausada: robô para sozinho a cada ~10-15m numa rota
 
