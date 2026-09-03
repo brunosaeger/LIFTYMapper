@@ -776,6 +776,25 @@ antes da fila virar dona do servidor):
 - Só o PICKUP leva `params`, o UNLOAD nunca (`params` do UNLOAD é sempre
   `null`).
 
+> ⚠️ **"Pallet de cima" é REVERTÍVEL — pedido explícito do usuário
+> (2026-09-02).** A feature (checkbox + alturas configuráveis + sub-seção
+> do editor) ainda NÃO foi validada no robô físico. Se der errado nos
+> testes, desfazer:
+> ```
+> git revert ccb9f17        # o commit da feature (tip quando isto foi escrito)
+> ```
+> Estado ANTES da feature = commit `34c581e`. O revert é limpo:
+> - `queue_state.json` com rotas que têm `palletTop`/`palletHeights`: o
+>   código revertido só ignora as chaves extras (`_read_queue_state` faz
+>   `merged.update`, `_fire_route` chama `robot_create_and_run_route` com 3
+>   args). Sem corrupção.
+> - `calibration.json` com `palletHeights`: o código revertido ignora a
+>   chave; some no próximo save de pontos/lotes. Sem migração.
+> - Templates `A1toB2MT8` / `A1toB2MT12C` já criados no robô: viram órfãos
+>   (o nome volta a ser `A1toB2MT`), ficam sem uso no dispatch — inofensivo,
+>   só clutter. Os `A1toB2MT` antigos voltam a ser reaproveitados.
+> Se a feature ficar OK, apagar este aviso.
+
 **Três variantes de PICKUP (2026-09-02, "Pallet de cima"):**
 - **madeira** → `params: null`, `height: 0` — não empilha, inalterado.
 - **azul, andar de baixo** → `PALLET_LAYER: { height: <blueBase>, layer: 2 }`.
