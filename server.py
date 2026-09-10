@@ -76,7 +76,7 @@ def _app_dir():
 # CONFIGURAÇÃO — confirme o IP do robô antes da demo (ver seção 1.1 do PDF /
 # ip_nav confirmado em testes anteriores).
 # ---------------------------------------------------------------------------
-ROBOT_HOST = "http://172.16.1.244/" #http://192.168.43.74 ou http://172.16.1.244/
+ROBOT_HOST = "http://192.168.5.180/" #http://192.168.43.74 ou http://172.16.1.244/
 LISTEN_PORT = 8000
 # ---------------------------------------------------------------------------
 
@@ -382,6 +382,46 @@ def robot_fetch_action_records(task_record_id):
     return _robot_call("GET", "/action-record/list/" + str(task_record_id)) or []
 
 
+# Estados TERMINAIS de um task-record no robô. Confirmados em campo:
+# FINISHED, CANCELLED, FAILED. Os outros são chutes defensivos por nomes
+# comuns — o objetivo é só "não tentar cancelar / não ficar preso no que já
+# morreu". Comparação case-insensitive. Qualquer status FORA dessa lista é
+# tratado como "ainda rodando" (mesmo critério do polling).
+#
+# Motivo: uma task FAILED não é FINISHED nem CANCELLED, então o código
+# antigo (1) nunca limpava ela da fila pelo polling e (2) tentava
+# cancelá-la ao clicar no X — e o robô responde HTTP 400 pra "cancelar o
+# que já falhou", deixando a rota presa no painel (bug real, 2026-09-09).
+ROBOT_TERMINAL_STATUSES = {
+    "FINISHED", "CANCELLED", "FAILED", "ERROR", "ABORTED",
+    "STOPPED", "EXCEPTION", "TIMEOUT", "TERMINATED",
+}
+
+
+def _is_terminal_status(status):
+    return (status or "").strip().upper() in ROBOT_TERMINAL_STATUSES
+
+
+def _robot_try_cancel(task_name):
+    """Cancela a task 'task_name' no robô, tolerante a ela já ter morrido.
+    Volta normalmente se cancelou OU se já estava terminal / nem existe mais
+    (nos dois casos é seguro limpar do estado local). LEVANTA só num erro de
+    verdade — robô fora do ar, 5xx: aí não dá pra assumir que a task parou."""
+    record = robot_fetch_latest_task_record(task_name)
+    if not record or _is_terminal_status(record.get("status")):
+        return  # nada a cancelar
+    try:
+        robot_cancel_task_record(record["id"])
+    except urllib.error.HTTPError as err:
+        if 400 <= err.code < 500:
+            # o robô diz que não dá pra cancelar essa task — quase sempre
+            # porque ela já terminou/falhou num estado que a gente não
+            # cataloga. Trata como "já parou" e segue.
+            print("Robô recusou cancelar '%s' (HTTP %d) — task provavelmente já terminou num estado desconhecido; limpando local." % (task_name, err.code))
+            return
+        raise  # 5xx — problema de verdade
+
+
 # --- estado persistido da fila (queue_state.json) --------------------------
 def _empty_queue_state():
     # Função (não constante compartilhada!) de propósito — um dict
@@ -593,9 +633,7 @@ def _drop_group_from_queue(state, group_id):
     pending = state.get("pendingRoute")
     if pending and pending.get("groupId") == group_id:
         try:
-            record = robot_fetch_latest_task_record(pending["taskName"])
-            if record and record.get("status") not in ("FINISHED", "CANCELLED"):
-                robot_cancel_task_record(record["id"])
+            _robot_try_cancel(pending["taskName"])
         except Exception as err:
             print("Aviso: não deu pra cancelar no robô a próxima rota do grupo interrompido: %s" % err)
         log_route_completed(pending["id"], "cancelled")
@@ -689,20 +727,22 @@ def _apply_record_status(state, current, record):
         log_route_completed(current["id"], "finished")
         _advance_queue_locked(state)
         return True
-    if status == "CANCELLED":
-        # Cancelamento por FORA do app (ex: alguém mexeu direto na
-        # plataforma admin do robô). Diferente do cancelamento pelo botão do
-        # app (_queue_cancel_current), aqui NÃO se promove pendingRoute/
-        # routeQueue de propósito: não sabemos o que o dispatch faz com a
-        # pendingRoute quando a task ativa é cancelada por fora (pode ter
-        # derrubado ela junto), e presumir que dá pra seguir já causou o bug
-        # "robô para e volta pra energia" uma vez (ver CONTEXT.md). Se
-        # sobrar um pendingRoute órfão, ele volta a fazer sentido no próximo
-        # disparo pelo Ponto a Ponto.
-        log_route_completed(current["id"], "cancelled")
+    if _is_terminal_status(status):
+        # CANCELLED (por fora do app), FAILED, ERROR, etc. — a task morreu no
+        # robô sem concluir. Limpa a currentRoute pra fila não ficar travada
+        # nela pra sempre (era o caso do FAILED: o código só olhava
+        # FINISHED/CANCELLED, então FAILED ficava "em andamento" eterno).
+        #
+        # NÃO promove pendingRoute/routeQueue: não sabemos o que o dispatch
+        # faz com elas quando a task ativa morre por fora (pode ter derrubado
+        # junto), e presumir que dá pra seguir já causou o bug "robô para e
+        # volta pra energia" (ver CONTEXT.md). pendingRoute órfã volta a
+        # fazer sentido no próximo disparo pelo Ponto a Ponto.
+        log_route_completed(current["id"], "cancelled" if status == "CANCELLED" else "failed")
         state["currentRoute"] = None
-        # Se essa rota fazia parte de uma sequência, o resto do grupo perdeu
-        # a validade junto com ela (decisão do usuário: cancelar o resto).
+        state["pickupCleared"] = False
+        # Se fazia parte de uma sequência, o resto do grupo perdeu a validade
+        # junto (decisão do usuário: cancelar o resto).
         _drop_group_from_queue(state, current.get("groupId"))
         return True
     return False  # ainda em execução — nada a fazer, tenta de novo no próximo tick
@@ -1552,10 +1592,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not current:
                 self._relay(200, "application/json", b'{"ok":true}')
                 return
+            # _robot_try_cancel tolera a task já estar terminal (FAILED,
+            # CANCELLED, etc.) ou nem existir — nesses casos volta normal e a
+            # gente limpa local do mesmo jeito. Só levanta em erro de verdade
+            # (robô fora do ar, 5xx): aí não dá pra assumir que a task parou.
             try:
-                record = robot_fetch_latest_task_record(current["taskName"])
-                if record and record.get("status") not in ("FINISHED", "CANCELLED"):
-                    robot_cancel_task_record(record["id"])
+                _robot_try_cancel(current["taskName"])
             except Exception as err:
                 self._relay(502, "application/json", json.dumps({"error": "Erro ao cancelar a rota atual: " + str(err)}, ensure_ascii=False).encode("utf-8"))
                 return
@@ -1621,9 +1663,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 _drop_group_from_queue(state, group_id)
             elif is_pending:
                 try:
-                    record = robot_fetch_latest_task_record(pending["taskName"])
-                    if record and record.get("status") not in ("FINISHED", "CANCELLED"):
-                        robot_cancel_task_record(record["id"])
+                    _robot_try_cancel(pending["taskName"])
                 except Exception as err:
                     self._relay(502, "application/json", json.dumps({"error": "Erro ao cancelar a próxima rota: " + str(err)}, ensure_ascii=False).encode("utf-8"))
                     return

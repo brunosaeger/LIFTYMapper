@@ -161,7 +161,7 @@ export default function HistoryPanel() {
               </div>
               <div className="history-route__time">
                 {entry.completedAt
-                  ? (entry.status === 'cancelled' ? 'Cancelada: ' : 'Concluída: ') + entry.completedAt
+                  ? ({ cancelled: 'Cancelada: ', failed: 'Falhou: ' }[entry.status] || 'Concluída: ') + entry.completedAt
                   : 'Em andamento…'}
               </div>
             </div>
