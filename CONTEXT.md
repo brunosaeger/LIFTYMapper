@@ -881,18 +881,83 @@ confirmar a causa raiz — pausado a pedido do usuário pra priorizar o app.
 - **Botão "girar N graus"**: pedido, avaliado (API não tem comando de
   rotação bruta), implementado, e depois **removido a pedido do usuário**.
 
+## O "ponto de destino fantasma" — robô ignora cancelamento (INVESTIGAÇÃO EM CAMPO 2026-09-11)
+
+**Sintoma:** operador manda uma rota, cancela (LIFTY OU plataforma da
+Reeman, tanto faz — as duas batem no mesmo dispatch), e o robô **continua
+executando a rota**. Não para com cancelamento de task, não para com
+`all-cancel`, **não para com o botão de emergência**, e — testado ao vivo
+— **não para com `POST /cmd/cancel_goal`** (retorna `{"status":"success"}`
+mas o robô volta a se mover ~2s depois).
+
+**O que de fato acontece (observado + confirmado nos action-records):**
+1. A rota tem um PICKUP num ponto que o robô **não consegue alcançar por
+   falta de espaço de manobra** ("turning space"). Hoje: pontos **MA, MB,
+   DC**. (CC alcança normal, PICKUP em ~25s; MA/MB/DC o robô fica **2 a 4
+   minutos** travado tentando.)
+2. Enquanto está nesse estado travado, o robô **ignora QUALQUER
+   cancelamento** — a task fica `CANCELLED` no dispatch mas ele não recebe
+   / não processa.
+3. Ele **desiste do PICKUP e vai pro UNLOAD** (confirmado: na task 66814
+   o `startTime` do UNLOAD, 05:46:17, é ANTES do `finishTime` do PICKUP,
+   05:46:50). Faz um **"unload fantasma" num ponto vazio** (não pegou nada).
+4. Depois de "terminar" essa task fantasma e se reposicionar rumo à
+   carga, o robô **se recupera sozinho** e volta a aceitar cancelamento +
+   emergência normalmente.
+
+**Não é a LIFTY nem o código.** É navegação do robô + calibração dos
+pontos MA/MB/DC (pose/ângulo, espaço de manobra, obstáculo, ou mapa
+desatualizado perto deles). Todas as tasks `FAILED` de hoje (start=None)
+também foram `MAto...`/`DCto...`.
+
+**Agravante — canal robô↔dispatch instável nessa rede:** WiFi pro robô
+medido em 32–270ms de ping com jitter enorme e timeouts (HTTP ~700ms). A
+maioria dos task-records fica com `start=None` mesmo o robô tendo
+executado fisicamente — os eventos de status do robô não chegam no
+dispatch. O broker MQTT está no NUC (portas 1883/8883/8083, com auth); o
+push de cancelar/parar provavelmente vai por MQTT e **se perde quando a
+conexão está ruim**. Infra confirmou: **sem client isolation / firewall**
+entre dispositivos na mesma WiFi — então é cobertura/sinal/config de AP,
+não filtro. O `standbyPointType: "charge"` do AGV faz o robô voltar pra
+carga **sozinho** quando ocioso — isso NÃO é task, cancelamento nenhum
+afeta.
+
+**Status de task-record confirmados ao vivo:** `WAITING`, `ASSIGNED`,
+`RUNNING`, `FINISHED`, `CANCELLED`, `FAILED`. Só `FINISHED` = sucesso.
+`_is_terminal_status` (server.py) cobre os de falha; `WAITING`/`ASSIGNED`/
+`RUNNING` contam como "ainda ativa" (correto).
+
+**Confirmado direto no robô (resolve dúvidas antigas):**
+- `GET /reeman/current_map` → `eecc4a9068e11bd9086538383a38c67d` = bate com
+  `ROBOT_TARGET_MAP`. Hash está certo.
+- `GET /project/list` → só projeto `id 13 "APItest"`, `enable=true`.
+  `all-cancel/13` mira o projeto certo.
+- `GET /agv/page?projectId=13` → `appVersion 1.3.1`, `navigationVersion
+  RSNX-v4.1.10`, `mcuVersion S7.0.2`, `versionReportedAt 2026-09-11
+  05:10:15` (~hora do restart do robô — pode ter auto-atualizado ao pegar
+  internet na rede nova).
+
+**Endpoints SLAM úteis (todos GET, funcionam):**
+- `/reeman/speed` → `{"vx","vth"}` — velocidade, sinal confiável de "está
+  se movendo".
+- `/reeman/pose` → `{"x","y","theta"}`.
+- `/reeman/base_encode` → `{"battery","chargeFlag","emergencyButton"}` —
+  estado do E-stop físico, bateria, carga.
+- `/reeman/nav_status` → `{"res","reason","goal","dist","mileage"}` — MAS
+  mostrou `goal=-1` mesmo com o robô a 1 m/s (no estado travado o
+  movimento não é nav baseada em goal) → NÃO serve como "está navegando".
+- `/reeman/map`, `/reeman/laser`, `/reeman/current_map`.
+- `POST /cmd/stop` e `POST /cmd/pause` existem (405 no GET) mas exigem um
+  body não-documentado (`{}` dá `error_code 001`).
+
+**Em aberto (usuário lidera a investigação):** por que MA/MB/DC não são
+alcançáveis; e como contornar o "cancelamento não pega no estado travado"
+— pela LIFTY ou pela plataforma. O `cmd/cancel_goal` no cancel-current /
+emergência (server.py) ficou como best-effort: **não resolve o caso
+travado** (testado), mas é inofensivo e pode ajudar em navegação normal
+(não testado isolado).
+
 ## Segunda API do fabricante: SLAM WEB API (parcialmente usada agora)
-
-> **2026-09-11:** o `_slam_call` / `robot_stop_navigation()` (`POST
-> /cmd/cancel_goal`) passou a ser usado na **parada de emergência** — é a
-> ÚNICA forma de abortar a navegação em curso (cancelar task-record no
-> dispatch não freia o robô, ver "Fila de rotas compartilhada"). **NADA
-> disso foi testado contra o robô ainda** — se o endpoint não existir no
-> firmware, a chamada 404a e é tratada como best-effort. Precisa validar em
-> campo: `curl -X POST http://<robo>/cmd/cancel_goal` com o robô andando —
-> ele para? E `GET http://<robo>/reeman/nav_status` — que campos devolve
-> (pra o painel poder mostrar "robô em movimento" mesmo com a fila vazia)?
-
 
 Existe uma **outra** API HTTP no mesmo IP do robô, sem o prefixo
 `/api/reeman-dispatch-service` — prefixos `/reeman/*` (GET) e `/cmd/*`
@@ -1118,10 +1183,12 @@ fundo + os handlers HTTP), serializado por lock.
     carga), e só dispara `all-cancel` se há task **não-terminal** ativa
     (usa `_is_terminal_status`, então uma `FAILED` não faz o loop girar à
     toa).
-  - **A CONFIRMAR NO ROBÔ** (`/cmd/*` nunca foi testado — ver "SLAM WEB
-    API"): que `POST /cmd/cancel_goal` de fato para o robô. Se o firmware
-    não tiver esse endpoint, ele 404a, o `warning` avisa, e a emergência
-    ainda engata (só sem freio real → E-stop físico).
+  - **TESTADO NO ROBÔ (2026-09-11)**: `POST /cmd/cancel_goal` existe e
+    retorna `{"status":"success"}`, MAS **não parou um robô em movimento**
+    no estado travado (voltou a andar ~2s depois). Ver "O ponto de destino
+    fantasma" acima. Então o `cancel_goal` na emergência é best-effort —
+    pode ajudar em navegação normal (não testado isolado), não resolve o
+    robô travado. **Nesse caso, E-stop físico.**
   - Ainda **melhor esforço, não fail-safe** — não substitui o E-stop
     físico. Flag sobrevive a restart. Idempotente sob lock.
 - `robot_cancel_all_tasks()` (`/task-record/all-cancel`) voltou a ter uso —
