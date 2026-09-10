@@ -279,6 +279,37 @@ def _robot_call(method, path, body=None):
     return parsed.get("data")
 
 
+# --- API SLAM do robô (/cmd/*, /reeman/*) — SEM o prefixo do dispatch -----
+# É uma API SEPARADA, de CONTROLE DE NAVEGAÇÃO PURO. Cancelar um task-record
+# no dispatch (all-cancel / cancel) só tira o job da FILA — NÃO freia o robô
+# se ele já está no meio de um trajeto (a navegação é outra camada). Quem
+# aborta o movimento de verdade é `POST /cmd/cancel_goal`.
+# Descoberto no bug de campo 2026-09-11: robô com todas as tasks CANCELADAS
+# (confirmado na plataforma do fabricante) seguiu andando; nem o botão de
+# emergência (que só faz all-cancel) parou ele.
+# A resposta do /cmd/* não segue o {code,message,data} do dispatch — aqui só
+# devolve o cru e deixa quem chama interpretar. Best-effort: se o endpoint
+# não existir nesse firmware, urlopen levanta e quem chama trata.
+def _slam_call(method, path, body=None):
+    target = ROBOT_HOST.rstrip("/") + path
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(target, data=data, method=method)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        raw = resp.read()
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return raw.decode("utf-8", "replace")
+
+
+def robot_stop_navigation():
+    """POST /cmd/cancel_goal — aborta a navegação ATUAL. É o comando que de
+    fato para o robô no meio do caminho."""
+    return _slam_call("POST", "/cmd/cancel_goal", {})
+
+
 # O nome do template CODIFICA o "recipe" da rota (ver CONTEXT.md): rotas com
 # params de PICKUP diferentes precisam de templates diferentes, senão
 # reaproveitar o nome rodaria o pallet com a altura errada. Como a altura
@@ -748,22 +779,27 @@ def _apply_record_status(state, current, record):
     return False  # ainda em execução — nada a fazer, tenta de novo no próximo tick
 
 
-# Parada de emergência ATIVA: mantém o robô parado onde está. A gente não
-# tem um comando de "hold" na API de dispatch — o que dá pra fazer é: assim
-# que a lista de tasks do robô fica vazia, ele recria sozinho a task de
-# carga (AUTO_SYSTEM) e volta a andar; então a cada tick (rápido, ver
-# EMERGENCY_POLL_INTERVAL_SECONDS) a gente olha se surgiu QUALQUER task
-# ativa e cancela tudo de novo. Em repouso é só 1 GET leve por tick; o
-# cancel só dispara quando o robô recriou a carga. É MELHOR ESFORÇO, não
-# fail-safe: se o servidor/rede cair, o robô volta pra carga sozinho (por
-# isso o botão do tablet não substitui o E-stop físico).
+# Parada de emergência ATIVA: mantém o robô parado onde está. A cada tick
+# (rápido, ver EMERGENCY_POLL_INTERVAL_SECONDS):
+#  1. `cancel_goal` na API SLAM — o comando que de fato FREIA o robô (o
+#     dispatch/all-cancel só mexe na fila, não no movimento — bug de campo
+#     2026-09-11). Vai SEMPRE, mesmo sem task ativa: o robô pode estar
+#     andando por uma navegação que não é uma task (recovery, retorno pra
+#     carga que falhou de planejar, etc.).
+#  2. all-cancel no dispatch se surgiu QUALQUER task ativa (a AUTO_SYSTEM de
+#     carga que o robô recria sozinho ao ficar sem fila).
+# MELHOR ESFORÇO, não fail-safe: se o servidor/rede cair, o robô volta ao
+# normal sozinho. NÃO substitui o E-stop físico.
 def _emergency_suppress():
+    try:
+        robot_stop_navigation()
+    except Exception as err:
+        print("Emergência: cancel_goal falhou: %s" % err)
     try:
         records = robot_fetch_recent_task_records(size=5)
     except Exception:
         return  # robô/rede indisponível agora — tenta de novo no próximo tick
-    active = [r for r in records if r.get("status") not in ("FINISHED", "CANCELLED")]
-    if not active:
+    if not any(not _is_terminal_status(r.get("status")) for r in records):
         return
     try:
         robot_cancel_all_tasks()
@@ -1703,16 +1739,28 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except (json.JSONDecodeError, KeyError) as err:
             self._relay(400, "application/json", json.dumps({"error": str(err)}, ensure_ascii=False).encode("utf-8"))
             return
+        warnings = []
         with QUEUE_LOCK:
             state = _read_queue_state()
             already = bool(state.get("emergency"))
             if active and not already:
+                # Best effort: tenta parar tudo AGORA (frear + esvaziar a
+                # fila), mas mesmo que o robô recuse os comandos (engine
+                # travada, 4xx/5xx), a emergência PRECISA engatar — a thread
+                # de fundo segue martelando cancel_goal + all-cancel a cada
+                # tick. NÃO engatar era um buraco real (bug 2026-09-11): robô
+                # travado -> all-cancel 400 -> 502 -> flag nunca setada ->
+                # botão de emergência não fazia NADA.
+                try:
+                    robot_stop_navigation()
+                except Exception as err:
+                    warnings.append("cancel_goal falhou: %s" % err)
+                    print("Emergência: cancel_goal falhou: %s" % err)
                 try:
                     robot_cancel_all_tasks()
                 except Exception as err:
-                    self._relay(502, "application/json", json.dumps(
-                        {"error": "Erro ao parar o robô: " + str(err)}, ensure_ascii=False).encode("utf-8"))
-                    return
+                    warnings.append("all-cancel falhou: %s" % err)
+                    print("Emergência: all-cancel falhou (%s) — engatou mesmo assim." % err)
                 for route in [state.get("currentRoute"), state.get("pendingRoute"), *(state.get("routeQueue") or [])]:
                     if route:
                         log_route_completed(route["id"], "cancelled")
@@ -1725,7 +1773,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             elif not active and already:
                 state["emergency"] = False
                 _write_queue_state(state)
-        self._relay(200, "application/json", json.dumps({"ok": True, "emergency": active}).encode("utf-8"))
+        body = {"ok": True, "emergency": active}
+        if warnings:
+            body["warning"] = " / ".join(warnings)
+        self._relay(200, "application/json", json.dumps(body, ensure_ascii=False).encode("utf-8"))
 
     # --- ocupação (Caso 1, modo "mark") -------------------------------------
     def _occupied_set(self):

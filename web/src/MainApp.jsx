@@ -522,11 +522,18 @@ export default function MainApp({ user, onLogout }) {
   async function handleToggleEmergency() {
     const turningOn = !emergency;
     try {
-      await setEmergency(turningOn);
-      showToast(
-        turningOn ? 'PARADA DE EMERGÊNCIA ativa — robô sendo mantido parado.' : 'Emergência liberada — robô voltando ao normal.',
-        turningOn ? 'error' : 'success',
-      );
+      const result = await setEmergency(turningOn);
+      if (turningOn && result && result.warning) {
+        // A emergência ENGATOU (o servidor segue martelando cancel_goal +
+        // all-cancel a cada tick), mas algum comando imediato ao robô
+        // falhou — o operador precisa saber que pode não ter parado na hora.
+        showToast('EMERGÊNCIA ativa, mas o robô recusou um comando (' + result.warning + '). Se ele não parar, use o E-stop físico.', 'error');
+      } else {
+        showToast(
+          turningOn ? 'PARADA DE EMERGÊNCIA ativa — robô sendo mantido parado.' : 'Emergência liberada — robô voltando ao normal.',
+          turningOn ? 'error' : 'success',
+        );
+      }
     } catch (err) {
       showToast('Erro na parada de emergência: ' + err.message, 'error');
     }

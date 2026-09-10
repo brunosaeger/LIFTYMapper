@@ -60,11 +60,11 @@ export function useLiveState() {
   // cadeia inteira com ocupação PROJETADA (ver "Lotes em sequência" no
   // CONTEXT.md). Mandar par a par faria a 2ª rota ser rejeitada, porque no
   // instante do envio a origem anterior ainda está fisicamente ocupada.
-  const enqueueRoutes = useCallback(async ({ pairs, palletType }) => {
+  const enqueueRoutes = useCallback(async ({ pairs, palletType, palletTop }) => {
     const result = await jsonRequest('/api/queue/enqueue-batch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pairs, palletType }),
+      body: JSON.stringify({ pairs, palletType, palletTop: !!palletTop }),
     });
     await refresh();
     return result;
@@ -79,12 +79,13 @@ export function useLiveState() {
   // mantém ele parado (o servidor reprime a task de carga que o robô
   // recria) — ver server.py, _queue_emergency / _emergency_suppress.
   const setEmergency = useCallback(async (active) => {
-    await jsonRequest('/api/queue/emergency', {
+    const result = await jsonRequest('/api/queue/emergency', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ active }),
     });
     await refresh();
+    return result; // { ok, emergency, warning? } — warning = comando do robô que falhou (emergência engatou mesmo assim)
   }, [refresh]);
 
   const removeQueued = useCallback(async (id) => {

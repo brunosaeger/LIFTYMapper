@@ -881,7 +881,18 @@ confirmar a causa raiz — pausado a pedido do usuário pra priorizar o app.
 - **Botão "girar N graus"**: pedido, avaliado (API não tem comando de
   rotação bruta), implementado, e depois **removido a pedido do usuário**.
 
-## Segunda API do fabricante: SLAM WEB API (não usada no app atual)
+## Segunda API do fabricante: SLAM WEB API (parcialmente usada agora)
+
+> **2026-09-11:** o `_slam_call` / `robot_stop_navigation()` (`POST
+> /cmd/cancel_goal`) passou a ser usado na **parada de emergência** — é a
+> ÚNICA forma de abortar a navegação em curso (cancelar task-record no
+> dispatch não freia o robô, ver "Fila de rotas compartilhada"). **NADA
+> disso foi testado contra o robô ainda** — se o endpoint não existir no
+> firmware, a chamada 404a e é tratada como best-effort. Precisa validar em
+> campo: `curl -X POST http://<robo>/cmd/cancel_goal` com o robô andando —
+> ele para? E `GET http://<robo>/reeman/nav_status` — que campos devolve
+> (pra o painel poder mostrar "robô em movimento" mesmo com a fila vazia)?
+
 
 Existe uma **outra** API HTTP no mesmo IP do robô, sem o prefixo
 `/api/reeman-dispatch-service` — prefixos `/reeman/*` (GET) e `/cmd/*`
@@ -1083,24 +1094,36 @@ fundo + os handlers HTTP), serializado por lock.
   depende das seguintes). Idempotente: remover algo que já saiu devolve
   `{"ok":true}`, não erro (dois operadores clicando quase junto).
 - **`POST /api/queue/emergency`** (`{"active": true|false}`) — **parada de
-  emergência**. LIGAR: `robot_cancel_all_tasks()` (all-cancel — aqui SIM,
-  é pra parar tudo) + esvazia a fila local (`currentRoute`/`pendingRoute`/
-  `routeQueue` → null/[], logadas como `cancelled`) + liga o flag
-  `emergency` no `queue_state.json`. Enfileirar passa a devolver 409.
-  DESLIGAR: só apaga o flag — o robô volta ao normal sozinho.
-  **Por que precisa de loop**: a API de dispatch **não tem "hold"**; assim
-  que a lista de tasks do robô zera, ele recria sozinho a `AUTO_SYSTEM` de
-  carga e volta a andar. Então enquanto `emergency` está ativo a thread de
-  fundo sonda mais rápido (`EMERGENCY_POLL_INTERVAL_SECONDS = 1.5`) e, se
-  vê QUALQUER task ativa, dá `all-cancel` de novo (`_emergency_suppress`,
-  roda FORA do `QUEUE_LOCK` — só fala com o robô). Em repouso é 1 `GET`
-  leve por tick; o `POST` só dispara quando o robô recriou a carga. É
-  **melhor esforço, não fail-safe**: se o servidor/rede cair, o robô vai
-  pra carga — **não substitui o E-stop físico**. Entre a carga nascer e o
-  tick cancelar, o robô anda alguns segundos (visto no teste com stub:
-  fila de AUTO_SYSTEM `CANCELLED` + uma `WAITING` recém-criada por catar).
-  Flag sobrevive a restart (reconciliação pula e avisa no console).
-  Idempotente sob lock (dois tablets ligando junto convergem).
+  emergência**. LIGAR: `robot_stop_navigation()` (`POST /cmd/cancel_goal` —
+  API SLAM, o comando que de fato FREIA o robô) + `robot_cancel_all_tasks()`
+  (esvazia a fila do dispatch) + esvazia a fila local + liga o flag
+  `emergency`. Enfileirar passa a devolver 409. DESLIGAR: só apaga o flag.
+  - **BUG DE CAMPO 2026-09-11** — o que motivou reescrever isso: robô no
+    meio de um trajeto, usuário cancelou a rota, robô não achou caminho pra
+    voltar pra carga e ficou "girando"; TODAS as tasks confirmadas
+    `Cancelada` na plataforma do fabricante, e mesmo assim o robô seguiu
+    andando e o botão de emergência não parou ele. **Causa raiz: cancelar
+    task-record no dispatch só tira o job da FILA — NÃO aborta a navegação
+    que já está em curso** (é outra camada de controle, a API SLAM
+    `/cmd/*`). O emergency só fazia `all-cancel`, então nunca tocava no
+    movimento. **Segundo bug junto**: se o `all-cancel` falhava (engine
+    travada → 4xx/5xx), o handler devolvia 502 e **nunca setava o flag** →
+    a emergência não engatava, o loop não rodava, o botão não fazia NADA.
+  - **Correção**: (1) o emergency agora chama `cancel_goal` (SLAM) além do
+    `all-cancel`; (2) o flag **SEMPRE engata**, mesmo que os comandos
+    imediatos ao robô falhem — devolve 200 com `warning`, e a thread de
+    fundo segue martelando `cancel_goal` + `all-cancel` a cada tick; (3)
+    `_emergency_suppress` chama `cancel_goal` em TODO tick (o robô pode
+    estar andando por navegação que não é task — recovery, retorno pra
+    carga), e só dispara `all-cancel` se há task **não-terminal** ativa
+    (usa `_is_terminal_status`, então uma `FAILED` não faz o loop girar à
+    toa).
+  - **A CONFIRMAR NO ROBÔ** (`/cmd/*` nunca foi testado — ver "SLAM WEB
+    API"): que `POST /cmd/cancel_goal` de fato para o robô. Se o firmware
+    não tiver esse endpoint, ele 404a, o `warning` avisa, e a emergência
+    ainda engata (só sem freio real → E-stop físico).
+  - Ainda **melhor esforço, não fail-safe** — não substitui o E-stop
+    físico. Flag sobrevive a restart. Idempotente sob lock.
 - `robot_cancel_all_tasks()` (`/task-record/all-cancel`) voltou a ter uso —
   só nessa parada de emergência (o cancelamento de rota normal é granular,
   por id).
