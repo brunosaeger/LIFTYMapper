@@ -391,7 +391,7 @@ def robot_find_active_charge_task_id():
     data = _robot_call("GET", "/task-record/page?" + params) or {}
     records = data.get("records") or []
     record = records[0] if records else None
-    if record and record.get("taskType") == "AUTO_SYSTEM" and record.get("status") not in ("FINISHED", "CANCELLED"):
+    if record and record.get("taskType") == "AUTO_SYSTEM" and not _is_terminal_status(record.get("status")):
         return record["id"]
     return None
 
