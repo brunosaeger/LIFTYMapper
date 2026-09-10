@@ -435,20 +435,28 @@ def _is_terminal_status(status):
 
 def _robot_try_cancel(task_name):
     """Cancela a task 'task_name' no robô, tolerante a ela já ter morrido.
-    Volta normalmente se cancelou OU se já estava terminal / nem existe mais
-    (nos dois casos é seguro limpar do estado local). LEVANTA só num erro de
-    verdade — robô fora do ar, 5xx: aí não dá pra assumir que a task parou."""
-    record = robot_fetch_latest_task_record(task_name)
-    if not record or _is_terminal_status(record.get("status")):
-        return  # nada a cancelar
+    Volta normalmente se cancelou, se o robô recusou com 4xx (task já
+    terminal), ou se nem existe mais. LEVANTA só num erro de verdade — robô
+    fora do ar, 5xx.
+
+    SEMPRE tenta o `task-record/cancel/{id}` se a task ainda existe, MESMO
+    em estado FAILED/terminal — antes (fix de 2026-09-09) a gente pulava a
+    chamada pra task terminal, mas o `cancel` do dispatch pode ter efeito
+    colateral na camada de navegação (parar o robô), e pular isso deixou o
+    robô seguindo pra task residual (bug 2026-09-11)."""
+    try:
+        record = robot_fetch_latest_task_record(task_name)
+    except Exception:
+        raise
+    if not record or not record.get("id"):
+        return  # nem existe — nada a cancelar
     try:
         robot_cancel_task_record(record["id"])
     except urllib.error.HTTPError as err:
         if 400 <= err.code < 500:
-            # o robô diz que não dá pra cancelar essa task — quase sempre
-            # porque ela já terminou/falhou num estado que a gente não
-            # cataloga. Trata como "já parou" e segue.
-            print("Robô recusou cancelar '%s' (HTTP %d) — task provavelmente já terminou num estado desconhecido; limpando local." % (task_name, err.code))
+            # o robô diz que não dá pra cancelar essa task (já terminal).
+            # Não é erro do nosso lado — segue e limpa local.
+            print("Robô recusou cancelar '%s' (HTTP %d) — já terminal; seguindo." % (task_name, err.code))
             return
         raise  # 5xx — problema de verdade
 
@@ -1637,6 +1645,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             except Exception as err:
                 self._relay(502, "application/json", json.dumps({"error": "Erro ao cancelar a rota atual: " + str(err)}, ensure_ascii=False).encode("utf-8"))
                 return
+
+            # Cancelar a rota EM ANDAMENTO tem que FREIAR o robô, não só tirar
+            # o job da fila. cancel_goal (SLAM) é o comando de navegação que
+            # de fato para. Best-effort — se a promoção da pendingRoute logo
+            # abaixo disparar, ela manda um goal novo por cima.
+            try:
+                robot_stop_navigation()
+            except Exception as err:
+                print("cancel-current: cancel_goal falhou: %s" % err)
 
             log_route_completed(current["id"], "cancelled")
             state["currentRoute"] = None
