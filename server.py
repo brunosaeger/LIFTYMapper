@@ -216,7 +216,7 @@ PALLET_HEIGHTS_PATH = "/api/pallet-heights"
 # com o robô direto (mesmo ROBOT_HOST/API_PREFIX do proxy, só que a partir
 # do processo Python, não a partir de uma requisição de navegador repassada).
 ROBOT_PROJECT_ID = "13"
-ROBOT_TARGET_MAP = "eecc4a9068e11bd9086538383a38c67d"
+ROBOT_TARGET_MAP = "dbc5b2b4cd6d2505d78fe894403fe2c5"
 ROBOT_SUPPORT_TYPES = ["犀牛2.0"]
 # Ver CONTEXT.md, "Diferenciação de pallets": o campo height que fica no
 # topo da ação PICKUP NÃO é o que a plataforma usa pra alinhar o pallet —

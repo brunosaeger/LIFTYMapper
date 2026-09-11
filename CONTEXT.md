@@ -380,14 +380,20 @@ abre o calendário nativo do sistema sozinho, sem precisar de
 já carregada, client-side, comparando o prefixo `YYYY-MM-DD` de
 `requestedAt`.
 
-**Hash de mapa — CONFERIDO (2026-09-01), está certo**: houve um susto —
-o robô mandou mensagens de erro citando hashes diferentes
-(`7d07a3564729e5a35999099c0e539e9c`, `92802f9d5efcaf3836298077db4a35b0`)
-do que está fixo em `ROBOT_TARGET_MAP`. O usuário confirmou na plataforma
-do fabricante: o mapa ativo é `eecc4a9068e11bd9086538383a38c67d`, que é
-exatamente o que o `server.py` já manda. Aqueles outros hashes eram de
-mapas antigos/inativos citados em erros históricos. Criação de task está
-ok. Se o robô for remapeado no futuro, atualizar `ROBOT_TARGET_MAP`.
+**Hash de mapa — atualizado 2026-09-11.** `ROBOT_TARGET_MAP` mudou de
+`eecc4a9068e11bd9086538383a38c67d` pra **`dbc5b2b4cd6d2505d78fe894403fe2c5`**
+(robô foi remapeado — mesmo galpão, pontos/lotes idênticos, só o hash do
+mapa ativo mudou). Confirmado direto no robô: `GET /reeman/current_map` →
+`{"name":"dbc5b2b4cd6d2505d78fe894403fe2c5"}`, bate. Nada em
+`calibration.json` referencia o hash do mapa (pontos/lotes são frações
+[0,1] da imagem, não amarrados ao mapa do robô) — só `ROBOT_TARGET_MAP`
+em `server.py` precisa mudar quando o robô é remapeado; sem migração de
+dado nenhuma.
+Histórico: antes disso, em 2026-09-01, houve um susto com hashes vistos em
+mensagens de erro (`7d07a3564729e5a35999099c0e539e9c`,
+`92802f9d5efcaf3836298077db4a35b0`) que eram de mapas antigos/inativos —
+não o ativo. Confirmar sempre direto em `/reeman/current_map` (ou na
+plataforma do fabricante) antes de assumir qual hash usar.
 
 ## A API do dispatch service (tudo validado nesta sessão)
 
@@ -928,8 +934,10 @@ afeta.
 `RUNNING` contam como "ainda ativa" (correto).
 
 **Confirmado direto no robô (resolve dúvidas antigas):**
-- `GET /reeman/current_map` → `eecc4a9068e11bd9086538383a38c67d` = bate com
-  `ROBOT_TARGET_MAP`. Hash está certo.
+- `GET /reeman/current_map` → confirmou `ROBOT_TARGET_MAP` certo nas duas
+  vezes que foi checado (era `eecc4a9068e11bd9086538383a38c67d`, agora
+  `dbc5b2b4cd6d2505d78fe894403fe2c5` após remapeamento em 2026-09-11 — ver
+  "Hash de mapa" acima).
 - `GET /project/list` → só projeto `id 13 "APItest"`, `enable=true`.
   `all-cancel/13` mira o projeto certo.
 - `GET /agv/page?projectId=13` → `appVersion 1.3.1`, `navigationVersion
