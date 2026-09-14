@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import Toolbar from './components/Toolbar';
+import RobotStatusBanner from './components/RobotStatusBanner';
 import PointsPanel from './components/PointsPanel';
 import LotsPanel from './components/LotsPanel';
 import PalletHeightsPanel from './components/PalletHeightsPanel';
@@ -579,6 +580,7 @@ export default function MainApp({ user, onLogout }) {
         user={user}
         onLogout={onLogout}
       />
+      <RobotStatusBanner charging={robotCharging} />
 
       <div className="app__body">
         {/*
@@ -614,7 +616,6 @@ export default function MainApp({ user, onLogout }) {
           onTogglePtpMode={handleTogglePtpMode}
           emergencyActive={emergency}
           onToggleEmergency={handleToggleEmergency}
-          robotCharging={robotCharging}
         />
 
         {mode === 'edit' && (

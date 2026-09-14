@@ -1,4 +1,5 @@
 .app {
+  position: relative; /* âncora do .robot-status-banner (logo abaixo do header, centralizado) */
   display: flex;
   flex-direction: column;
   height: 100vh;
@@ -330,18 +331,21 @@
   cursor: crosshair;
 }
 
-/* --- banner de status do robô (centro-inferior do mapa) --------------------
-   Retângulo semitransparente, só leitura — não intercepta clique (o mapa
-   embaixo continua funcionando normal, pointer-events: none). Ponto colorido
-   (ciano = operando, âmbar = recarregando) igual à paleta de acento usada no
-   resto do app. Fica invisível (null no componente) até o servidor conseguir
-   ler o robô pela 1ª vez, pra nunca mostrar um estado errado no boot. */
+/* --- banner de status do robô (centro-superior, logo abaixo do header) -----
+   Renderizado em MainApp.jsx, direto dentro de `.app` (não do mapa) — fica
+   centralizado na APLICAÇÃO inteira (Toolbar + sidebar incluídos), não só
+   na área do mapa. `.app` tem `position: relative` só pra ancorar isso.
+   Retângulo semitransparente, só leitura — não intercepta clique
+   (pointer-events: none). Ponto colorido (ciano = operando, âmbar =
+   recarregando) igual à paleta de acento usada no resto do app. Fica
+   invisível (null no componente) até o servidor conseguir ler o robô pela
+   1ª vez, pra nunca mostrar um estado errado no boot. */
 .robot-status-banner {
   position: absolute;
-  bottom: 28px;
+  top: 68px; /* 56px do .toolbar + 12px de respiro */
   left: 50%;
   transform: translateX(-50%);
-  z-index: 9;
+  z-index: 20; /* acima de tudo que roda dentro de .app__body (mapa, botões flutuantes, sidebar) */
   display: flex;
   align-items: center;
   gap: 10px;
