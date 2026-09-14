@@ -749,6 +749,40 @@ resposta inteira, funcionava). Agora repassa a resposta inteira nos dois
 caminhos. Se acrescentar mais campo de sessão no futuro, não voltar a
 filtrar ali.
 
+### Banner de status do robô (IMPLEMENTADO 2026-09-14)
+
+Retângulo semitransparente **centralizado sobre o mapa** (`RobotStatusBanner.jsx`,
+renderizado dentro de `FloorPlanCanvas.jsx`, `pointer-events: none` — não
+atrapalha clique no mapa embaixo) — indicação rápida de longe do que o
+robô está fazendo: **"Robô: Em Operação"** ou **"Robô: Recarregando"**.
+
+**Lógica BINÁRIA de propósito por enquanto** (pedido do usuário, refinar
+depois se precisar): vem de `chargeFlag` em `GET /reeman/base_encode`
+(API SLAM) — `chargeFlag == 2` confirmado em campo (2026-09-14, bateria
+subindo) como "carregando de verdade"; qualquer outro valor vira "Em
+Operação", **mesmo que o robô esteja só parado/ocioso sem fazer nada**
+(não tem terceiro estado ainda).
+
+- **Sondado pela THREAD DE FUNDO** (`_refresh_robot_status()`, chamada no
+  topo de `_queue_tick()`, roda em todo tick — normal ou de emergência),
+  nunca pelos handlers HTTP diretamente — mesmo raciocínio de
+  `_emergency_suppress`: um GET só por tick, não N tablets multiplicando
+  chamada ao robô.
+- **Cache em memória** (`_robot_status_cache`, não persiste em disco — é
+  telemetria, não estado que precise sobreviver a restart).
+  `None` = servidor ainda não conseguiu ler o robô (boot, ou robô fora do
+  ar) — o componente não renderiza nada nesse caso, nunca mostra um
+  rótulo errado. Se o robô cair depois de já ter lido uma vez, **mantém o
+  último valor conhecido** em vez de voltar pra `None` (testado).
+- Exposto em `GET /api/live-state` como `robotCharging` (`true`/`false`/`null`) —
+  os tablets só leem o que já veio, igual todo o resto do live-state.
+- Ponto colorido no banner: ciano = operando, âmbar = recarregando (mesma
+  paleta de acento do resto do app).
+
+**Testado** (stub simulando `/reeman/base_encode`): `null` antes do 1º
+tick; `chargeFlag=1` → `false`; `chargeFlag=2` → `true`; robô ficando
+inalcançável → mantém o último valor, não reseta.
+
 ### Diferenciação de pallets: Azul (metálico) vs Madeira
 
 Motivação: a indústria onde o robô opera tem dois modelos físicos de

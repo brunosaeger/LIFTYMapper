@@ -310,6 +310,28 @@ def robot_stop_navigation():
     return _slam_call("POST", "/cmd/cancel_goal", {})
 
 
+# --- status ao vivo do robô pro banner "Em Operação" / "Recarregando" -----
+# (ver FloorPlanCanvas.jsx) — lógica binária de propósito por enquanto:
+# chargeFlag==2 confirmado em campo (2026-09-14) como "carregando de
+# verdade" (bateria subindo); qualquer outro valor vira "Em Operação",
+# mesmo que o robô esteja só parado/ocioso sem fazer nada — refinar depois
+# se precisar de um terceiro estado.
+#
+# Cache em memória (não persiste, não precisa — é telemetria, não estado):
+# só a THREAD DE FUNDO escreve (um GET por tick, mesmo padrão de
+# _emergency_suppress), os handlers HTTP só leem — assim nenhum poll de
+# tablet bate no robô direto, e não têm N tablets multiplicando chamada.
+_robot_status_cache = {"charging": None}  # None = ainda não sabemos (1ª leitura não chegou ainda)
+
+
+def _refresh_robot_status():
+    try:
+        data = _slam_call("GET", "/reeman/base_encode")
+        _robot_status_cache["charging"] = (data.get("chargeFlag") == 2)
+    except Exception:
+        pass  # robô/rede indisponível agora — mantém o último valor conhecido, tenta de novo no próximo tick
+
+
 # O nome do template CODIFICA o "recipe" da rota (ver CONTEXT.md): rotas com
 # params de PICKUP diferentes precisam de templates diferentes, senão
 # reaproveitar o nome rodaria o pallet com a altura errada. Como a altura
@@ -821,6 +843,8 @@ def _emergency_suppress():
 # PICKUP terminar, via finishTime não-nulo — nunca vimos o valor de status
 # de uma ação concluída com sucesso).
 def _queue_tick():
+    _refresh_robot_status()  # sempre, independente de emergência/rota em andamento
+
     # Emergência tem precedência sobre tudo: a fila já foi esvaziada (ver
     # _queue_emergency), então aqui só se reprime a task de carga recriada.
     # _emergency_suppress só fala com o robô (não toca no estado), então roda
@@ -1529,6 +1553,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "routeQueue": state.get("routeQueue") or [],
             "occupied": cal.get("occupied") or [],
             "emergency": bool(state.get("emergency")),
+            "robotCharging": _robot_status_cache.get("charging"),
         }, ensure_ascii=False).encode("utf-8")
         self._relay(200, "application/json", body)
 

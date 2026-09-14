@@ -5,6 +5,7 @@ import Konva from 'konva';
 import { useContainerSize } from '../hooks/useContainerSize';
 import { lotCellName } from '../hooks/useCalibration';
 import { COLORS, LOT_COLORS, hexToRgba, darkenHex } from '../theme';
+import RobotStatusBanner from './RobotStatusBanner';
 import topViewUrl from '../assets/floorplan.jpg';
 import isoViewUrl from '../assets/isometric.jpg';
 
@@ -533,6 +534,7 @@ export default function FloorPlanCanvas({
   onTogglePtpMode,
   emergencyActive,
   onToggleEmergency,
+  robotCharging,
 }) {
   const containerRef = useRef(null);
   const { width: containerWidth, height: containerHeight } = useContainerSize(containerRef);
@@ -1093,6 +1095,7 @@ export default function FloorPlanCanvas({
       ref={containerRef}
       className={'floorplan-container' + (addTool ? ' is-adding' : '')}
     >
+      <RobotStatusBanner charging={robotCharging} />
       <button
         type="button"
         className={'emergency-toggle' + (emergencyActive ? ' is-active' : '')}

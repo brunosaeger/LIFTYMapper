@@ -330,6 +330,46 @@
   cursor: crosshair;
 }
 
+/* --- banner de status do robô (centro do mapa) -----------------------------
+   Retângulo semitransparente, só leitura — não intercepta clique (o mapa
+   embaixo continua funcionando normal, pointer-events: none). Ponto colorido
+   (ciano = operando, âmbar = recarregando) igual à paleta de acento usada no
+   resto do app. Fica invisível (null no componente) até o servidor conseguir
+   ler o robô pela 1ª vez, pra nunca mostrar um estado errado no boot. */
+.robot-status-banner {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 9;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 22px;
+  border-radius: 12px;
+  background: rgba(15, 17, 20, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #fff;
+  font-family: 'Arial Black', 'Helvetica Neue', Arial, sans-serif;
+  font-size: 15px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.robot-status-banner__dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent-cyan);
+}
+
+.robot-status-banner.is-charging .robot-status-banner__dot {
+  background: var(--accent-amber);
+}
+
 /* --- parada de emergência (canto superior esquerdo) -----------------------
    Repouso: só o ícone vermelho a 70%. Ativa: cor cheia + halo vermelho/rosa
    claro pulsando atrás. Clicar de novo libera. O estado real vem do

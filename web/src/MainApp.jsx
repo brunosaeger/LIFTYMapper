@@ -59,7 +59,7 @@ export default function MainApp({ user, onLogout }) {
   // pra ele em vez de mudar estado local direto (quem decide/dispara de
   // verdade é sempre o server.py, nunca o navegador).
   const {
-    currentRoute, pendingRoute, routeQueue, occupied, emergency,
+    currentRoute, pendingRoute, routeQueue, occupied, emergency, robotCharging,
     enqueueRoutes, cancelCurrent, removeQueued, setOccupiedMany, toggleOccupied, setEmergency,
   } = useLiveState();
   const [toast, showToast] = useToast();
@@ -614,6 +614,7 @@ export default function MainApp({ user, onLogout }) {
           onTogglePtpMode={handleTogglePtpMode}
           emergencyActive={emergency}
           onToggleEmergency={handleToggleEmergency}
+          robotCharging={robotCharging}
         />
 
         {mode === 'edit' && (

@@ -24,7 +24,7 @@ async function jsonRequest(path, options) {
 // dispositivos nunca "decidem" a mesma coisa duas vezes (ver server.py,
 // QUEUE_LOCK).
 export function useLiveState() {
-  const [state, setState] = useState({ currentRoute: null, pendingRoute: null, routeQueue: [], occupied: [], emergency: false });
+  const [state, setState] = useState({ currentRoute: null, pendingRoute: null, routeQueue: [], occupied: [], emergency: false, robotCharging: null });
   const [status, setStatus] = useState('loading'); // loading | idle | error
 
   const refresh = useCallback(() => {
@@ -133,6 +133,9 @@ export function useLiveState() {
     routeQueue: state.routeQueue,
     occupied: state.occupied,
     emergency: state.emergency,
+    // null = ainda não sabemos (servidor não conseguiu falar com o robô
+    // ainda); true/false = carregando ou não, ver server.py _refresh_robot_status.
+    robotCharging: state.robotCharging,
     status,
     enqueueRoutes,
     cancelCurrent,
