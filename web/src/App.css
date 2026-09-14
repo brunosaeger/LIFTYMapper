@@ -330,7 +330,7 @@
   cursor: crosshair;
 }
 
-/* --- banner de status do robô (centro do mapa) -----------------------------
+/* --- banner de status do robô (centro-inferior do mapa) --------------------
    Retângulo semitransparente, só leitura — não intercepta clique (o mapa
    embaixo continua funcionando normal, pointer-events: none). Ponto colorido
    (ciano = operando, âmbar = recarregando) igual à paleta de acento usada no
@@ -338,9 +338,9 @@
    ler o robô pela 1ª vez, pra nunca mostrar um estado errado no boot. */
 .robot-status-banner {
   position: absolute;
-  top: 50%;
+  bottom: 28px;
   left: 50%;
-  transform: translate(-50%, -50%);
+  transform: translateX(-50%);
   z-index: 9;
   display: flex;
   align-items: center;
