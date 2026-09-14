@@ -1132,6 +1132,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     # essa tela em primeiro lugar. Tudo que é dado/ação de verdade (proxy do
     # robô, calibração, histórico, usuários) fica atrás de _require_auth/
     # _require_admin abaixo.
+
+    # CUIDADO — já mordeu (2026-09-14): SimpleHTTPRequestHandler não manda
+    # Cache-Control nenhum, então o navegador decide sozinho por heurística
+    # — e em tablet/Chrome mobile isso costuma significar "guarda o
+    # index.html em cache local e nem revalida". Como o `index.html`
+    # referencia o JS/CSS pelo nome com HASH DE CONTEÚDO (Vite), um
+    # index.html cacheado prende o tablet numa versão VELHA do app pra
+    # sempre — precisava de "limpar cache do site" manual em cada tablet a
+    # cada atualização. Forçando `no-cache` só no index.html (raiz), o
+    # navegador sempre revalida antes de usar — os arquivos em /assets/
+    # (o hash muda sozinho quando o conteúdo muda) continuam livres pra
+    # cachear à vontade, sem risco de servir algo desatualizado.
+    def end_headers(self):
+        if self.path in ("/", "/index.html"):
+            self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+
     def do_GET(self):
         if self.path.startswith(API_PREFIX):
             if not self._require_auth():
