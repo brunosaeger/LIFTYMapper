@@ -10,6 +10,7 @@ Só biblioteca padrão (tkinter) — mesma filosofia zero-dependência do
 server.py. Empacotado com PyInstaller junto do server.py e do web/dist (ver
 packaging/lifty.spec + .github/workflows/build-exe.yml).
 """
+import ctypes
 import json
 import socket
 import sys
@@ -44,6 +45,35 @@ def save_config(cfg):
         CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
     except OSError:
         pass  # sem permissão de escrita ao lado do .exe — não é fatal
+
+
+# Impede o Windows de SUSPENDER a máquina enquanto o servidor está no ar.
+# Descoberto em campo (2026-09-14, testando no Linux): a máquina dormindo
+# derruba o processo INTEIRO — rede, a thread de fundo que sonda o robô,
+# tudo — e o painel fica fora do ar até alguém mexer no mouse/teclado pra
+# acordar. Não tem workaround no código pra isso: um processo suspenso não
+# roda, ponto. A saída é pedir pro Windows não suspender enquanto a gente
+# está de pé.
+#
+# NÃO impede a TELA de apagar — isso é inofensivo (só o monitor apaga, o
+# processo continua rodando normal com a tela preta), então de propósito
+# não usamos ES_DISPLAY_REQUIRED. Só a suspensão do SISTEMA é bloqueada.
+#
+# Só existe no Windows (é a API SetThreadExecutionState do kernel32) — em
+# qualquer outro SO (dev no Linux/Mac) é no-op. Lá, quem tem esse problema
+# ajusta nas configurações de energia do próprio SO (ver CONTEXT.md).
+_ES_CONTINUOUS = 0x80000000
+_ES_SYSTEM_REQUIRED = 0x00000001
+
+
+def prevent_system_sleep(prevent):
+    if sys.platform != "win32":
+        return
+    try:
+        flags = _ES_CONTINUOUS | (_ES_SYSTEM_REQUIRED if prevent else 0)
+        ctypes.windll.kernel32.SetThreadExecutionState(flags)
+    except Exception:
+        pass  # melhor esforço — não trava o app se a chamada falhar
 
 
 def lan_ip():
@@ -122,6 +152,7 @@ class LiftyApp:
             )
             return
         save_config({"robotHost": host})
+        prevent_system_sleep(True)
         self._render_running()
         self.open_browser()
 
@@ -129,6 +160,7 @@ class LiftyApp:
         self._set_busy("Desligando…")
         self.root.update_idletasks()
         server.stop_server()
+        prevent_system_sleep(False)
         self._render_stopped()
 
     def open_browser(self):
@@ -137,6 +169,7 @@ class LiftyApp:
     def quit(self):
         if server.is_running():
             server.stop_server()
+            prevent_system_sleep(False)
         self.root.destroy()
 
     # --- estados visuais ------------------------------------------------

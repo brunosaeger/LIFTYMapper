@@ -1403,6 +1403,59 @@ vermelha do Actions, OU instalar pyinstaller no Linux e rodar a spec
 - Testar no Windows: firewall, X→barra de tarefas, "Sair", persistência
   do `lifty_config.json`, os 5 json nascendo ao lado do `.exe`.
 
+### A máquina do servidor NÃO PODE suspender (dormir) — descoberto 2026-09-14
+
+Testando no Linux (rodando `server.py` + `npm run dev` pelo terminal),
+percebido: quando a máquina entra em **suspensão** (não só a tela apagar —
+o SO de verdade dorme), acontecem erros de comunicação com o robô e o
+painel chega a ficar **fora do ar**.
+
+**É esperado, dado como o código funciona hoje — não é bug, é física:**
+uma máquina suspensa **para o processo inteiro**. A thread de fundo que
+sonda o robô (`_start_queue_thread`) para de rodar, o `ThreadingHTTPServer`
+para de responder, a placa de rede desliga — não tem código que sobrevive
+a isso, porque o processo Python literalmente não executa nem um tick de
+CPU enquanto o SO está suspenso. Ao acordar, leva alguns segundos pra rede
+reconectar (Wi-Fi reassociar, DHCP renovar) — é nessa janela que aparecem
+os erros de comunicação; o painel fica inacessível pros tablets o tempo
+inteiro que a máquina esteve dormindo.
+
+**Distinção importante: TELA apagar ≠ SISTEMA suspender.** Só a tela
+apagar (o monitor apaga, mas o SO continua rodando) é **inofensivo** — o
+`server.py` nem percebe. O problema é especificamente a suspensão
+(standby/sleep) do sistema operacional, que para tudo.
+
+**Aconteceria igual no `.exe` do Windows?** Sim — é o mesmo `server.py`
+rodando dentro do mesmo processo da GUI tkinter (`packaging/lifty_gui.py`),
+não muda em nada só por estar empacotado. Se o Windows da máquina que roda
+o `LIFTY.exe` suspender, o mesmo apagão acontece.
+
+**Correção aplicada (2026-09-14):** `packaging/lifty_gui.py` agora chama
+`SetThreadExecutionState` (API nativa do Windows, via `ctypes`) quando o
+servidor liga, dizendo pro Windows **não suspender o sistema** enquanto o
+LIFTY estiver no ar — sem precisar instruir ninguém a mexer nas
+configurações de energia manualmente. `prevent_system_sleep(True)` no
+`_start()`, `prevent_system_sleep(False)` no `_stop()`/`quit()`. De
+propósito **não** usa `ES_DISPLAY_REQUIRED` — deixa a TELA apagar
+normalmente (inofensivo, economiza monitor), só bloqueia a suspensão do
+sistema. É no-op em qualquer SO que não seja Windows (`sys.platform !=
+"win32"`) — não atrapalha rodar em dev no Linux/Mac.
+
+**Máquina de teste Linux atual**: ajustado direto via `gsettings`
+(`org.gnome.desktop.session idle-delay 0`,
+`org.gnome.desktop.screensaver lock-enabled false`,
+`org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type/
+sleep-inactive-battery-type 'nothing'`) — persistente, sobrevive a
+reboot. Se for notebook, `HandleLidSwitch` em
+`/etc/systemd/logind.conf` ainda pode suspender ao fechar a tampa —
+ajustar separadamente se for o caso.
+
+**Não precisa instruir ninguém a "deixar a tela sempre ligada"** — isso
+é irrelevante (tela apagada não incomoda). O que importa é a máquina não
+suspender, e isso agora é automático no `.exe` (Windows) — só a máquina
+de teste Linux atual precisou do ajuste manual porque não passa pelo
+`lifty_gui.py`.
+
 ### Rede: hotspot de celular como infraestrutura de teste
 
 Os testes atuais (robô + laptop rodando `server.py` + tablets) usam um
