@@ -96,6 +96,21 @@ parecia fora do ar sem nenhum erro no `server.py`. Corrigido:
 absoluto, resolvido a partir da localização do próprio script. Não
 reintroduzir um caminho relativo ali.
 
+**CUIDADO — `index.html` precisa de `Cache-Control: no-cache` (2026-09-14)**:
+`SimpleHTTPRequestHandler` não manda cache-control nenhum, aí o navegador
+decide por conta — em tablet/Chrome mobile isso na prática guardava o
+`index.html` em cache local sem revalidar. Como o `index.html` referencia
+o JS/CSS pelo **nome com hash de conteúdo** (Vite), um `index.html` velho
+em cache prendia o tablet numa versão antiga do app pra sempre, mesmo
+depois de um `git pull` + rebuild — só saía com "limpar cache do site" na
+mão em CADA tablet a cada atualização (dor recorrente, aconteceu várias
+vezes nesta sessão). Corrigido: `Handler.end_headers()` manda
+`Cache-Control: no-cache` só pra `/` e `/index.html` (sempre revalida);
+`/assets/*` continua livre pra cachear à vontade — o nome muda sozinho
+quando o conteúdo muda, então nunca serve algo desatualizado. Não tirar
+esse header nem generalizar ele pra todo mundo (cachear os assets é
+seguro e bom).
+
 ## Por que existe um proxy (`server.py`) e não dá pra chamar a API direto
 
 A API de task-fast usa `Content-Type: application/json`, o que dispara um
