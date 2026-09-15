@@ -35,6 +35,19 @@ const LOT_FILL_ALPHA = 0.32;
 // bateram entre 11.67px e 12.29px. Usando a média pra não ter que
 // redimensionar todo lote novo na mão.
 const DEFAULT_CELL_SIZE = 11.97;
+// Tamanho padrão de uma área de Close Up quando o desenvolvedor só clica
+// (sem arrastar) — mesma filosofia "generosa" do lote acima: um clique sem
+// movimento ainda cria algo útil (aqui, um quadrado que dá pra
+// mover/redimensionar depois via Transformer), em vez de nada.
+const DEFAULT_CLOSEUP_SIZE = 60;
+// Abaixo disso (px de conteúdo), um arrasto de Close Up é tratado como
+// "não arrastou de verdade" — cai no tamanho padrão acima em vez de criar
+// um retângulo quase invisível.
+const MIN_CLOSEUP_DRAG = 20;
+// Quanto de folga ao redor do retângulo de Close Up no zoom do modo
+// Interação — 1 = encaixe justo, então >1 sempre sobra contexto ao redor
+// do grupo de kanban ampliado.
+const CLOSEUP_ZOOM_MARGIN = 1.4;
 // Ponto a Ponto: duas escalas diferentes de "crescer" — uma persistente
 // (célula é o pickup/dropoff atual, some só quando deixar de ser) e uma
 // momentânea, um pouco maior ainda, por cima da persistente (mouse em cima
@@ -371,6 +384,21 @@ function LotCell({ name, index, cellSize, fill, stroke, xColor, showName, isOccu
         strokeWidth={2}
       />
       {isOccupied && <XMark size={cellSize} color={xColor} outlineColor={stroke} opacity={isPreviewing ? 0.5 : 1} />}
+      {/* Triângulo de "facing": só na célula 1 (índice 0, a sem numeração)
+          de cada LOTE — pontos avulsos ("lotes coringa") são um componente
+          totalmente separado (PointMarker) e nunca passam por aqui, então
+          ficam de fora sozinhos, sem precisar de nenhum flag. Fica no
+          referencial LOCAL da célula, saindo pela face ESQUERDA (x negativo)
+          — herda a rotação do grupo pai (LotMarker) de graça, sempre
+          apontando pro lado físico certo depois de rotacionado. */}
+      {index === 0 && (
+        <Line
+          points={[-cellSize / 2, -cellSize * 0.28, -cellSize / 2, cellSize * 0.28, -cellSize / 2 - cellSize * 0.4, 0]}
+          closed
+          fill={stroke}
+          listening={false}
+        />
+      )}
       <SeqBadge
         seq={seqNumber}
         size={cellSize}
@@ -504,6 +532,75 @@ function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames,
   );
 }
 
+// Área de Close Up — retângulo livre (sem rotação, ver CONTEXT.md) que só
+// existe visualmente/interativamente em dois modos (ver render em
+// FloorPlanCanvas: a lista de closeUps nem é mapeada fora deles):
+//   - 'closeup' (edição, modo desenvolvedor): tracejado laranja visível,
+//     arrastável/redimensionável via Transformer, clique seleciona.
+//   - 'interaction' (operador): completamente invisível (sem fill/stroke),
+//     mas ainda "escuta" clique — é a área de toque que dispara o zoom
+//     (ver handleCloseUpClick).
+// Em qualquer outro modo, o componente nem chega a ser instanciado.
+function CloseUpMarker({ closeUp, mode, isSelected, onSelect, onChange, onActivate }) {
+  const groupRef = useRef(null);
+  const trRef = useRef(null);
+  const editable = mode === 'closeup';
+
+  useEffect(() => {
+    if (editable && isSelected && trRef.current && groupRef.current) {
+      trRef.current.nodes([groupRef.current]);
+      trRef.current.getLayer().batchDraw();
+    }
+  }, [editable, isSelected]);
+
+  function handleClick(e) {
+    e.cancelBubble = true;
+    if (editable) onSelect(closeUp.id);
+    else if (mode === 'interaction') onActivate(closeUp);
+  }
+
+  return (
+    <>
+      <Group
+        ref={groupRef}
+        x={closeUp.x}
+        y={closeUp.y}
+        scaleX={closeUp.scaleX}
+        scaleY={closeUp.scaleY}
+        draggable={editable}
+        onClick={handleClick}
+        onTap={handleClick}
+        onDragEnd={(e) => onChange(closeUp.id, { x: e.target.x(), y: e.target.y() })}
+        onTransformEnd={(e) => {
+          const node = e.target;
+          onChange(closeUp.id, { x: node.x(), y: node.y(), scaleX: node.scaleX(), scaleY: node.scaleY() });
+        }}
+      >
+        <Rect
+          width={closeUp.width}
+          height={closeUp.height}
+          fill={editable ? hexToRgba(COLORS.accentOrange, LOT_FILL_ALPHA) : 'transparent'}
+          stroke={editable ? COLORS.accentOrange : undefined}
+          strokeWidth={editable ? 2 : 0}
+          dash={editable ? [10, 6] : undefined}
+          listening={editable || mode === 'interaction'}
+        />
+      </Group>
+      {editable && isSelected && (
+        <Transformer
+          ref={trRef}
+          resizeEnabled={true}
+          rotateEnabled={false}
+          keepRatio={false}
+          borderStroke={COLORS.accentAmber}
+          anchorStroke={COLORS.accentAmber}
+          anchorFill={COLORS.panelBase}
+        />
+      )}
+    </>
+  );
+}
+
 export default function FloorPlanCanvas({
   points,
   lots,
@@ -518,19 +615,25 @@ export default function FloorPlanCanvas({
   onSelectPoint,
   selectedLotId,
   onSelectLot,
+  closeUps,
+  onAddCloseUp,
+  onUpdateCloseUp,
+  selectedCloseUpId,
+  onSelectCloseUp,
   // Listas (não nomes soltos) porque o modo "Lotes em sequência" seleciona
   // vários de uma vez — ver MainApp.jsx. No modo normal vêm com 0 ou 1 nome.
   pickupNames,
   dropoffNames,
   onPointToPointClick,
   view,
-  onToggleView,
   occupiedNames,
   onMarkOccupied,
   markModeActive,
   onToggleMarkMode,
   ptpModeActive,
   onTogglePtpMode,
+  interactionModeActive,
+  onToggleInteractionMode,
   emergencyActive,
   onToggleEmergency,
 }) {
@@ -582,6 +685,48 @@ export default function FloorPlanCanvas({
   function clampScale(s) {
     const fit = baseScale || 0.01;
     return Math.max(fit * MIN_ZOOM_MULT, Math.min(s, fit * MAX_ZOOM_MULT));
+  }
+
+  // Modo Interação: clique dentro de uma área de Close Up anima o Stage até
+  // centralizar/ampliar exatamente aquele retângulo (CLOSEUP_ZOOM_MARGIN de
+  // folga ao redor, pra sobrar contexto). Sair do zoom não precisa de nada
+  // especial aqui — o botão de reset (handleResetView) e a roda/pinça já
+  // funcionam em qualquer modo, sem gate nenhum.
+  function handleCloseUpClick(closeUp) {
+    const stage = stageRef.current;
+    if (!stage || !image || !containerWidth || !containerHeight) return;
+    const scaleX = closeUp.scaleX || 1;
+    const scaleY = closeUp.scaleY || 1;
+    const width = closeUp.width * scaleX;
+    const height = closeUp.height * scaleY;
+    // closeUp.x/y já chegam em px de conteúdo aqui — a conversão de fração
+    // pra px acontece uma vez só, no .map() que monta o CloseUpMarker (ver
+    // render abaixo), e é o MESMO objeto que chega até onActivate. Multiplicar
+    // de novo por image.width/height aqui duplicava a escala e jogava o zoom
+    // pra uma posição fora da tela (o bug do mapa "sumindo").
+    const centerX = closeUp.x + width / 2;
+    const centerY = closeUp.y + height / 2;
+    const fitScale = Math.min(
+      containerWidth / (width * CLOSEUP_ZOOM_MARGIN),
+      containerHeight / (height * CLOSEUP_ZOOM_MARGIN),
+    );
+    const newScale = clampScale(fitScale);
+    const newPos = {
+      x: containerWidth / 2 - centerX * newScale,
+      y: containerHeight / 2 - centerY * newScale,
+    };
+    stage.to({
+      scaleX: newScale,
+      scaleY: newScale,
+      x: newPos.x,
+      y: newPos.y,
+      duration: 0.35,
+      easing: Konva.Easings.EaseOut,
+      onFinish: () => {
+        setStageScale(newScale);
+        setStagePos(newPos);
+      },
+    });
   }
 
   // --- zoom: slider vertical (posição = nível de zoom) --------------------
@@ -736,6 +881,33 @@ export default function FloorPlanCanvas({
     setDraft(null);
   }
 
+  // Rascunho de área de Close Up (modo 'closeup', ver CloseUpMarker acima) —
+  // mesmo padrão ref+state de lotDraft/lotDraftRef (StrictMode-safe, ver
+  // comentário acima), mas o arrasto é LIVRE nos dois eixos (não travado a
+  // direção/célula como o de lote): anchorX/anchorY é o canto onde o gesto
+  // começou, x/y/width/height já vêm normalizados (funciona arrastando em
+  // qualquer uma das 4 direções a partir da âncora).
+  const [closeUpDraft, setCloseUpDraft] = useState(null);
+  const closeUpDraftRef = useRef(null);
+
+  function setCloseUpDraftBoth(next) {
+    closeUpDraftRef.current = next;
+    setCloseUpDraft(next);
+  }
+
+  function finishCloseUpDrag() {
+    const draft = closeUpDraftRef.current;
+    if (draft && image) {
+      const tooSmall = draft.width < MIN_CLOSEUP_DRAG || draft.height < MIN_CLOSEUP_DRAG;
+      const width = tooSmall ? DEFAULT_CLOSEUP_SIZE : draft.width;
+      const height = tooSmall ? DEFAULT_CLOSEUP_SIZE : draft.height;
+      const x = tooSmall ? draft.anchorX - width / 2 : draft.x;
+      const y = tooSmall ? draft.anchorY - height / 2 : draft.y;
+      onAddCloseUp({ x: x / image.width, y: y / image.height, width, height });
+    }
+    setCloseUpDraftBoth(null);
+  }
+
   // Ponto a Ponto e Marcação de ocupação: nome da célula "ativa" no momento
   // (mouse em cima, ou dedo segurando/deslizando). A ação de verdade só
   // acontece ao soltar (ver commitOnRelease) — nunca no toque/clique
@@ -846,6 +1018,7 @@ export default function FloorPlanCanvas({
   function commitOnRelease() {
     rememberFocal(stageRef.current); // "onde soltou o clique/dedo pela última vez"
     finishLotDrag();
+    finishCloseUpDrag();
     if (mode === 'mark') {
       if (paintPathRef.current.length > 0 && paintTargetRef.current !== null) {
         onMarkOccupied(paintPathRef.current, paintTargetRef.current);
@@ -883,6 +1056,18 @@ export default function FloorPlanCanvas({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [!!lotDraft]);
+
+  // Mesmo fallback acima, pro arrasto livre de área de Close Up.
+  useEffect(() => {
+    if (!closeUpDraft) return;
+    window.addEventListener('mouseup', finishCloseUpDrag);
+    window.addEventListener('touchend', finishCloseUpDrag);
+    return () => {
+      window.removeEventListener('mouseup', finishCloseUpDrag);
+      window.removeEventListener('touchend', finishCloseUpDrag);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [!!closeUpDraft]);
 
   // Mesmo fallback acima, pro gesto de pintar arrastando (modo mark): se o
   // dedo/mouse soltar fora do canvas, o onMouseUp/onTouchEnd do Stage nunca
@@ -946,24 +1131,42 @@ export default function FloorPlanCanvas({
       onAddPoint(pos.x / image.width, pos.y / image.height);
     } else if (mode === 'edit' && addTool === 'lot') {
       setDraft({ anchorX: pos.x, anchorY: pos.y, rotation: 0, count: 1 });
+    } else if (mode === 'closeup' && addTool === 'closeup') {
+      setCloseUpDraftBoth({ anchorX: pos.x, anchorY: pos.y, x: pos.x, y: pos.y, width: 0, height: 0 });
     }
   }
 
   function handleStageMouseMove(e) {
     const stage = e.target.getStage();
     rememberFocal(stage); // segue o ponteiro/dedo pelo mapa (ver stepZoom)
-    const draft = lotDraftRef.current;
-    if (!draft) return;
     const pointer = stage.getPointerPosition();
-    if (!pointer) return;
-    const pos = toContent(pointer, stage);
-    const dx = pos.x - draft.anchorX;
-    const dy = pos.y - draft.anchorY;
-    const horizontal = Math.abs(dx) >= Math.abs(dy);
-    const dist = horizontal ? Math.abs(dx) : Math.abs(dy);
-    const count = Math.max(1, Math.round(dist / DEFAULT_CELL_SIZE) + 1);
-    const rotation = horizontal ? (dx >= 0 ? 0 : 180) : (dy >= 0 ? 90 : -90);
-    setDraft({ ...draft, rotation, count });
+    const draft = lotDraftRef.current;
+    if (draft) {
+      if (!pointer) return;
+      const pos = toContent(pointer, stage);
+      const dx = pos.x - draft.anchorX;
+      const dy = pos.y - draft.anchorY;
+      const horizontal = Math.abs(dx) >= Math.abs(dy);
+      const dist = horizontal ? Math.abs(dx) : Math.abs(dy);
+      const count = Math.max(1, Math.round(dist / DEFAULT_CELL_SIZE) + 1);
+      const rotation = horizontal ? (dx >= 0 ? 0 : 180) : (dy >= 0 ? 90 : -90);
+      setDraft({ ...draft, rotation, count });
+      return;
+    }
+    const closeDraft = closeUpDraftRef.current;
+    if (closeDraft) {
+      if (!pointer) return;
+      const pos = toContent(pointer, stage);
+      // Arrasto LIVRE nos dois eixos (não trava em direção/célula como o de
+      // lote) — normaliza os dois cantos pra sempre ter x/y = canto
+      // superior-esquerdo e width/height positivos, não importa pra qual
+      // lado o gesto foi.
+      const x = Math.min(closeDraft.anchorX, pos.x);
+      const y = Math.min(closeDraft.anchorY, pos.y);
+      const width = Math.abs(pos.x - closeDraft.anchorX);
+      const height = Math.abs(pos.y - closeDraft.anchorY);
+      setCloseUpDraftBoth({ ...closeDraft, x, y, width, height });
+    }
   }
 
   function handleStageClick(e) {
@@ -1120,14 +1323,20 @@ export default function FloorPlanCanvas({
       </button>
       <button
         type="button"
-        className="view-toggle eye-toggle"
-        onClick={onToggleView}
-        aria-label={view === 'top' ? 'Mudar pra visão isométrica' : 'Mudar pra vista de cima'}
-        title={view === 'top' ? 'Ver isométrico' : 'Ver de cima'}
+        className={'view-toggle interaction-toggle' + (interactionModeActive ? ' is-active' : '')}
+        onClick={onToggleInteractionMode}
+        aria-label={interactionModeActive ? 'Sair do modo Interação' : 'Entrar no modo Interação'}
+        title="Modo Interação"
       >
+        {/* Mãozinha — substituiu o antigo alternador de vista topo/isométrica
+            (legado, ver CONTEXT.md). Palma + polegar + 4 dedos, primitivas
+            simples (retângulos arredondados) no mesmo estilo dos outros
+            ícones deste arquivo. */}
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M1.5 12S5.5 5 12 5s10.5 7 10.5 7-4 7-10.5 7S1.5 12 1.5 12Z" />
-          <circle cx="12" cy="12" r="3" />
+          <path d="M8 13V5a1.5 1.5 0 0 1 3 0v6" />
+          <path d="M11 11V4a1.5 1.5 0 0 1 3 0v7" />
+          <path d="M14 11.5V5a1.5 1.5 0 0 1 3 0v8" />
+          <path d="M17 12.5V9a1.5 1.5 0 0 1 3 0v6c0 3.87-3.13 7-7 7h-1a6 6 0 0 1-5.2-3l-2.3-4a1.34 1.34 0 0 1 2.3-1.34L8 13" />
         </svg>
       </button>
       <button
@@ -1276,6 +1485,39 @@ export default function FloorPlanCanvas({
                 onHoverLeave={() => {}}
                 onChange={() => {}}
                 isPreview
+              />
+            )}
+            {/* Áreas de Close Up: só existem (visual E clicável) nos dois
+                modos que precisam delas — em qualquer outro, nem são
+                mapeadas, o que já garante "invisível e sem intercepção de
+                clique" fora de 'closeup'/'interaction' (ver CloseUpMarker). */}
+            {(mode === 'closeup' || mode === 'interaction') && closeUps.map((c) => (
+              <CloseUpMarker
+                key={c.id}
+                closeUp={{ ...c, x: c.x * image.width, y: c.y * image.height }}
+                mode={mode}
+                isSelected={c.id === selectedCloseUpId}
+                onSelect={onSelectCloseUp}
+                onActivate={handleCloseUpClick}
+                onChange={(id, patch) => {
+                  const next = { ...patch };
+                  if ('x' in next) next.x = next.x / image.width;
+                  if ('y' in next) next.y = next.y / image.height;
+                  onUpdateCloseUp(id, next);
+                }}
+              />
+            ))}
+            {closeUpDraft && (
+              <Rect
+                x={closeUpDraft.x}
+                y={closeUpDraft.y}
+                width={closeUpDraft.width}
+                height={closeUpDraft.height}
+                fill={hexToRgba(COLORS.accentOrange, LOT_FILL_ALPHA)}
+                stroke={COLORS.accentOrange}
+                strokeWidth={2}
+                dash={[10, 6]}
+                listening={false}
               />
             )}
           </Layer>

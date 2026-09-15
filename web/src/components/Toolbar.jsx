@@ -34,6 +34,17 @@ export default function Toolbar({ mode, onModeChange, addTool, onStartAddPoint, 
               Editar pontos
             </button>
           )}
+          {devMode && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === 'closeup'}
+              className={'toolbar__mode' + (mode === 'closeup' ? ' is-active' : '')}
+              onClick={() => onModeChange('closeup')}
+            >
+              Editar closes
+            </button>
+          )}
           {(devMode || user?.isAdmin) && (
             <button
               type="button"

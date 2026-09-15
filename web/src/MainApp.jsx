@@ -3,6 +3,7 @@ import Toolbar from './components/Toolbar';
 import RobotStatusBanner from './components/RobotStatusBanner';
 import PointsPanel from './components/PointsPanel';
 import LotsPanel from './components/LotsPanel';
+import CloseUpsPanel from './components/CloseUpsPanel';
 import PalletHeightsPanel from './components/PalletHeightsPanel';
 import PointToPointBar from './components/PointToPointBar';
 import RouteQueue from './components/RouteQueue';
@@ -48,9 +49,14 @@ const TOAST_BY_SLOT = {
 // re-disparar essa carga sem um refresh de página).
 export default function MainApp({ user, onLogout }) {
   const {
-    view, setView,
+    // setView não é mais chamado por nada na UI — o botão que trocava de
+    // vista virou o modo Interação (ver handleToggleInteractionMode). A
+    // vista fica travada em 'top' daqui pra frente; 'iso' é legado
+    // inatingível (ver CONTEXT.md, "Duas vistas independentes").
+    view,
     points, addPoint, updatePoint, removePoint,
     lots, addLot, updateLot, removeLot,
+    closeUps, addCloseUp, updateCloseUp, removeCloseUp,
     palletHeights, savePalletHeights,
     status: saveStatus,
   } = useCalibration();
@@ -101,6 +107,7 @@ export default function MainApp({ user, onLogout }) {
   const [pendingLotPrefix, setPendingLotPrefix] = useState('');
   const [selectedId, setSelectedId] = useState(null);
   const [selectedLotId, setSelectedLotId] = useState(null);
+  const [selectedCloseUpId, setSelectedCloseUpId] = useState(null);
 
   // Modo desenvolvedor: libera a aba "Editar pontos" e os botões "+ Ponto"/
   // "+ Lote" no Toolbar (ver Toolbar.jsx) — sem ele, mode nunca chega a
@@ -141,6 +148,7 @@ export default function MainApp({ user, onLogout }) {
     setPendingLotPrefix('');
     setSelectedId(null);
     setSelectedLotId(null);
+    setSelectedCloseUpId(null);
     setPickupNames([]);
     setDropoffNames([]);
     setActiveSlot('pickup');
@@ -149,20 +157,6 @@ export default function MainApp({ user, onLogout }) {
   function handleModeChange(next) {
     setMode(next);
     resetSelection();
-  }
-
-  // Trocar de vista (topo/isométrica) troca o conjunto de pontos/lotes
-  // inteiro (cada vista é calibrada à parte) — qualquer seleção que
-  // referenciasse um id da vista anterior fica inválida. pickup/dropoff NÃO
-  // são limpos aqui: são nomes, não ids, e valem nas duas vistas (mesmo
-  // ponto físico) — se o nome não existir na vista atual, simplesmente não
-  // aparece destacado nela, mas a seleção em si continua de pé.
-  function handleToggleView() {
-    setView((v) => (v === 'top' ? 'iso' : 'top'));
-    setAddTool(null);
-    setPendingLotPrefix('');
-    setSelectedId(null);
-    setSelectedLotId(null);
   }
 
   // Mode "de repouso" pra onde os toggles de mark/ptp voltam ao sair: 'edit'
@@ -189,6 +183,15 @@ export default function MainApp({ user, onLogout }) {
   // devolve 'ptp' de novo), o que é o comportamento certo.
   function handleTogglePtpMode() {
     setMode((m) => (m === 'ptp' ? baseMode() : 'ptp'));
+    resetSelection();
+  }
+
+  // Interação: mesmo padrão de mark/ptp acima, botão flutuante que
+  // substituiu o antigo alternador de vista topo/isométrica (ver botão
+  // "olho" -> "mãozinha" em FloorPlanCanvas.jsx). Acessível a qualquer
+  // usuário (não só dev) — é o modo seguro de navegação pro operador.
+  function handleToggleInteractionMode() {
+    setMode((m) => (m === 'interaction' ? baseMode() : 'interaction'));
     resetSelection();
   }
 
@@ -306,6 +309,11 @@ export default function MainApp({ user, onLogout }) {
     setAddTool('lot');
   }
 
+  function handleStartAddCloseUp() {
+    setSelectedCloseUpId(null);
+    setAddTool('closeup');
+  }
+
   function handleCancelAdd() {
     setAddTool(null);
     setPendingLotPrefix('');
@@ -324,6 +332,12 @@ export default function MainApp({ user, onLogout }) {
     setSelectedLotId(id);
   }
 
+  function handleAddCloseUp({ x, y, width, height }) {
+    const id = addCloseUp({ x, y, width, height });
+    setAddTool(null);
+    setSelectedCloseUpId(id);
+  }
+
   function handleSelectPoint(id) {
     setSelectedId(id);
     if (id) setSelectedLotId(null);
@@ -332,6 +346,10 @@ export default function MainApp({ user, onLogout }) {
   function handleSelectLot(id) {
     setSelectedLotId(id);
     if (id) setSelectedId(null);
+  }
+
+  function handleSelectCloseUp(id) {
+    setSelectedCloseUpId(id);
   }
 
   function handleRename(id, name) {
@@ -354,6 +372,15 @@ export default function MainApp({ user, onLogout }) {
 
   function handleSetLotColor(id, color) {
     updateLot(id, { color });
+  }
+
+  function handleRenameCloseUp(id, name) {
+    updateCloseUp(id, { name });
+  }
+
+  function handleDeleteCloseUp(id) {
+    removeCloseUp(id);
+    if (selectedCloseUpId === id) setSelectedCloseUpId(null);
   }
 
   function handleTogglePointNames(id) {
@@ -603,17 +630,23 @@ export default function MainApp({ user, onLogout }) {
           onSelectPoint={handleSelectPoint}
           selectedLotId={selectedLotId}
           onSelectLot={handleSelectLot}
+          closeUps={closeUps}
+          onAddCloseUp={handleAddCloseUp}
+          onUpdateCloseUp={updateCloseUp}
+          selectedCloseUpId={selectedCloseUpId}
+          onSelectCloseUp={handleSelectCloseUp}
           pickupNames={mapPickupNames}
           dropoffNames={mapDropoffNames}
           onPointToPointClick={handlePointToPointClick}
           view={view}
-          onToggleView={handleToggleView}
           occupiedNames={occupied}
           onMarkOccupied={setOccupiedMany}
           markModeActive={mode === 'mark'}
           onToggleMarkMode={handleToggleMarkMode}
           ptpModeActive={mode === 'ptp'}
           onTogglePtpMode={handleTogglePtpMode}
+          interactionModeActive={mode === 'interaction'}
+          onToggleInteractionMode={handleToggleInteractionMode}
           emergencyActive={emergency}
           onToggleEmergency={handleToggleEmergency}
         />
@@ -638,6 +671,25 @@ export default function MainApp({ user, onLogout }) {
               onSetColor={handleSetLotColor}
               onToggleNames={handleToggleLotNames}
             />
+          </aside>
+        )}
+        {mode === 'closeup' && (
+          <aside className="sidebar">
+            <CloseUpsPanel
+              closeUps={closeUps}
+              selectedCloseUpId={selectedCloseUpId}
+              addActive={addTool === 'closeup'}
+              onStartAdd={handleStartAddCloseUp}
+              onCancelAdd={handleCancelAdd}
+              onSelect={handleSelectCloseUp}
+              onRename={handleRenameCloseUp}
+              onDelete={handleDeleteCloseUp}
+            />
+          </aside>
+        )}
+        {mode === 'interaction' && (
+          <aside className="sidebar">
+            <p className="points-panel__hint">Selecione o kanban que você deseja ampliar.</p>
           </aside>
         )}
         {mode === 'ptp' && (

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { loadCalibration, saveCalibration, savePalletHeights as savePalletHeightsApi } from '../api/lifty';
 import { generateId } from '../utils';
 
-const EMPTY_VIEW_DATA = { points: [], lots: [] };
+const EMPTY_VIEW_DATA = { points: [], lots: [], closeUps: [] };
 // "Altura de pallets" (sub-seção do editor). blueBase = andar de baixo do
 // pallet azul (o valor que o azul já recebia, 8); blueTop = 2º andar do
 // "pallet de cima" (sem padrão de fábrica — persiste o último salvo).
@@ -20,9 +20,11 @@ function normalizePalletHeights(raw) {
 
 function normalizeView(raw) {
   if (raw && Array.isArray(raw.points) && Array.isArray(raw.lots)) {
-    return { points: raw.points, lots: raw.lots };
+    // closeUps é campo novo (ver "Close Up") — calibration.json salvo antes
+    // dele existir não tem a chave, cai no fallback [] abaixo.
+    return { points: raw.points, lots: raw.lots, closeUps: Array.isArray(raw.closeUps) ? raw.closeUps : [] };
   }
-  return { points: [], lots: [] };
+  return { points: [], lots: [], closeUps: [] };
 }
 
 // Estado da calibração (pontos avulsos + lotes em linha/coluna) + persistência
@@ -146,6 +148,36 @@ export function useCalibration() {
     });
   }, [view]);
 
+  // --- áreas de Close Up (retângulo livre, sempre na vista ativa) -----------
+  // Mesmo padrão de lote: x/y em fração da imagem (canto superior-esquerdo),
+  // width/height em px de conteúdo (não recalculados depois), scaleX/scaleY
+  // aplicados pelo Transformer do Konva ao redimensionar. Ver
+  // FloorPlanCanvas.jsx (CloseUpMarker/handleCloseUpClick).
+  const addCloseUp = useCallback(({ x, y, width, height }) => {
+    const id = generateId();
+    setData((prev) => {
+      const cur = prev[view];
+      const name = 'close-' + (cur.closeUps.length + 1);
+      const closeUp = { id, name, x, y, width, height, scaleX: 1, scaleY: 1 };
+      return { ...prev, [view]: { ...cur, closeUps: [...cur.closeUps, closeUp] } };
+    });
+    return id;
+  }, [view]);
+
+  const updateCloseUp = useCallback((id, patch) => {
+    setData((prev) => {
+      const cur = prev[view];
+      return { ...prev, [view]: { ...cur, closeUps: cur.closeUps.map((c) => (c.id === id ? { ...c, ...patch } : c)) } };
+    });
+  }, [view]);
+
+  const removeCloseUp = useCallback((id) => {
+    setData((prev) => {
+      const cur = prev[view];
+      return { ...prev, [view]: { ...cur, closeUps: cur.closeUps.filter((c) => c.id !== id) } };
+    });
+  }, [view]);
+
   // Altura de pallets: mutação cirúrgica no servidor (não passa pelo save
   // debounced de pontos/lotes). Otimista + reconcilia com o que o servidor
   // devolve; em erro, volta pro valor anterior.
@@ -165,6 +197,7 @@ export function useCalibration() {
     view, setView,
     points: data[view].points, addPoint, updatePoint, removePoint,
     lots: data[view].lots, addLot, updateLot, removeLot,
+    closeUps: data[view].closeUps, addCloseUp, updateCloseUp, removeCloseUp,
     palletHeights, savePalletHeights,
     status,
   };

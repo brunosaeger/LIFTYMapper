@@ -235,9 +235,20 @@ bolinha cresce `scale(1.2)` enquanto arrastada (`.zoom-slider.is-active`).
   não virar scroll da página. Barra com `height: 640px` /
   `max-height: calc(100% - 340px)` (não passa da borda inferior do mapa).
 
-### Duas vistas independentes (topo / isométrica)
+### Duas vistas independentes (topo / isométrica) — vista isométrica LEGADA
 
-Botão flutuante (ícone de olho) em cima do canvas alterna entre a planta
+O botão flutuante que trocava entre a planta baixa
+(`src/assets/floorplan.jpg`) e a vista isométrica (`src/assets/isometric.jpg`)
+foi **reaproveitado pro modo Interação** (ícone de mãozinha, ver "Close Up e
+modo Interação" abaixo) — nada na UI chama mais `setView`, então a vista
+fica travada em `'top'` daí pra frente. A vista `'iso'` e o split
+`top`/`iso` do `calibration.json` **não foram removidos** (só ficaram
+inatingíveis pela interface) — dado antigo continua sendo lido/gravado sem
+quebrar nada, só não dá mais pra chegar nele por nenhum botão. Segue a
+descrição original da mecânica, hoje só relevante se algum dia a troca de
+vista voltar a existir:
+
+Botão flutuante (ícone de olho) em cima do canvas alternava entre a planta
 baixa (`src/assets/floorplan.jpg`) e uma vista isométrica
 (`src/assets/isometric.jpg`). **Cada vista tem seu próprio conjunto de
 pontos/lotes calibrados** (posição, ângulo, tudo) — são fisicamente a mesma
@@ -279,9 +290,18 @@ index)` em `useCalibration.js`. `cellSize` fica gravado no momento da
 criação (não recalculado depois — ver `DEFAULT_CELL_SIZE` em
 `FloorPlanCanvas.jsx`, hoje `11.97`px de conteúdo, extraído medindo os
 lotes já calibrados manualmente pelo usuário pra bater com o tamanho físico
-dos kanbans reais).
+dos kanbans reais). A célula de índice 0 também ganha um triangulozinho de
+"facing" saindo da base — ver "Close Up e modo Interação" abaixo.
 
-### Quatro modos de interação (`mode` em `MainApp.jsx`)
+**Área de Close Up** (retângulo livre, sem rotação, criado por
+clique-e-arrasto no modo `closeup`): `{ id, name, x, y, width, height,
+scaleX, scaleY }` — `x`/`y` é o canto superior-esquerdo em fração [0,1] da
+imagem (mesmo referencial de ponto avulso), `width`/`height` em px de
+conteúdo (mesmo referencial de `cellSize`), `scaleX`/`scaleY` aplicados
+pelo `Transformer` do Konva ao redimensionar. Ver "Close Up e modo
+Interação" abaixo.
+
+### Modos de interação (`mode` em `MainApp.jsx`)
 
 - **`edit`**: criar/editar pontos e lotes (arrastar, girar, redimensionar
   lote via `Transformer` do Konva), renomear, colorir lote, excluir. **Só
@@ -297,13 +317,23 @@ dos kanbans reais).
 - **`history`** (só em modo desenvolvedor): painel de histórico de rotas +
   erros/avisos do robô, sem interação nenhuma com o mapa. Ver seção
   própria abaixo.
+- **`closeup`** (só em modo desenvolvedor): criar/editar áreas de Close Up
+  (retângulo livre, tracejado laranja). Ver "Close Up e modo Interação"
+  abaixo.
+- **`interaction`**: navegação segura pro operador — tocar numa área de
+  Close Up dá zoom automático nela; fora delas, o mapa não reage a clique
+  nenhum (sem risco de marcar ocupação ou selecionar rota sem querer).
+  Acessível a **qualquer usuário**, não só dev. Ver "Close Up e modo
+  Interação" abaixo.
 
-Acesso a `ptp`/`mark` é por **botões flutuantes** sobre o canvas (não pelo
-Toolbar): ícone de olho (trocar vista topo/isométrica), X (entrar/sair de
-`mark`) e ícone de rota (entrar/sair de `ptp`) — empilhados no canto
-superior direito do mapa, mesmo tamanho (56px), 20px de espaço entre eles.
-Sair de `ptp`/`mark` sempre volta pro modo de repouso (`baseMode()` em
-`MainApp.jsx`): `edit` se for dev, `ptp` pra todo mundo mais.
+Acesso a `ptp`/`mark`/`interaction` é por **botões flutuantes** sobre o
+canvas (não pelo Toolbar): mãozinha (entrar/sair de `interaction` —
+substituiu o antigo alternador de vista topo/isométrica, ver "Duas vistas
+independentes" acima), X (entrar/sair de `mark`) e ícone de rota
+(entrar/sair de `ptp`) — empilhados no canto superior direito do mapa,
+mesmo tamanho (56px), 20px de espaço entre eles. Sair de
+`ptp`/`mark`/`interaction` sempre volta pro modo de repouso (`baseMode()`
+em `MainApp.jsx`): `edit` se for dev, `ptp` pra todo mundo mais.
 
 `ptp` e `mark` compartilham o mesmo **gesto de interação de base**: passar
 o mouse/dedo por cima de um quadrado o faz crescer (animação, `usePtpScale`
@@ -356,6 +386,53 @@ era `edit` antes dessa mudança, o que tornaria a trava inútil (o app já
 cairia sozinho no modo escondido). Por isso o modo inicial virou `ptp`, e
 o modo de "repouso" pra onde os toggles de `ptp`/`mark` voltam
 (`baseMode()` em `MainApp.jsx`) só é `edit` quando `devMode` está ativo.
+
+Com o modo ativo, a aba **"Editar closes"** também aparece no Toolbar
+(mesmo gate de "Editar pontos") — ver seção seguinte.
+
+### Close Up e modo Interação (IMPLEMENTADO 2026-09-15)
+
+Motivação: dar zoom manual até um grupo de kanban específico é lento em
+tablet, principalmente com muitos lotes próximos. A solução é o
+desenvolvedor desenhar, uma vez, retângulos invisíveis por cima dos grupos
+— e o operador só tocar dentro de um deles pra ganhar um zoom automático e
+centralizado naquele grupo.
+
+**Criação** (modo `closeup`, aba "Editar closes", só dev): botão "+ Close
+Up" na sidebar (`CloseUpsPanel.jsx`) arma a ferramenta; clique-e-arrasto
+livre no mapa (`handleStageMouseDown`/`handleStageMouseMove`/
+`finishCloseUpDrag` em `FloorPlanCanvas.jsx`, mesmo padrão StrictMode-safe
+de `lotDraft`/`finishLotDrag`, mas sem travar em direção/célula — os dois
+cantos são normalizados livremente). Um clique sem arrastar (abaixo de
+`MIN_CLOSEUP_DRAG`) ainda cria um quadrado de tamanho padrão
+(`DEFAULT_CLOSEUP_SIZE`) centrado no clique, em vez de nada — mesma
+filosofia "generosa" da criação de lote. A área é desenhada
+(`CloseUpMarker`) com tracejado laranja só nesse modo; em qualquer outro
+modo que não seja `interaction`, ela nem é renderizada — é isso que garante
+"invisível de verdade" fora da edição.
+
+**Uso** (modo `interaction`, qualquer usuário): a mesma `CloseUpMarker`
+continua montada (pra escutar clique), mas sem fill/stroke nenhum — clique
+dentro dela chama `handleCloseUpClick`, que anima o Stage (`stage.to`,
+`Konva.Easings.EaseOut`, mesmo padrão de `usePtpScale`) até centralizar o
+retângulo na tela, com uma folga de `CLOSEUP_ZOOM_MARGIN` (1.4×) ao redor
+pra sobrar contexto. Sair do zoom não precisa de nada especial: o botão de
+reset e a roda/pinça de zoom já funcionam em qualquer modo. Fora das áreas
+de Close Up, o mapa em `interaction` não reage a clique nenhum —
+`PointMarker`/`LotMarker` só ficam interativos em `edit`/`ptp`/`mark`, e
+`interaction` não é nenhum dos três, então herda essa inércia de graça, sem
+precisar de nenhuma mudança neles.
+
+**Triângulo de "facing"**: bônus independente do Close Up. Toda célula de
+índice 0 de um lote (a sem numeração) ganha um triangulozinho saindo da
+base do quadrado (`LotCell` em `FloorPlanCanvas.jsx`), indicando o lado
+físico "de frente" do lote — sem ele não havia nenhuma pista visual de qual
+extremidade é a célula 1. Fica no referencial local da célula (sempre
+"pra baixo" antes da rotação), então herda a rotação do lote de graça.
+Pontos avulsos ("lotes coringa") **não** ganham o triângulo — são
+renderizados por `PointMarker`, um componente totalmente separado que
+nunca passa por `LotCell`, então a exclusão sai de graça da estrutura
+existente.
 
 ### Painel "Histórico" (modo desenvolvedor, `HistoryPanel.jsx`)
 

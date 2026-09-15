@@ -7,6 +7,11 @@
   --accent-amber-dim: #8a611c;
   --accent-cyan: #2dd4bf;
   --accent-cyan-dim: #1c766c;
+  /* Mesmo tom de theme.js:accentOrange (Close Up / ponto avulso no Konva) —
+     ali só existe pro canvas; este par é a versão pra HTML puro (botão "+
+     Close Up" da CloseUpsPanel). */
+  --accent-orange: #f4610a;
+  --accent-orange-dim: #7c3208;
   --text-primary: #edeff3;
   --text-muted: #8a93a3;
   --state-error: #f45b69;

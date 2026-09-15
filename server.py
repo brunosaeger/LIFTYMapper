@@ -76,7 +76,7 @@ def _app_dir():
 # CONFIGURAÇÃO — confirme o IP do robô antes da demo (ver seção 1.1 do PDF /
 # ip_nav confirmado em testes anteriores).
 # ---------------------------------------------------------------------------
-ROBOT_HOST = "http://192.168.5.180/" #http://192.168.43.74 ou http://172.16.1.244/
+ROBOT_HOST = "http://192.168.5.183/" #http://192.168.43.74 ou http://172.16.1.244/
 LISTEN_PORT = 8000
 # ---------------------------------------------------------------------------
 

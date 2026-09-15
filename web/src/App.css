@@ -457,12 +457,18 @@
   top: 12px;
 }
 
-.eye-toggle {
+.interaction-toggle {
   top: 88px; /* logo abaixo do reset-toggle (56px + 12px de topo + 20px de respiro) */
 }
 
+.interaction-toggle.is-active {
+  opacity: 1;
+  border-color: var(--accent-amber);
+  color: var(--accent-amber);
+}
+
 .mark-toggle {
-  top: 164px; /* logo abaixo do eye-toggle (88px + 56px + 20px de respiro) */
+  top: 164px; /* logo abaixo do interaction-toggle (88px + 56px + 20px de respiro) */
 }
 
 .mark-toggle.is-active {
@@ -702,6 +708,25 @@
   font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
   font-size: 11px;
   color: var(--text-muted);
+}
+
+/* Botão "+ Close Up" da CloseUpsPanel — mesma forma de .toolbar__add, cor
+   laranja (tema do Close Up, ver App.jsx/theme.js:accentOrange) em vez do
+   ciano de +Ponto/+Lote. */
+.closeups-panel__add {
+  border: 1px solid var(--accent-orange-dim);
+  background: transparent;
+  color: var(--accent-orange);
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+.closeups-panel__add.is-active {
+  background: var(--accent-orange-dim);
+  color: var(--text-primary);
 }
 
 .points-panel__delete {
