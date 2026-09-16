@@ -6,7 +6,7 @@ import LotsPanel from './components/LotsPanel';
 import CloseUpsPanel from './components/CloseUpsPanel';
 import PalletHeightsPanel from './components/PalletHeightsPanel';
 import PointToPointBar from './components/PointToPointBar';
-import RouteQueue from './components/RouteQueue';
+import QueuePanel from './components/QueuePanel';
 import OccupancyPanel from './components/OccupancyPanel';
 import HistoryPanel from './components/HistoryPanel';
 import UsersPanel from './components/UsersPanel';
@@ -102,12 +102,18 @@ export default function MainApp({ user, onLogout }) {
   // 'edit' só é alcançável em modo desenvolvedor (ver handleDevButtonClick e
   // baseMode abaixo) — o padrão pra quem não desbloqueou é 'ptp', o modo
   // operacional do dia a dia.
-  const [mode, setMode] = useState('ptp'); // 'edit' | 'ptp' | 'mark'
+  const [mode, setMode] = useState('ptp'); // 'edit' | 'ptp' | 'mark' | 'queue'
   const [addTool, setAddTool] = useState(null); // null | 'point' | 'lot'
   const [pendingLotPrefix, setPendingLotPrefix] = useState('');
   const [selectedId, setSelectedId] = useState(null);
   const [selectedLotId, setSelectedLotId] = useState(null);
   const [selectedCloseUpId, setSelectedCloseUpId] = useState(null);
+  // Painel Fila: qual rota da lista de espera está "isolada" no mapa agora
+  // (null = mostra a rota em andamento, o padrão — ver mapPickupNames
+  // abaixo). Bolinha de notificação: quantas tasks foram solicitadas desde
+  // a última vez que o painel foi aberto (zerada em handleToggleQueueMode).
+  const [selectedQueueRouteId, setSelectedQueueRouteId] = useState(null);
+  const [queueNotifCount, setQueueNotifCount] = useState(0);
 
   // Modo desenvolvedor: libera a aba "Editar pontos" e os botões "+ Ponto"/
   // "+ Lote" no Toolbar (ver Toolbar.jsx) — sem ele, mode nunca chega a
@@ -152,6 +158,7 @@ export default function MainApp({ user, onLogout }) {
     setPickupNames([]);
     setDropoffNames([]);
     setActiveSlot('pickup');
+    setSelectedQueueRouteId(null);
   }
 
   function handleModeChange(next) {
@@ -193,6 +200,24 @@ export default function MainApp({ user, onLogout }) {
   function handleToggleInteractionMode() {
     setMode((m) => (m === 'interaction' ? baseMode() : 'interaction'));
     resetSelection();
+  }
+
+  // Fila: mesmo padrão de mark/ptp/interaction acima, botão flutuante
+  // próprio (ícone de índice, ver FloorPlanCanvas.jsx) — ocupa o espaço que
+  // era da roleta de zoom, removida (o modo Interação já cobre bem esse
+  // gesto). Abrir o painel zera a notificação (bolinha vermelha com a
+  // contagem de tasks solicitadas desde a última vez que foi aberto).
+  function handleToggleQueueMode() {
+    const entering = mode !== 'queue';
+    setMode(entering ? 'queue' : baseMode());
+    resetSelection();
+    if (entering) setQueueNotifCount(0);
+  }
+
+  // Clique numa rota do painel Fila: alterna a seleção (clicar na mesma
+  // desfaz). null = volta a mostrar a rota em andamento no mapa (padrão).
+  function handleSelectQueueRoute(id) {
+    setSelectedQueueRouteId(id);
   }
 
   // "{ }" no canto do Toolbar: entra pedindo senha (ver DevModeModal);
@@ -524,6 +549,9 @@ export default function MainApp({ user, onLogout }) {
         ? pairs.length + ' rotas enviadas em sequência: ' + pairs.map((p) => p.pickup + '→' + p.dropoff).join(', ')
         : TOAST_BY_SLOT[slot] + pairs[0].pickup + ' → ' + pairs[0].dropoff;
       showToast(label, slot === 'current' ? 'success' : 'info');
+      // Bolinha de notificação do botão Fila: conta as tasks solicitadas
+      // desde a última vez que o painel foi aberto (ver handleToggleQueueMode).
+      setQueueNotifCount((c) => c + pairs.length);
       // Limpa só no sucesso: se deu erro, a seleção montada continua ali
       // pro operador corrigir em vez de ter que remontar tudo do zero.
       handleClearSelection();
@@ -579,15 +607,36 @@ export default function MainApp({ user, onLogout }) {
     }
   }
 
-  // O que o mapa destaca: enquanto há seleção sendo montada, é ela (com a
-  // numeração da sequência); assim que a seleção é limpa — o que acontece
-  // logo após enviar — quem prevalece é a ROTA ATUAL, um par só, sem
-  // número. Ou seja, a numeração é um apoio de montagem e some quando a
-  // execução começa, deixando o mapa mostrando o que o robô está fazendo
-  // AGORA em vez do que já foi despachado.
+  // Painel Fila: rotas "de espera" na ordem em que o robô as verá — a
+  // pendingRoute (se houver) já foi disparada pro dispatch como "próxima",
+  // o resto é fila local (ver CONTEXT.md, "Fila de rotas compartilhada").
+  const waitingRoutes = pendingRoute ? [pendingRoute, ...routeQueue] : routeQueue;
+
+  // Rota selecionada no painel Fila (clique numa das "próximas rotas") — só
+  // procura nas de espera; clicar na rota em andamento manda null (ver
+  // QueuePanel/handleSelectQueueRoute), que já é o padrão abaixo.
+  const selectedQueueRoute = selectedQueueRouteId
+    ? waitingRoutes.find((r) => r.id === selectedQueueRouteId)
+    : null;
+  // "Lotes em sequência" (ver CONTEXT.md): rotas da mesma sequência
+  // compartilham groupId. Selecionar uma delas "isola" o grupo inteiro no
+  // mapa — sem groupId (rota avulsa), isola só ela mesma.
+  const selectedQueueGroup = selectedQueueRoute
+    ? (selectedQueueRoute.groupId
+      ? waitingRoutes.filter((r) => r.groupId === selectedQueueRoute.groupId)
+      : [selectedQueueRoute])
+    : null;
+
+  // O que o mapa destaca, em ordem de prioridade:
+  // 1. Seleção sendo montada no Ponto a Ponto (com a numeração da sequência);
+  // 2. Rota (ou grupo) selecionada no painel Fila;
+  // 3. A ROTA ATUAL, um par só, sem número — o padrão de repouso, o que o
+  //    robô está fazendo AGORA.
   const mapPickupNames = pickupNames.length ? pickupNames
+    : selectedQueueGroup ? selectedQueueGroup.map((r) => r.pickup)
     : currentRoute ? [currentRoute.pickup] : EMPTY_SELECTION;
   const mapDropoffNames = dropoffNames.length ? dropoffNames
+    : selectedQueueGroup ? selectedQueueGroup.map((r) => r.dropoff)
     : currentRoute ? [currentRoute.dropoff] : EMPTY_SELECTION;
 
   return (
@@ -647,6 +696,9 @@ export default function MainApp({ user, onLogout }) {
           onTogglePtpMode={handleTogglePtpMode}
           interactionModeActive={mode === 'interaction'}
           onToggleInteractionMode={handleToggleInteractionMode}
+          queueModeActive={mode === 'queue'}
+          onToggleQueueMode={handleToggleQueueMode}
+          queueNotifCount={queueNotifCount}
           emergencyActive={emergency}
           onToggleEmergency={handleToggleEmergency}
         />
@@ -710,9 +762,15 @@ export default function MainApp({ user, onLogout }) {
               activeSlot={activeSlot}
               onActiveSlotChange={setActiveSlot}
             />
-            <RouteQueue
+          </aside>
+        )}
+        {mode === 'queue' && (
+          <aside className="sidebar sidebar--queue">
+            <QueuePanel
               currentRoute={currentRoute}
-              queue={pendingRoute ? [pendingRoute, ...routeQueue] : routeQueue}
+              waitingRoutes={waitingRoutes}
+              selectedRouteId={selectedQueueRouteId}
+              onSelectRoute={handleSelectQueueRoute}
               onCancelCurrent={handleCancelCurrent}
               onRemoveQueued={handleRemoveQueued}
             />

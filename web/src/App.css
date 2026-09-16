@@ -496,81 +496,38 @@
   opacity: 1;
 }
 
-/* --- slider vertical de zoom (logo abaixo da pilha de botões flutuantes) ---
-   Posição da bolinha = nível de zoom: CENTRO = zoom default (encaixe, igual
-   ao abrir a página / botão de refresh), pra cima = mais zoom, pra baixo =
-   menos. A bolinha FICA onde é solta (não volta pro centro) e também
-   acompanha o zoom feito por roda/pinça. Lógica em FloorPlanCanvas.jsx
-   (sliderFracToScale / handleZoomPointer*). Barra translúcida em repouso,
-   100% quando o ponteiro/dedo encosta nela. */
-.zoom-slider {
-  position: absolute;
-  right: 12px;
+/* --- botão "Fila" (logo abaixo da pilha de botões flutuantes) -------------
+   Ocupa o espaço que era do slider vertical de zoom (removido — o modo
+   Interação cobre bem esse gesto agora). Clicar abre o painel Fila na
+   sidebar (ver .sidebar--queue abaixo) e mostra visualmente no mapa a
+   origem/destino da rota selecionada ali (MainApp.jsx). */
+.queue-toggle {
   top: 316px; /* ptp-toggle termina em 296 (240 + 56) + 20 de respiro */
-  width: 56px;
-  height: 640px;
-  max-height: calc(100% - 340px); /* nunca passa da borda inferior do mapa */
-  z-index: 10;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 0;
-  opacity: 0.5;
-  transition: opacity 0.15s ease;
-  touch-action: none; /* o arrasto vertical é nosso, não scroll da página */
 }
 
-.zoom-slider:hover,
-.zoom-slider.is-active {
+.queue-toggle.is-active {
   opacity: 1;
+  border-color: var(--accent-orange);
+  color: var(--accent-orange);
 }
 
-.zoom-slider__end {
-  flex: none;
-  font-size: 15px;
-  line-height: 1;
-  color: var(--text-primary);
-  -webkit-user-select: none;
-  user-select: none;
-}
-
-.zoom-slider__track {
-  position: relative;
-  flex: 1;
-  width: 6px;
-  border-radius: 3px;
-  background: var(--panel-line);
-  cursor: pointer;
-}
-
-.zoom-slider__knob {
+/* Bolinha de notificação: number de tasks solicitadas desde a última vez
+   que o painel Fila foi aberto (zerada em handleToggleQueueMode). */
+.queue-toggle__badge {
   position: absolute;
-  left: 50%;
-  top: 50%; /* JS sobrescreve style.top (posição = nível de zoom) */
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: var(--text-primary);
-  border: 1px solid var(--panel-line);
-  transform: translate(-50%, -50%);
-  /* transition curta só no `top` pra a bolinha deslizar suave quando o zoom
-     muda por roda/pinça — NÃO é mola: ela nunca volta sozinha pro centro */
-  transition: top 0.1s linear, transform 0.12s ease;
-}
-
-/* área de toque maior que o disco visível (touchscreen) */
-.zoom-slider__knob::before {
-  content: '';
-  position: absolute;
-  inset: -14px;
-}
-
-/* durante o arrasto: acompanha o dedo sem atraso (sem transition de posição)
-   e cresce um pouco */
-.zoom-slider.is-active .zoom-slider__knob {
-  transition: transform 0.12s ease;
-  transform: translate(-50%, -50%) scale(1.2);
+  top: -6px;
+  left: -6px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 10px;
+  background: var(--state-error);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  border: 1px solid var(--panel-raised);
 }
 
 /* --- side panels (points/lots list / point-to-point) ----------------------- */
@@ -592,12 +549,22 @@
   display: flex;
   flex-direction: column;
   gap: 24px;
+  transition: width 0.3s ease;
+}
+
+/* Painel Fila (botão "índice" no mapa, ver .queue-toggle): ~60% mais larga
+   que a sidebar normal, pra caber a representação incrementada da fila
+   (barra de progresso, nomes em destaque) sem apertar. O conteúdo interno
+   é flex/bloco normal, então acompanha a largura suavemente junto com a
+   transition acima — sem precisar de transition por filho. */
+.sidebar--queue {
+  width: 448px;
 }
 
 .points-panel,
 .lots-panel,
 .ptp-bar,
-.route-queue {
+.queue-panel {
   display: flex;
   flex-direction: column;
 }
@@ -1244,18 +1211,25 @@
   background: var(--accent-cyan-dim);
 }
 
-/* --- fila de rotas (modo Ponto a Ponto) ------------------------------------ */
-.route-queue {
+/* --- painel Fila (botão "índice" no mapa, ver .queue-toggle) ---------------
+   Movido pra fora do modo Ponto a Ponto — antes vivia junto do PointToPointBar
+   (RouteQueue.jsx), agora é o conteúdo da sidebar quando mode === 'queue'
+   (QueuePanel.jsx). Lógica de fila/cancelamento/prioridade é 100% a mesma
+   (server.py) — só a representação visual mudou de lugar e ganhou: nome da
+   rota atual em verde vivo ("ON") com barra pulsando, próximas em âmbar
+   ("standby"), e destaque de seleção (clicar numa rota mostra origem/destino
+   dela no mapa, ver MainApp.jsx). */
+.queue-panel {
   gap: 20px;
 }
 
-.route-queue__section {
+.queue-panel__section {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
-.route-queue__list {
+.queue-panel__list {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -1265,35 +1239,54 @@
 }
 
 /* Rolagem própria (mouse ou dedo) quando a fila não cabe mais — o resto da
-   sidebar (indicador de pickup/destino, rota em andamento) fica fixo. */
-.route-queue__list--scroll {
-  max-height: 220px;
+   sidebar (rota em andamento) fica fixo. */
+.queue-panel__list--scroll {
+  max-height: 320px;
   overflow-y: auto;
   padding-right: 2px;
 }
 
-.route-queue__list--scroll::-webkit-scrollbar {
+.queue-panel__list--scroll::-webkit-scrollbar {
   width: 6px;
 }
 
-.route-queue__list--scroll::-webkit-scrollbar-thumb {
+.queue-panel__list--scroll::-webkit-scrollbar-thumb {
   background: var(--panel-line);
   border-radius: 3px;
 }
 
-.route-row {
+.queue-route {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 8px;
-  padding: 8px 10px;
+  padding: 2px;
   border-radius: 6px;
   background: var(--panel-base);
   border: 1px solid var(--panel-line);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-.route-row__label {
+/* Anel de seleção: qual rota está sendo mostrada no mapa agora — a atual por
+   padrão, ou a que foi clicada na lista de espera (ver onSelectRoute). */
+.queue-route.is-selected {
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 0 1px var(--accent-cyan) inset;
+}
+
+.queue-route__main {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.queue-route__name {
   font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
   font-size: 13px;
   overflow: hidden;
@@ -1301,10 +1294,63 @@
   white-space: nowrap;
 }
 
-.route-row__cancel {
+/* Rota em andamento: verde bem vivo, sugerindo "ON". */
+.queue-route--current .queue-route__name {
+  color: var(--state-success);
+  font-weight: 700;
+}
+
+/* Próximas rotas: tom âmbar de "standby". */
+.queue-route--waiting .queue-route__name {
+  color: var(--accent-amber);
+}
+
+/* Barra de "em andamento": não é uma % real (o robô nunca expõe progresso
+   fino, ver CONTEXT.md) — é um indicador indeterminado, pulsando sem parar,
+   só pra confirmar visualmente "a rota está rodando agora". */
+.queue-route__bar {
+  position: relative;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--panel-line);
+  overflow: hidden;
+}
+
+.queue-route__bar-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -40%;
+  width: 40%;
+  border-radius: 2px;
+  background: var(--state-success);
+  animation: queue-bar-sweep 1.4s ease-in-out infinite;
+}
+
+@keyframes queue-bar-sweep {
+  0% { left: -40%; }
+  100% { left: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .queue-route__bar-fill {
+    left: 0;
+    width: 100%;
+    animation: queue-bar-pulse 1.6s ease-in-out infinite;
+  }
+}
+
+@keyframes queue-bar-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+.queue-route__cancel {
   flex: none;
+  align-self: center;
   width: 24px;
   height: 24px;
+  margin-right: 8px;
   border: none;
   border-radius: 4px;
   background: transparent;
@@ -1312,7 +1358,7 @@
   font-weight: 700;
 }
 
-.route-row__cancel:hover {
+.queue-route__cancel:hover {
   background: var(--state-error);
   color: var(--text-primary);
 }

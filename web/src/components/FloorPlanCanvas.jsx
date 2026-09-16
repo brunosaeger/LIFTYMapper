@@ -21,12 +21,6 @@ const MAX_ZOOM_MULT = 8; // múltiplo do "encaixar na tela" — teto de quanto d
 // além do encaixe (metade do tamanho de encaixe). Usado tanto pelo slider
 // vertical (bolinha no fundo) quanto pelo clamp de roda/pinça.
 const MIN_ZOOM_MULT = 0.5;
-// Slider vertical de zoom (a barrinha alta do lado direito, embaixo dos 4
-// botões): posição da bolinha = nível de zoom. CENTRO = zoom default
-// (encaixe), topo = MAX_ZOOM_MULT×, fundo = MIN_ZOOM_MULT×. Mapeamento
-// exponencial (cada fração de curso multiplica a escala pelo mesmo fator).
-const SLIDER_MAX_MULT = MAX_ZOOM_MULT;
-const SLIDER_MIN_MULT = MIN_ZOOM_MULT;
 const LOT_FILL_ALPHA = 0.32;
 // Tamanho padrão de célula ao criar um lote novo (px "de conteúdo", ou seja,
 // pixel real do floorplan.jpg, não pixel de tela). Extraído dos 3 lotes que
@@ -634,6 +628,9 @@ export default function FloorPlanCanvas({
   onTogglePtpMode,
   interactionModeActive,
   onToggleInteractionMode,
+  queueModeActive,
+  onToggleQueueMode,
+  queueNotifCount,
   emergencyActive,
   onToggleEmergency,
 }) {
@@ -727,129 +724,6 @@ export default function FloorPlanCanvas({
         setStagePos(newPos);
       },
     });
-  }
-
-  // --- zoom: slider vertical (posição = nível de zoom) --------------------
-  // A bolinha é a "porcentagem" de zoom: CENTRO = zoom default (o mesmo
-  // "encaixar na tela" de quando a página abre / do botão de refresh),
-  // topo = mais zoom (até SLIDER_MAX_MULT×), fundo = menos zoom (até
-  // SLIDER_MIN_MULT×, mais aberto que o encaixe). A bolinha FICA onde é
-  // deixada — não volta pro centro — e acompanha também o zoom feito por
-  // roda/pinça (posição derivada de stageScale, ver useEffect abaixo).
-  //
-  // Mapeamento log/exponencial (não linear): assim cada fração igual de
-  // curso multiplica a escala pelo mesmo fator, que é como zoom "sente"
-  // constante — mesma ideia do wheel/pinça, que multiplicam a escala.
-  //
-  // "O ponto de zoom é a parte do mapa onde o usuário soltou o clique (ou
-  // dedo) pela última vez" — guardado em COORDENADAS DE CONTEÚDO (px da
-  // imagem, invariante a zoom/pan), atualizado a cada mover/soltar do
-  // ponteiro sobre o canvas (rememberFocal). O slider mantém esse ponto
-  // fixo na tela enquanto reescala.
-  const focalContentRef = useRef(null);
-  const zoomDraggingRef = useRef(false);
-  const knobRef = useRef(null);
-  const sliderRef = useRef(null);
-  const sliderTrackRef = useRef(null);
-
-  // A classe "is-active" (barra 100% + bolinha maior) é alternada por
-  // classList, NÃO por estado: um setState no meio do arrasto re-renderizaria
-  // a <Stage> com o stageScale/stagePos antigos (só sincronizam no soltar) e o
-  // react-konva reverteria por um frame o transform que mutamos direto —
-  // mesmo motivo do pinça adiar o setState pro fim do gesto.
-  function setSliderActive(on) {
-    sliderRef.current?.classList.toggle('is-active', on);
-  }
-
-  function rememberFocal(stage) {
-    if (!stage) return;
-    const p = stage.getPointerPosition();
-    if (!p) return;
-    focalContentRef.current = toContent(p, stage);
-  }
-
-  function setKnobVisual(frac) {
-    if (knobRef.current) knobRef.current.style.top = frac * 100 + '%';
-  }
-
-  // fração da barra [0 topo .. 1 fundo]  ->  escala absoluta do Stage
-  function sliderFracToScale(frac) {
-    const base = baseScale || 0.01;
-    const t = (0.5 - frac) * 2; // [-1 fundo .. +1 topo]
-    const mult = t >= 0
-      ? Math.pow(SLIDER_MAX_MULT, t)
-      : Math.pow(1 / SLIDER_MIN_MULT, t); // t<0: (1/0.5)^t = 0.5^|t|
-    return base * mult;
-  }
-
-  // escala absoluta do Stage  ->  fração da barra (posição da bolinha)
-  function sliderScaleToFrac(scale) {
-    const base = baseScale || 0.01;
-    const r = scale / base;
-    const t = r >= 1
-      ? Math.log(r) / Math.log(SLIDER_MAX_MULT)
-      : Math.log(r) / Math.log(1 / SLIDER_MIN_MULT);
-    return Math.max(0, Math.min(1, 0.5 - t / 2));
-  }
-
-  // Enquanto NÃO se arrasta o slider, a bolinha reflete o zoom atual — pega
-  // o zoom inicial, o botão de refresh (ambos = centro) e roda/pinça.
-  useEffect(() => {
-    if (zoomDraggingRef.current || !baseScale) return;
-    setKnobVisual(sliderScaleToFrac(stageScale));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stageScale, baseScale]);
-
-  function zoomFracFromEvent(e) {
-    const rect = sliderTrackRef.current?.getBoundingClientRect();
-    if (!rect) return 0.5;
-    return Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
-  }
-
-  // Aplica a escala correspondente à posição da bolinha, mantendo o ponto
-  // focal (último toque no mapa) parado na tela. Muta o node do Konva DIRETO
-  // (sem setState) durante o arrasto — o estado React só sincroniza ao
-  // soltar (handleZoomPointerUp), mesmo padrão do pinça.
-  function applyZoomFromFrac(frac) {
-    setKnobVisual(frac);
-    const stage = stageRef.current;
-    if (!stage) return;
-    const oldScale = stage.scaleX();
-    const newScale = sliderFracToScale(frac);
-    if (newScale === oldScale) return;
-    const focal = focalContentRef.current ||
-      toContent({ x: containerWidth / 2, y: containerHeight / 2 }, stage);
-    const sx = focal.x * oldScale + stage.x();
-    const sy = focal.y * oldScale + stage.y();
-    stage.scale({ x: newScale, y: newScale });
-    stage.position({ x: sx - focal.x * newScale, y: sy - focal.y * newScale });
-    stage.batchDraw();
-  }
-
-  function handleZoomPointerDown(e) {
-    e.currentTarget.setPointerCapture(e.pointerId);
-    zoomDraggingRef.current = true;
-    setSliderActive(true);
-    applyZoomFromFrac(zoomFracFromEvent(e));
-  }
-
-  function handleZoomPointerMove(e) {
-    if (!zoomDraggingRef.current) return;
-    applyZoomFromFrac(zoomFracFromEvent(e));
-  }
-
-  function handleZoomPointerUp(e) {
-    if (!zoomDraggingRef.current) return;
-    zoomDraggingRef.current = false;
-    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* ponteiro já foi */ }
-    setSliderActive(false);
-    // Sincroniza o estado React com o transform aplicado direto no node —
-    // mesma sincronia do fim do pinça (handleTouchEnd).
-    const stage = stageRef.current;
-    if (stage) {
-      setStageScale(stage.scaleX());
-      setStagePos({ x: stage.x(), y: stage.y() });
-    }
   }
 
   // lotDraftRef espelha lotDraft (estado, só pra re-renderizar o preview).
@@ -1016,7 +890,6 @@ export default function FloorPlanCanvas({
   }
 
   function commitOnRelease() {
-    rememberFocal(stageRef.current); // "onde soltou o clique/dedo pela última vez"
     finishLotDrag();
     finishCloseUpDrag();
     if (mode === 'mark') {
@@ -1099,7 +972,6 @@ export default function FloorPlanCanvas({
   function handleStageMouseDown(e) {
     wasPanningRef.current = false; // novo gesto começando — ver onDragStart do Stage
     const stage = e.target.getStage();
-    rememberFocal(stage); // ponto focal do slider de zoom = último toque no mapa
     const startedOnMarker = e.target !== stage;
 
     // Clicar e arrastar deve sempre poder mover o mapa (pan), em qualquer
@@ -1138,7 +1010,6 @@ export default function FloorPlanCanvas({
 
   function handleStageMouseMove(e) {
     const stage = e.target.getStage();
-    rememberFocal(stage); // segue o ponteiro/dedo pelo mapa (ver stepZoom)
     const pointer = stage.getPointerPosition();
     const draft = lotDraftRef.current;
     if (draft) {
@@ -1361,20 +1232,26 @@ export default function FloorPlanCanvas({
           <path fillRule="evenodd" clipRule="evenodd" d="M101.41,37.05c-1.95,2.14-4.22,4.05-6.77,5.6c-0.31,0.23-0.74,0.26-1.09,0.03c-3.76-2.39-6.93-5.27-9.41-8.4 c-3.43-4.3-5.59-9.07-6.33-13.66c-0.75-4.66-0.05-9.14,2.27-12.79C81,6.4,82.17,5.08,83.59,3.95c3.27-2.6,7-3.98,10.73-3.95 c3.58,0.03,7.12,1.36,10.18,4.15c1.08,0.98,1.98,2.09,2.72,3.31c2.49,4.11,3.03,9.34,1.93,14.65 C108.07,27.36,105.39,32.69,101.41,37.05L101.41,37.05L101.41,37.05z M9.82,64.7h8.72c1.45,0,2.57,0.36,3.35,1.08 c0.78,0.72,1.17,1.61,1.17,2.67c0,0.89-0.28,1.66-0.83,2.29c-0.37,0.43-0.91,0.76-1.62,1.01c1.08,0.26,1.88,0.7,2.39,1.34 c0.51,0.63,0.76,1.43,0.76,2.39c0,0.78-0.18,1.48-0.54,2.11c-0.36,0.62-0.86,1.12-1.49,1.48c-0.39,0.22-0.98,0.39-1.77,0.49 c-1.05,0.14-1.74,0.21-2.09,0.21H9.82V64.7L9.82,64.7z M14.51,70.62h2.03c0.73,0,1.23-0.13,1.52-0.38 c0.28-0.25,0.43-0.61,0.43-1.09c0-0.44-0.14-0.78-0.43-1.03c-0.28-0.25-0.78-0.37-1.49-0.37h-2.06V70.62L14.51,70.62z M14.51,76.53 h2.37c0.8,0,1.37-0.14,1.7-0.43c0.33-0.28,0.49-0.66,0.49-1.14c0-0.45-0.16-0.8-0.49-1.07c-0.33-0.27-0.9-0.41-1.71-0.41h-2.36 V76.53L14.51,76.53z M96.62,21.82h-5.27l-0.76,2.48h-4.75l5.67-15.07h5.1l5.65,15.07h-4.87L96.62,21.82L96.62,21.82z M95.64,18.56 l-1.64-5.41l-1.65,5.41H95.64L95.64,18.56z M23.88,92.06c-1.95,2.14-4.22,4.05-6.77,5.6c-0.31,0.23-0.74,0.26-1.09,0.03 c-3.76-2.4-6.93-5.27-9.41-8.4C3.19,85,1.03,80.23,0.29,75.63c-0.75-4.66-0.05-9.14,2.27-12.78c0.91-1.44,2.08-2.75,3.51-3.88 c3.27-2.6,7-3.98,10.72-3.95c3.58,0.03,7.12,1.36,10.18,4.15c1.08,0.98,1.98,2.09,2.72,3.31c2.49,4.11,3.03,9.34,1.93,14.65 C30.54,82.37,27.86,87.7,23.88,92.06L23.88,92.06L23.88,92.06z M17.07,103.04c4.51,0,8.32,3.02,9.52,7.14h59.97 c2.96,0,5.66-1.21,7.62-3.17c1.96-1.96,3.17-4.65,3.17-7.62l0,0c0-2.96-1.21-5.66-3.17-7.62c-1.96-1.96-4.65-3.17-7.62-3.17H65.58 v0c-4.71,0-8.99-1.92-12.09-5.02c-3.1-3.1-5.02-7.38-5.02-12.09l0,0c0-4.71,1.92-8.99,5.02-12.09c3.1-3.1,7.38-5.02,12.09-5.02 h18.97c1.3-3.96,5.03-6.82,9.42-6.82c5.48,0,9.92,4.44,9.92,9.92c0,5.48-4.44,9.92-9.92,9.92c-4.35,0-8.04-2.8-9.38-6.69H65.58 c-2.96,0-5.66,1.21-7.62,3.17c-1.96,1.96-3.17,4.65-3.17,7.62l0,0c0,2.96,1.21,5.66,3.17,7.62c1.94,1.94,4.61,3.15,7.55,3.17v0 h21.06c4.71,0,8.99,1.92,12.09,5.02c3.1,3.1,5.02,7.38,5.02,12.09l0,0c0,4.71-1.92,8.99-5.02,12.09c-3.1,3.1-7.38,5.02-12.09,5.02 H26.34c-1.43,3.73-5.04,6.37-9.27,6.37c-5.48,0-9.92-4.44-9.92-9.92C7.15,107.48,11.59,103.04,17.07,103.04L17.07,103.04z" />
         </svg>
       </button>
-      <div className="zoom-slider" ref={sliderRef} aria-hidden="true">
-        <span className="zoom-slider__end">+</span>
-        <div
-          className="zoom-slider__track"
-          ref={sliderTrackRef}
-          onPointerDown={handleZoomPointerDown}
-          onPointerMove={handleZoomPointerMove}
-          onPointerUp={handleZoomPointerUp}
-          onPointerCancel={handleZoomPointerUp}
-        >
-          <div className="zoom-slider__knob" ref={knobRef} />
-        </div>
-        <span className="zoom-slider__end">&minus;</span>
-      </div>
+      <button
+        type="button"
+        className={'view-toggle queue-toggle' + (queueModeActive ? ' is-active' : '')}
+        onClick={onToggleQueueMode}
+        aria-label={queueModeActive ? 'Sair do painel Fila' : 'Abrir painel Fila'}
+        title="Fila"
+      >
+        {/* Ícone de índice/listagem — representa a fila de rotas. */}
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <line x1="8" y1="6" x2="21" y2="6" />
+          <line x1="8" y1="12" x2="21" y2="12" />
+          <line x1="8" y1="18" x2="21" y2="18" />
+          <line x1="3" y1="6" x2="3.01" y2="6" />
+          <line x1="3" y1="12" x2="3.01" y2="12" />
+          <line x1="3" y1="18" x2="3.01" y2="18" />
+        </svg>
+        {queueNotifCount > 0 && (
+          <span className="queue-toggle__badge" aria-hidden="true">{queueNotifCount}</span>
+        )}
+      </button>
       {stageScale > 0 && image && (
         <Stage
           ref={stageRef}
