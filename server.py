@@ -76,7 +76,7 @@ def _app_dir():
 # CONFIGURAÇÃO — confirme o IP do robô antes da demo (ver seção 1.1 do PDF /
 # ip_nav confirmado em testes anteriores).
 # ---------------------------------------------------------------------------
-ROBOT_HOST = "http://192.168.5.183/" #http://192.168.43.74 ou http://172.16.1.244/
+ROBOT_HOST = "http://192.168.5.193/" #http://192.168.43.74 ou http://172.16.1.244/
 LISTEN_PORT = 8000
 # ---------------------------------------------------------------------------
 
@@ -677,6 +677,40 @@ def validate_route_chain(lots, occupied, pairs):
             return "Não dá pra soltar em %s (rota %d): ela ou alguma posição antes dela no lote está ocupada." % (dropoff, i + 1)
         projected.add(dropoff)
     return None  # cadeia inteira válida
+
+
+# Concorrência (pedido do supervisor, 2026-09-18): duas pessoas enviando a
+# MESMA task quase ao mesmo tempo, ou uma task cujo pickup/dropoff já está
+# em uso por uma rota em andamento/pendente/na fila. `validate_route_chain`
+# acima NÃO pega esse caso — só enxerga `occupied` (a calibração), nunca a
+# fila — e `occupied[pickup]` continua True até o PICKUP terminar de
+# verdade (Caso 2, ver _queue_tick): enquanto o robô ainda está a caminho,
+# o pallet fisicamente segue lá, então uma segunda rota pro MESMO pickup
+# (ou pro mesmo dropoff de uma rota já na fila) passa pela validação de
+# ocupação sem problema nenhum. Aqui a checagem é contra a FILA de verdade,
+# não a calibração.
+def _active_routes(state):
+    routes = []
+    if state.get("currentRoute"):
+        routes.append(state["currentRoute"])
+    if state.get("pendingRoute"):
+        routes.append(state["pendingRoute"])
+    routes.extend(state.get("routeQueue") or [])
+    return routes
+
+
+# Devolve (nome_em_conflito, rota_conflitante) se `pickup` ou `dropoff` já
+# for o pickup OU o dropoff de alguma rota ativa — em qualquer um dos 4
+# jeitos de colidir (mesmo pickup, mesmo dropoff, pickup novo = dropoff de
+# outra rota, dropoff novo = pickup de outra rota), a posição física já tem
+# um robô comprometido com ela, então uma segunda rota pra ela não pode ser
+# aceita. `None, None` se não colidir com nada.
+def _find_route_conflict(pickup, dropoff, active_routes):
+    for route in active_routes:
+        for name in (pickup, dropoff):
+            if name == route["pickup"] or name == route["dropoff"]:
+                return name, route
+    return None, None
 
 
 # Tira do estado local as rotas que sobraram de um grupo cuja cadeia se
@@ -1632,6 +1666,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     {"error": "Parada de emergência ativa — libere o robô antes de enviar rotas."},
                     ensure_ascii=False).encode("utf-8"))
                 return
+            # Concorrência (ver _find_route_conflict acima): barra ANTES de
+            # despachar qualquer rota do lote — uma checa, todas ficam de
+            # fora, pra nunca despachar metade de uma sequência e rejeitar o
+            # resto. Contra o estado da FILA (lido agora, sob o mesmo lock
+            # que decide os slots logo abaixo — duas requisições concorrentes
+            # disputam o QUEUE_LOCK, a segunda a entrar já vê a rota que a
+            # primeira acabou de enfileirar).
+            active_routes = _active_routes(state)
+            for pair in pairs:
+                conflicting_name, conflict = _find_route_conflict(pair["pickup"], pair["dropoff"], active_routes)
+                if conflict:
+                    who = conflict.get("user") or "outro operador"
+                    msg = ("Não dá pra enviar %s → %s: %s já está reservado por outra rota em "
+                           "andamento/fila (%s → %s, enviada por %s). Aguarde ela terminar ou "
+                           "cancele-a antes.") % (
+                        pair["pickup"], pair["dropoff"], conflicting_name,
+                        conflict["pickup"], conflict["dropoff"], who,
+                    )
+                    self._relay(409, "application/json", json.dumps({"error": msg}, ensure_ascii=False).encode("utf-8"))
+                    return
             for route in routes:
                 try:
                     if not state.get("currentRoute"):

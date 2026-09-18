@@ -2,7 +2,7 @@ import { LOT_COLORS } from '../theme';
 
 const COLOR_KEYS = Object.keys(LOT_COLORS);
 
-export default function LotsPanel({ lots, selectedLotId, onSelect, onRenamePrefix, onDelete, onSetColor, onToggleNames }) {
+export default function LotsPanel({ lots, selectedLotId, onSelect, onRenamePrefix, onRenameDisplayName, onDelete, onSetColor, onToggleNames }) {
   if (lots.length === 0) return null;
   return (
     <div className="lots-panel">
@@ -34,6 +34,17 @@ export default function LotsPanel({ lots, selectedLotId, onSelect, onRenamePrefi
                 ✕
               </button>
             </div>
+            {/* Apelido puramente visual — mostrado no lugar do prefixo
+                técnico em qualquer lista/seleção pro operador (mapa, ponto
+                a ponto, fila, ocupação). O prefixo acima continua sendo o
+                nome de verdade, já configurado no robô. */}
+            <input
+              className="points-panel__input lots-panel__display-name"
+              value={lot.displayName || ''}
+              onChange={(e) => onRenameDisplayName(lot.id, e.target.value)}
+              placeholder="Nome fantasia (opcional)"
+              aria-label={'Nome fantasia do lote ' + lot.prefix}
+            />
             <div className="lots-panel__swatches">
               {COLOR_KEYS.map((key) => (
                 <button

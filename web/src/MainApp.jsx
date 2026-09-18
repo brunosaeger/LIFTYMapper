@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import Toolbar from './components/Toolbar';
-import RobotStatusBanner from './components/RobotStatusBanner';
+import CloseUpStatusBanner from './components/CloseUpStatusBanner';
 import PointsPanel from './components/PointsPanel';
 import LotsPanel from './components/LotsPanel';
 import CloseUpsPanel from './components/CloseUpsPanel';
@@ -13,7 +13,7 @@ import UsersPanel from './components/UsersPanel';
 import FloorPlanCanvas from './components/FloorPlanCanvas';
 import Toast from './components/Toast';
 import DevModeModal from './components/DevModeModal';
-import { useCalibration, lotCellName } from './hooks/useCalibration';
+import { useCalibration, lotCellName, displayCellName } from './hooks/useCalibration';
 import { useLiveState } from './hooks/useLiveState';
 import { useToast } from './hooks/useToast';
 import { saveTheme } from './api/auth';
@@ -114,6 +114,28 @@ export default function MainApp({ user, onLogout }) {
   // a última vez que o painel foi aberto (zerada em handleToggleQueueMode).
   const [selectedQueueRouteId, setSelectedQueueRouteId] = useState(null);
   const [queueNotifCount, setQueueNotifCount] = useState(0);
+  // Banner "VISUALIZANDO: KANBAN X" (CloseUpStatusBanner.jsx): qual Close Up
+  // o operador tocou por último no modo Interação. Zerado em qualquer troca
+  // de modo (ver resetSelection abaixo, SEM keepRoute — não é seleção de
+  // ptp) e ao resetar o zoom (ver onCloseUpActivate passado pro
+  // FloorPlanCanvas, chamado com null de dentro de handleResetView).
+  const [activeCloseUpId, setActiveCloseUpId] = useState(null);
+  // Pulsar vermelho no ponto/célula clicado com seleção INVÁLIDA (Caso 3,
+  // vazio na coleta, já ocupado na entrega, ordem errada em "Lotes em
+  // sequência") — ver triggerInvalidPulse/useInvalidPulse
+  // (FloorPlanCanvas.jsx). `id` incrementa a CADA disparo (pulseIdRef, não
+  // reseta) — é ele que dispara a animação de novo mesmo clicando o MESMO
+  // ponto inválido duas vezes seguidas; sem isso o efeito não teria como
+  // saber que houve um NOVO clique (o nome sozinho não muda). Nunca
+  // precisa ser limpo depois: a animação é 100% imperativa (Konva), o
+  // estado React só serve pra disparar o efeito uma vez.
+  const [invalidPulse, setInvalidPulse] = useState(null); // { name, id }
+  const pulseIdRef = useRef(0);
+
+  function triggerInvalidPulse(name) {
+    pulseIdRef.current += 1;
+    setInvalidPulse({ name, id: pulseIdRef.current });
+  }
 
   // Modo desenvolvedor: libera a aba "Editar pontos" e os botões "+ Ponto"/
   // "+ Lote" no Toolbar (ver Toolbar.jsx) — sem ele, mode nunca chega a
@@ -149,21 +171,38 @@ export default function MainApp({ user, onLogout }) {
   const [palletTop, setPalletTop] = useState(false);
   const [sending, setSending] = useState(false);
 
-  function resetSelection() {
+  // keepRoute: true preserva pickupNames/dropoffNames/activeSlot — usado só
+  // ao entrar/sair do modo Interação (ver handleToggleInteractionMode): é
+  // um modo de "só olhar" (dar zoom numa área de Close Up pra conferir um
+  // lote de longe), não deveria derrubar uma seleção de Ponto a Ponto em
+  // andamento — o operador precisa poder ir lá conferir o destino de perto
+  // e voltar pro ptp com a origem ainda escolhida. Nos outros modos (mark,
+  // edit, queue, closeup, history, users, ou sair do próprio ptp) a
+  // seleção continua sendo limpa — trocar pra eles é uma intenção
+  // diferente o suficiente pra justificar recomeçar.
+  function resetSelection({ keepRoute = false } = {}) {
     setAddTool(null);
     setPendingLotPrefix('');
     setSelectedId(null);
     setSelectedLotId(null);
     setSelectedCloseUpId(null);
-    setPickupNames([]);
-    setDropoffNames([]);
-    setActiveSlot('pickup');
     setSelectedQueueRouteId(null);
+    setActiveCloseUpId(null); // banner "VISUALIZANDO: KANBAN X" — nunca sobrevive a uma troca de modo, nem entrando/saindo de Interação
+    if (!keepRoute) {
+      setPickupNames([]);
+      setDropoffNames([]);
+      setActiveSlot('pickup');
+    }
   }
 
   function handleModeChange(next) {
+    // Se estava em Interação, a seleção de ptp foi preservada de propósito
+    // (ver handleToggleInteractionMode) — sair dela por QUALQUER caminho
+    // (aba do Toolbar, aqui, ou os botões flutuantes abaixo) não pode
+    // jogar fora o que só estava "em pausa".
+    const keepRoute = mode === 'interaction';
     setMode(next);
-    resetSelection();
+    resetSelection({ keepRoute });
   }
 
   // Mode "de repouso" pra onde os toggles de mark/ptp voltam ao sair: 'edit'
@@ -180,8 +219,9 @@ export default function MainApp({ user, onLogout }) {
   // de repouso — é uma ação de manutenção pontual, não um estado que
   // precise "lembrar" onde você estava antes.
   function handleToggleMarkMode() {
+    const keepRoute = mode === 'interaction'; // ver handleModeChange acima
     setMode((m) => (m === 'mark' ? baseMode() : 'mark'));
-    resetSelection();
+    resetSelection({ keepRoute });
   }
 
   // Ponto a Ponto: mesmo padrão do modo de marcação acima — só acessível
@@ -189,17 +229,20 @@ export default function MainApp({ user, onLogout }) {
   // dev, ptp JÁ é o modo de repouso — sair dele não muda nada (baseMode()
   // devolve 'ptp' de novo), o que é o comportamento certo.
   function handleTogglePtpMode() {
+    const keepRoute = mode === 'interaction'; // ver handleModeChange acima
     setMode((m) => (m === 'ptp' ? baseMode() : 'ptp'));
-    resetSelection();
+    resetSelection({ keepRoute });
   }
 
   // Interação: mesmo padrão de mark/ptp acima, botão flutuante que
   // substituiu o antigo alternador de vista topo/isométrica (ver botão
   // "olho" -> "mãozinha" em FloorPlanCanvas.jsx). Acessível a qualquer
   // usuário (não só dev) — é o modo seguro de navegação pro operador.
+  // keepRoute sempre true aqui (é o próprio toggle de Interação — cobre
+  // tanto entrar quanto sair dela).
   function handleToggleInteractionMode() {
     setMode((m) => (m === 'interaction' ? baseMode() : 'interaction'));
-    resetSelection();
+    resetSelection({ keepRoute: true });
   }
 
   // Fila: mesmo padrão de mark/ptp/interaction acima, botão flutuante
@@ -208,9 +251,10 @@ export default function MainApp({ user, onLogout }) {
   // gesto). Abrir o painel zera a notificação (bolinha vermelha com a
   // contagem de tasks solicitadas desde a última vez que foi aberto).
   function handleToggleQueueMode() {
+    const keepRoute = mode === 'interaction'; // ver handleModeChange acima
     const entering = mode !== 'queue';
     setMode(entering ? 'queue' : baseMode());
-    resetSelection();
+    resetSelection({ keepRoute });
     if (entering) setQueueNotifCount(0);
   }
 
@@ -308,15 +352,19 @@ export default function MainApp({ user, onLogout }) {
   // "posição antes dela no lote" só confundiria — a razão real ali é
   // simplesmente estar vazio (coleta) ou já ocupado (entrega).
   function pickupDeniedMessage(name) {
+    // findLotCellPosition usa o nome TÉCNICO (é ele que identifica a
+    // célula de verdade) — só o texto exibido troca pro apelido.
+    const label = displayCellName(name, lots, points);
     return findLotCellPosition(name)
-      ? 'Não dá pra pegar em ' + name + ': precisa ter pallet ali e nada ocupado antes dela no lote.'
-      : 'Não dá pra pegar em ' + name + ': não tem pallet marcado ali.';
+      ? 'Não dá pra pegar em ' + label + ': precisa ter pallet ali e nada ocupado antes dela no lote.'
+      : 'Não dá pra pegar em ' + label + ': não tem pallet marcado ali.';
   }
 
   function dropoffDeniedMessage(name) {
+    const label = displayCellName(name, lots, points);
     return findLotCellPosition(name)
-      ? 'Não dá pra soltar em ' + name + ': ela ou alguma posição antes dela no lote está ocupada.'
-      : 'Não dá pra soltar em ' + name + ': já tem pallet ali.';
+      ? 'Não dá pra soltar em ' + label + ': ela ou alguma posição antes dela no lote está ocupada.'
+      : 'Não dá pra soltar em ' + label + ': já tem pallet ali.';
   }
 
   function handleStartAddPoint() {
@@ -377,8 +425,22 @@ export default function MainApp({ user, onLogout }) {
     setSelectedCloseUpId(id);
   }
 
+  // Modo Interação: tocar um Close Up (ou resetar o zoom, que manda null —
+  // ver FloorPlanCanvas.jsx/handleResetView) liga/desliga o banner
+  // "VISUALIZANDO: KANBAN X" (CloseUpStatusBanner.jsx).
+  function handleCloseUpActivate(closeUp) {
+    setActiveCloseUpId(closeUp ? closeUp.id : null);
+  }
+
   function handleRename(id, name) {
     updatePoint(id, { name });
+  }
+
+  // Apelido puramente visual (ver useCalibration.js, displayCellName) —
+  // NUNCA toca `name`, o nome técnico já calibrado idêntico ao ponto no
+  // robô. Mesmo padrão de handleRenameLotDisplayName abaixo.
+  function handleRenamePointDisplayName(id, displayName) {
+    updatePoint(id, { displayName: displayName || null });
   }
 
   function handleDelete(id) {
@@ -388,6 +450,12 @@ export default function MainApp({ user, onLogout }) {
 
   function handleRenameLotPrefix(id, prefix) {
     updateLot(id, { prefix });
+  }
+
+  // Apelido puramente visual (ver useCalibration.js, lotCellDisplayName) —
+  // NUNCA toca `prefix`, o nome técnico já configurado no robô.
+  function handleRenameLotDisplayName(id, displayName) {
+    updateLot(id, { displayName: displayName || null });
   }
 
   function handleDeleteLot(id) {
@@ -429,6 +497,7 @@ export default function MainApp({ user, onLogout }) {
     if (!pickupName) {
       if (!isPickupAllowed(name, projectedOccupancy([], []))) {
         showToast(pickupDeniedMessage(name), 'error');
+        triggerInvalidPulse(name);
         return;
       }
       setPickupNames([name]);
@@ -439,6 +508,7 @@ export default function MainApp({ user, onLogout }) {
     // próprio A bloquearia o A2.
     if (!isDropoffAllowed(name, projectedOccupancy([pickupName], []))) {
       showToast(dropoffDeniedMessage(name), 'error');
+      triggerInvalidPulse(name);
       return;
     }
     setDropoffNames([name]);
@@ -481,11 +551,13 @@ export default function MainApp({ user, onLogout }) {
           .find((p) => p && p.lot.id !== pos.lot.id);
         if (conflicting) {
           showToast('Em sequência, as origens de lote precisam ser todas da mesma coluna.', 'error');
+          triggerInvalidPulse(name);
           return;
         }
       }
       if (!isPickupAllowed(name, projectedOccupancy(pickupNames, dropoffNames))) {
         showToast('Ordem inválida: caminho bloqueado', 'error');
+        triggerInvalidPulse(name);
         return;
       }
       setPickupNames([...pickupNames, name]);
@@ -498,11 +570,13 @@ export default function MainApp({ user, onLogout }) {
     const idx = dropoffNames.length;
     if (idx >= pickupNames.length) {
       showToast('Já tem um destino pra cada origem — selecione mais origens antes.', 'info');
+      triggerInvalidPulse(name);
       return;
     }
     const proj = projectedOccupancy(pickupNames.slice(0, idx + 1), dropoffNames);
     if (!isDropoffAllowed(name, proj)) {
       showToast('Ordem inválida: caminho bloqueado', 'error');
+      triggerInvalidPulse(name);
       return;
     }
     setDropoffNames([...dropoffNames, name]);
@@ -545,9 +619,12 @@ export default function MainApp({ user, onLogout }) {
       // palletTop só vale pra azul; o servidor ignora pra madeira, mas
       // manda limpo mesmo assim.
       const { slot } = await enqueueRoutes({ pairs, palletType, palletTop: palletType === 'blue' && palletTop });
+      // Substituição puramente visual (ver useCalibration.js,
+      // displayCellName) — `pairs` (mandado pro servidor acima) continua
+      // com os nomes técnicos, só o texto do toast troca pro apelido.
       const label = pairs.length > 1
-        ? pairs.length + ' rotas enviadas em sequência: ' + pairs.map((p) => p.pickup + '→' + p.dropoff).join(', ')
-        : TOAST_BY_SLOT[slot] + pairs[0].pickup + ' → ' + pairs[0].dropoff;
+        ? pairs.length + ' rotas enviadas em sequência: ' + pairs.map((p) => displayCellName(p.pickup, lots, points) + '→' + displayCellName(p.dropoff, lots, points)).join(', ')
+        : TOAST_BY_SLOT[slot] + displayCellName(pairs[0].pickup, lots, points) + ' → ' + displayCellName(pairs[0].dropoff, lots, points);
       showToast(label, slot === 'current' ? 'success' : 'info');
       // Bolinha de notificação do botão Fila: conta as tasks solicitadas
       // desde a última vez que o painel foi aberto (ver handleToggleQueueMode).
@@ -655,8 +732,9 @@ export default function MainApp({ user, onLogout }) {
         onDevButtonClick={handleDevButtonClick}
         user={user}
         onLogout={onLogout}
+        robotCharging={robotCharging}
       />
-      <RobotStatusBanner charging={robotCharging} />
+      <CloseUpStatusBanner name={activeCloseUpId ? closeUps.find((c) => c.id === activeCloseUpId)?.name : null} />
 
       <div className="app__body">
         {/*
@@ -684,6 +762,7 @@ export default function MainApp({ user, onLogout }) {
           onUpdateCloseUp={updateCloseUp}
           selectedCloseUpId={selectedCloseUpId}
           onSelectCloseUp={handleSelectCloseUp}
+          onCloseUpActivate={handleCloseUpActivate}
           pickupNames={mapPickupNames}
           dropoffNames={mapDropoffNames}
           onPointToPointClick={handlePointToPointClick}
@@ -699,6 +778,8 @@ export default function MainApp({ user, onLogout }) {
           queueModeActive={mode === 'queue'}
           onToggleQueueMode={handleToggleQueueMode}
           queueNotifCount={queueNotifCount}
+          invalidPulseName={invalidPulse?.name ?? null}
+          invalidPulseId={invalidPulse?.id ?? null}
           emergencyActive={emergency}
           onToggleEmergency={handleToggleEmergency}
         />
@@ -711,6 +792,7 @@ export default function MainApp({ user, onLogout }) {
               selectedId={selectedId}
               onSelect={handleSelectPoint}
               onRename={handleRename}
+              onRenameDisplayName={handleRenamePointDisplayName}
               onDelete={handleDelete}
               onToggleNames={handleTogglePointNames}
             />
@@ -719,6 +801,7 @@ export default function MainApp({ user, onLogout }) {
               selectedLotId={selectedLotId}
               onSelect={handleSelectLot}
               onRenamePrefix={handleRenameLotPrefix}
+              onRenameDisplayName={handleRenameLotDisplayName}
               onDelete={handleDeleteLot}
               onSetColor={handleSetLotColor}
               onToggleNames={handleToggleLotNames}
@@ -749,6 +832,8 @@ export default function MainApp({ user, onLogout }) {
             <PointToPointBar
               pickupNames={pickupNames}
               dropoffNames={dropoffNames}
+              lots={lots}
+              points={points}
               onClear={handleClearSelection}
               onSend={handleEnqueueRoute}
               sending={sending}
@@ -769,6 +854,8 @@ export default function MainApp({ user, onLogout }) {
             <QueuePanel
               currentRoute={currentRoute}
               waitingRoutes={waitingRoutes}
+              lots={lots}
+              points={points}
               selectedRouteId={selectedQueueRouteId}
               onSelectRoute={handleSelectQueueRoute}
               onCancelCurrent={handleCancelCurrent}
@@ -778,7 +865,7 @@ export default function MainApp({ user, onLogout }) {
         )}
         {mode === 'mark' && (
           <aside className="sidebar">
-            <OccupancyPanel occupied={occupied} onToggle={toggleOccupied} />
+            <OccupancyPanel occupied={occupied} lots={lots} points={points} onToggle={toggleOccupied} />
           </aside>
         )}
         {mode === 'history' && (

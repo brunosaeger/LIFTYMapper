@@ -1,4 +1,4 @@
-export default function PointsPanel({ points, selectedId, onSelect, onRename, onDelete, onToggleNames }) {
+export default function PointsPanel({ points, selectedId, onSelect, onRename, onRenameDisplayName, onDelete, onToggleNames }) {
   return (
     <div className="points-panel">
       <h2 className="points-panel__title">Pontos avulsos ({points.length})</h2>
@@ -9,47 +9,58 @@ export default function PointsPanel({ points, selectedId, onSelect, onRename, on
       )}
       <ul className="points-panel__list">
         {points.map((p) => (
-          <li
-            key={p.id}
-            className={'points-panel__row' + (p.id === selectedId ? ' is-selected' : '')}
-            onClick={() => onSelect(p.id)}
-          >
+          <li key={p.id} className="lots-panel__row">
+            <div
+              className={'points-panel__row lots-panel__row-main' + (p.id === selectedId ? ' is-selected' : '')}
+              onClick={() => onSelect(p.id)}
+            >
+              <input
+                className="points-panel__input"
+                value={p.name}
+                onChange={(e) => onRename(p.id, e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+                aria-label={'Nome do ponto'}
+              />
+              {/* Mesmo olho dos lotes (ver LotsPanel) — nome do ponto começa
+                  ESCONDIDO no mapa e só aparece se ligarem aqui. */}
+              <button
+                type="button"
+                className={'lots-panel__eye' + (p.namesVisible ? ' is-active' : '')}
+                aria-label={(p.namesVisible ? 'Ocultar' : 'Mostrar') + ' nome do ponto no mapa'}
+                aria-pressed={!!p.namesVisible}
+                title="Mostrar/ocultar nome do ponto no mapa"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleNames(p.id);
+                }}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M1.5 12S5.5 5 12 5s10.5 7 10.5 7-4 7-10.5 7S1.5 12 1.5 12Z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                className="points-panel__delete"
+                aria-label={'Remover ' + p.name}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (window.confirm('Remover o ponto "' + p.name + '"?')) onDelete(p.id);
+                }}
+              >
+                ✕
+              </button>
+            </div>
+            {/* Apelido puramente visual (ver LotsPanel — mesmo padrão) — o
+                nome acima continua sendo o técnico, idêntico ao calibrado
+                no robô (ver dica no rodapé). */}
             <input
-              className="points-panel__input"
-              value={p.name}
-              onChange={(e) => onRename(p.id, e.target.value)}
-              onClick={(e) => e.stopPropagation()}
-              aria-label={'Nome do ponto'}
+              className="points-panel__input lots-panel__display-name"
+              value={p.displayName || ''}
+              onChange={(e) => onRenameDisplayName(p.id, e.target.value)}
+              placeholder="Nome fantasia (opcional)"
+              aria-label={'Nome fantasia do ponto ' + p.name}
             />
-            {/* Mesmo olho dos lotes (ver LotsPanel) — nome do ponto começa
-                ESCONDIDO no mapa e só aparece se ligarem aqui. */}
-            <button
-              type="button"
-              className={'lots-panel__eye' + (p.namesVisible ? ' is-active' : '')}
-              aria-label={(p.namesVisible ? 'Ocultar' : 'Mostrar') + ' nome do ponto no mapa'}
-              aria-pressed={!!p.namesVisible}
-              title="Mostrar/ocultar nome do ponto no mapa"
-              onClick={(e) => {
-                e.stopPropagation();
-                onToggleNames(p.id);
-              }}
-            >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M1.5 12S5.5 5 12 5s10.5 7 10.5 7-4 7-10.5 7S1.5 12 1.5 12Z" />
-                <circle cx="12" cy="12" r="3" />
-              </svg>
-            </button>
-            <button
-              type="button"
-              className="points-panel__delete"
-              aria-label={'Remover ' + p.name}
-              onClick={(e) => {
-                e.stopPropagation();
-                if (window.confirm('Remover o ponto "' + p.name + '"?')) onDelete(p.id);
-              }}
-            >
-              ✕
-            </button>
           </li>
         ))}
       </ul>

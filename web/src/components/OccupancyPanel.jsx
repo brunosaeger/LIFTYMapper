@@ -1,4 +1,6 @@
-export default function OccupancyPanel({ occupied, onToggle }) {
+import { displayCellName } from '../hooks/useCalibration';
+
+export default function OccupancyPanel({ occupied, lots, points, onToggle }) {
   return (
     <div className="points-panel">
       <h2 className="points-panel__title">Ocupação ({occupied.length})</h2>
@@ -12,7 +14,10 @@ export default function OccupancyPanel({ occupied, onToggle }) {
         <ul className="points-panel__list">
           {occupied.map((name) => (
             <li key={name} className="points-panel__row is-selected">
-              <span className="ptp-bar__slot-value">{name}</span>
+              {/* Substituição puramente visual — `name` (técnico) continua
+                  sendo usado em onToggle/aria-label logo abaixo, sem
+                  mudança nenhuma. */}
+              <span className="ptp-bar__slot-value">{displayCellName(name, lots, points)}</span>
               <button
                 type="button"
                 className="points-panel__delete"

@@ -13,7 +13,11 @@ export default function RobotStatusBanner({ charging }) {
   return (
     <div className={'robot-status-banner' + (charging ? ' is-charging' : '')} aria-hidden="true">
       <span className="robot-status-banner__dot" />
-      {charging ? 'Robô: Recarregando' : 'Robô: Em Operação'}
+      {/* "ROBÔ" na cor neutra das abas do header (Editar pontos/Histórico/
+          Usuários); o status em si (mint = operando, âmbar = recarregando)
+          — ver .robot-status-banner__status no CSS. */}
+      <span className="robot-status-banner__label">Robô:</span>
+      <span className="robot-status-banner__status">{charging ? 'Recarregando' : 'Em Operação'}</span>
     </div>
   );
 }

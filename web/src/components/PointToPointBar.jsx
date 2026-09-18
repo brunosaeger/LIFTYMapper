@@ -1,5 +1,6 @@
 import woodTexture from '../assets/pallet-wood.png';
 import blueTexture from '../assets/pallet-blue.png';
+import { displayCellName } from '../hooks/useCalibration';
 
 // Caso 4 (diferenciação de pallets, ver CONTEXT.md): o pallet azul (metálico)
 // fica levemente elevado do chão em 4 pezinhos — o robô precisa de uma
@@ -7,7 +8,7 @@ import blueTexture from '../assets/pallet-blue.png';
 // fica rente ao chão (altura 0, o comportamento que já existia antes dessa
 // feature). Azul vem selecionado por padrão porque é o mais comum na planta.
 export default function PointToPointBar({
-  pickupNames, dropoffNames, onClear, onSend, sending, willQueue,
+  pickupNames, dropoffNames, lots, points, onClear, onSend, sending, willQueue,
   palletType, onPalletTypeChange, palletTop, onPalletTopChange,
   sequenceMode, onToggleSequenceMode, activeSlot, onActiveSlotChange,
 }) {
@@ -30,7 +31,11 @@ export default function PointToPointBar({
     const className = 'ptp-bar__slot'
       + (sequenceMode ? ' ptp-bar__slot--clickable' : '')
       + (isActive ? ' is-active is-active--' + kind : '');
-    const text = names.length ? names.join(', ') : '—';
+    // Substituição puramente visual (ver useCalibration.js,
+    // displayCellName) — `names` continua com os nomes TÉCNICOS por baixo
+    // (são eles que vão pro onPointToPointClick/servidor), só o texto
+    // exibido troca pro apelido do lote quando existir um.
+    const text = names.length ? names.map((n) => displayCellName(n, lots, points)).join(', ') : '—';
     const content = (
       <>
         <span className={'ptp-bar__slot-label ptp-bar__slot-label--' + kind}>

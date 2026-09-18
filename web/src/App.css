@@ -1,5 +1,5 @@
 .app {
-  position: relative; /* âncora do .robot-status-banner (logo abaixo do header, centralizado) */
+  position: relative; /* âncora do .closeup-status-banner (centro-inferior do mapa) */
   display: flex;
   flex-direction: column;
   height: 100vh;
@@ -8,6 +8,7 @@
 
 /* --- toolbar ------------------------------------------------------------ */
 .toolbar {
+  position: relative; /* âncora do .robot-status-banner, centralizado no header */
   display: flex;
   align-items: center;
   gap: 24px;
@@ -342,10 +343,13 @@
    1ª vez, pra nunca mostrar um estado errado no boot. */
 .robot-status-banner {
   position: absolute;
-  top: 68px; /* 56px do .toolbar + 12px de respiro */
+  /* Centralizado no header (.toolbar é a âncora, ver App.css acima) — pedido
+     do usuário: "menos poluído" que flutuando sobre o mapa. Absoluto pra não
+     se importar com a largura variável de .toolbar__modes/.toolbar__actions
+     ao redor (que aparecem/somem conforme devMode/isAdmin). */
+  top: 50%;
   left: 50%;
-  transform: translateX(-50%);
-  z-index: 20; /* acima de tudo que roda dentro de .app__body (mapa, botões flutuantes, sidebar) */
+  transform: translate(-50%, -50%);
   display: flex;
   align-items: center;
   gap: 10px;
@@ -353,7 +357,6 @@
   border-radius: 12px;
   background: rgba(15, 17, 20, 0.55);
   border: 1px solid rgba(255, 255, 255, 0.15);
-  color: #fff;
   font-family: 'Arial Black', 'Helvetica Neue', Arial, sans-serif;
   font-size: 15px;
   letter-spacing: 0.03em;
@@ -370,8 +373,58 @@
   background: var(--accent-cyan);
 }
 
+.robot-status-banner__label {
+  color: var(--text-muted); /* mesma cor das abas do header, ver .toolbar__mode */
+}
+
+.robot-status-banner__status {
+  color: var(--accent-cyan); /* mint vibrante — "Em Operação" */
+}
+
+.robot-status-banner.is-charging .robot-status-banner__status {
+  color: var(--accent-amber); /* "Recarregando" */
+}
+
 .robot-status-banner.is-charging .robot-status-banner__dot {
   background: var(--accent-amber);
+}
+
+/* --- banner "visualizando kanban X" (Close Up, modo Interação) ------------
+   Mesmo retângulo do .robot-status-banner acima, espelhado pro centro-
+   INFERIOR (ver CloseUpStatusBanner.jsx). `bottom: 84px` (não 24px) de
+   propósito: o .toast também é centralizado embaixo a 24px — nessa altura
+   os dois nunca se sobrepõem, mesmo com um toast aparecendo enquanto o
+   operador está com um Close Up ativo. `left: calc(50% - 140px)` (não
+   50% puro): centraliza considerando a sidebar (280px, ver .sidebar) que
+   só existe do lado direito — sem o ajuste, o banner ficaria centralizado
+   no `.app` inteiro (mapa + sidebar) e pareceria puxado pra direita em
+   relação ao mapa de verdade. Ajustável — usuário revisa ao vivo no
+   tablet. */
+.closeup-status-banner {
+  position: absolute;
+  bottom: 84px;
+  left: calc(50% - 140px);
+  transform: translateX(-50%);
+  z-index: 20;
+  padding: 12px 22px;
+  border-radius: 12px;
+  background: rgba(15, 17, 20, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  font-family: 'Arial Black', 'Helvetica Neue', Arial, sans-serif;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.closeup-status-banner__prefix {
+  color: var(--accent-cyan); /* "azul mint vibrante" */
+}
+
+.closeup-status-banner__rest {
+  color: #fff;
 }
 
 /* --- parada de emergência (canto superior esquerdo) -----------------------
@@ -668,6 +721,15 @@
   font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
   font-size: 12px;
   padding: 6px 8px;
+}
+
+/* Apelido do lote (ver LotsPanel.jsx) — mesma largura/estilo do input de
+   prefixo acima, só alinhado horizontalmente com a margem das linhas
+   vizinhas (.points-panel__row usa padding:6px, aqui é margin porque o
+   input não está dentro de um .points-panel__row). */
+.lots-panel__display-name {
+  margin: 0 6px;
+  width: calc(100% - 12px);
 }
 
 .lots-panel__count {

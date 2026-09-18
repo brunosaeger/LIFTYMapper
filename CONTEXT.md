@@ -165,9 +165,11 @@ planta baixa. Sem router (é uma tela só, com "modos").
   nosso próprio `server.py`.
 - `src/api/auth.js` — login/logout/sessão + CRUD de usuários, todas contra
   o nosso próprio `server.py` (ver "Sistema de login" abaixo).
-- `src/components/`: `Toolbar`, `PointsPanel`, `LotsPanel`, `PalletHeightsPanel`, `PointToPointBar`,
-  `RouteQueue`, `OccupancyPanel`, `HistoryPanel`, `UsersPanel`,
-  `DevModeModal`, `LoginScreen`, `Toast` — peças da UI, veja cada uma.
+- `src/components/`: `Toolbar`, `PointsPanel`, `LotsPanel`, `CloseUpsPanel`,
+  `PalletHeightsPanel`, `PointToPointBar`, `QueuePanel`, `OccupancyPanel`,
+  `HistoryPanel`, `UsersPanel`, `DevModeModal`, `LoginScreen`, `Toast` —
+  peças da UI, veja cada uma. (`RouteQueue` foi renomeado/movido pra
+  `QueuePanel`, ver "Painel Fila dedicado" abaixo.)
 - `src/theme.js` — paleta de cores em hex (Konva não lê CSS custom
   properties, então os valores existem duplicados aqui e em `index.css`).
 - `src/utils.js` — `generateId()`, gerador de id que substitui
@@ -197,43 +199,17 @@ primeira vez que a vista aparecia (`handleResetView` em
 `FloorPlanCanvas.jsx`, mesma fórmula do `useEffect` de inicialização) —
 sem precisar recarregar a página.
 
-**Slider vertical de zoom** (`.zoom-slider` no CSS, barra alta do lado
-direito, `top: 316px`, logo abaixo da pilha dos 4 botões flutuantes) —
-coexiste com roda/pinça (continuam valendo). É **controle de posição
-absoluta**: a posição da bolinha É o nível de zoom. CENTRO = zoom default
-(o mesmo "encaixar na tela" de quando a página abre / do botão de
-refresh); pra cima = mais zoom (até `MAX_ZOOM_MULT`×, 8×); pra baixo =
-menos (até `MIN_ZOOM_MULT`×, 0.5× — mais aberto que o encaixe). A bolinha
-**fica onde é solta** — não tem mola, não volta pro centro. Barra
-semitransparente (`opacity: 0.5`) que vai a 100% no hover/toque; a
-bolinha cresce `scale(1.2)` enquanto arrastada (`.zoom-slider.is-active`).
-- **Mapeamento exponencial** (`sliderFracToScale`/`sliderScaleToFrac` em
-  `FloorPlanCanvas.jsx`): cada fração igual de curso multiplica a escala
-  pelo mesmo fator — é o que faz o zoom "sentir" constante, mesma ideia
-  do wheel/pinça, que multiplicam a escala. `MIN_ZOOM_MULT` (0.5) virou o
-  piso do `clampScale` também, então roda/pinça agora também afastam além
-  do encaixe (antes o piso era o próprio encaixe).
-- **A bolinha acompanha o zoom feito por fora** (roda, pinça, abrir a
-  página, refresh): um `useEffect` em `[stageScale, baseScale]` reposiciona
-  a bolinha via `sliderScaleToFrac` sempre que não se está arrastando ela.
-- **Durante o arrasto**, o transform é mutado DIRETO no node do Konva
-  (`stage.scale/position + batchDraw`), sem `setState` — o estado React
-  (`stageScale`/`stagePos`) só sincroniza no soltar (`handleZoomPointerUp`).
-  Mesmo motivo do pinça: `setState` no meio re-renderiza a `<Stage>` com o
-  valor antigo e o react-konva reverte o transform. Por isso até o
-  `is-active` da barra é alternado por `classList` (`setSliderActive`), não
-  por estado.
-- **Ponto de zoom** = "a parte do mapa onde o usuário soltou o clique (ou
-  dedo) pela última vez" (`focalContentRef`, em coordenadas de conteúdo /
-  px da imagem). Atualizado por `rememberFocal` em todo
-  `mousedown`/`mousemove`/soltar sobre o canvas (inclusive durante pan de
-  1 dedo). O slider mantém esse ponto fixo na tela ao reescalar. Sem foco
-  registrado ainda → centro do viewport.
-- Eventos de ponteiro unificados (`onPointerDown/Move/Up` +
-  `setPointerCapture` na track); `zoomDraggingRef` guarda se o arrasto
-  está ativo. `touch-action: none` na `.zoom-slider` pro arrasto vertical
-  não virar scroll da página. Barra com `height: 640px` /
-  `max-height: calc(100% - 340px)` (não passa da borda inferior do mapa).
+**Slider vertical de zoom — REMOVIDO (2026-09-16)**. Existiu como
+`.zoom-slider`/`sliderFracToScale`/`handleZoomPointer*` em
+`FloorPlanCanvas.jsx` (controle de posição absoluta: bolinha no centro =
+zoom default, topo/fundo = `MAX_ZOOM_MULT`/`MIN_ZOOM_MULT`, mapeamento
+exponencial, ponto focal = último toque no mapa via `rememberFocal`/
+`focalContentRef`). Removido porque o modo Interação (ver "Close Up e modo
+Interação" abaixo) já cobre bem o gesto de "ver de perto uma área"; o
+espaço que ele ocupava (`top: 316px`, logo abaixo da pilha de botões) virou
+o botão **Fila** (ver "Painel Fila dedicado" abaixo). Roda do mouse e pinça
+de dois dedos continuam funcionando exatamente como antes — não dependiam
+do slider, tinham foco/lógica próprios (`handleWheel`/`pinchRef`).
 
 ### Duas vistas independentes (topo / isométrica) — vista isométrica LEGADA
 
@@ -279,19 +255,66 @@ nasce vazia.
 
 ### Modelo de dados
 
-**Ponto avulso**: `{ id, name, x, y, rotation }` — `x`/`y` em fração [0,1]
-da imagem da vista (não pixel de tela), sobrevive a qualquer zoom/resolução.
+**Ponto avulso**: `{ id, name, displayName, x, y, rotation }` — `x`/`y` em
+fração [0,1] da imagem da vista (não pixel de tela), sobrevive a qualquer
+zoom/resolução. `name` é o nome TÉCNICO — precisa ser **idêntico** ao
+ponto já calibrado no robô (ver dica em `PointsPanel.jsx`), nunca muda por
+causa de apelido. `displayName` é o nome fantasia — mesmo mecanismo dos
+lotes logo abaixo, sem numeração (ponto avulso é uma entidade única, não
+uma sequência de células).
 
 **Lote** (linha ou coluna de células grudadas, criado por clique-e-arrasto):
-`{ id, prefix, x, y, rotation, count, cellSize, scaleX, scaleY, color,
-namesVisible }`. Cada célula tem nome derivado: índice 0 = só o prefixo
-(`A`), demais numeram a partir de 2 (`A2`, `A3`...) — `lotCellName(prefix,
-index)` em `useCalibration.js`. `cellSize` fica gravado no momento da
-criação (não recalculado depois — ver `DEFAULT_CELL_SIZE` em
-`FloorPlanCanvas.jsx`, hoje `11.97`px de conteúdo, extraído medindo os
-lotes já calibrados manualmente pelo usuário pra bater com o tamanho físico
-dos kanbans reais). A célula de índice 0 também ganha um triangulozinho de
-"facing" saindo da base — ver "Close Up e modo Interação" abaixo.
+`{ id, prefix, displayName, x, y, rotation, count, cellSize, scaleX,
+scaleY, color, namesVisible }`. Cada célula tem nome TÉCNICO derivado:
+índice 0 = só o prefixo (`A`), demais numeram a partir de 2 (`A2`,
+`A3`...) — `lotCellName(prefix, index)` em `useCalibration.js`. `cellSize`
+fica gravado no momento da criação (não recalculado depois — ver
+`DEFAULT_CELL_SIZE` em `FloorPlanCanvas.jsx`, hoje `11.97`px de conteúdo,
+extraído medindo os lotes já calibrados manualmente pelo usuário pra bater
+com o tamanho físico dos kanbans reais). A célula de índice 0 também ganha
+um triangulozinho de "facing" saindo da base — ver "Close Up e modo
+Interação" abaixo.
+
+### Nome fantasia (`displayName`, IMPLEMENTADO 2026-09-18, lotes E pontos avulsos)
+
+Apelido puramente visual, editável em `LotsPanel.jsx`/`PointsPanel.jsx`
+junto do nome/prefixo técnico (`null` = sem apelido cadastrado). Existe
+porque os nomes técnicos (`prefix`/`lotCellName` do lote, `name` do ponto)
+já estão configurados no backend do robô — pontos com uma calibração que
+precisa bater EXATAMENTE com o robô, lotes com uma lógica própria de
+organização — e os operadores não conhecem essa nomenclatura, só a "de
+chão de fábrica".
+
+- **Lote**: `lotCellDisplayName(lot, index)` em `useCalibration.js`. Regra
+  de numeração **diferente** da técnica de propósito (pedido explícito do
+  usuário): o nome técnico (`lotCellName`) omite o número na 1ª célula
+  (`A`, `A2`, `A3`...), mas a fantasia numera TODAS as células a partir de
+  1 (`Linha Norte 1`, `Linha Norte 2`, `Linha Norte 3`...) — só pra
+  fantasia, o técnico não mudou em nada.
+- **Ponto avulso**: sem numeração — é `point.displayName` puro (entidade
+  única, não uma sequência de células).
+- **Resolver a partir do nome técnico**: `displayCellName(nomeTécnico,
+  lots, points)` em `useCalibration.js` — procura primeiro nos lotes
+  (célula por célula), depois nos pontos avulsos; `points` é opcional (só
+  precisa de quem só tem a STRING técnica em mãos, como fila/ocupação/
+  ponto a ponto, que vêm do servidor como nomes técnicos puros — o mapa já
+  tem o objeto `point`/`lot` inteiro, não precisa dessa busca).
+
+**A troca é só na renderização**: `PointToPointBar.jsx`, `QueuePanel.jsx`,
+`OccupancyPanel.jsx`, o `<Text>` de `LotCell` e de `PointMarker`
+(`FloorPlanCanvas.jsx`), e os **toasts de `MainApp.jsx`**
+(`pickupDeniedMessage`/`dropoffDeniedMessage` — recusa de Caso 3 — e o
+toast de confirmação de `handleEnqueueRoute`, tanto o de rota única quanto
+o "N rotas enviadas em sequência: ...") mostram o apelido quando existe,
+mas toda comparação/lógica (Caso 3, `pickupNames`/`dropoffNames`,
+`occupied`, o que é mandado pro servidor) continua 100% sobre o nome
+técnico — nada disso muda de valor, só o texto que aparece na tela. Sem
+apelido cadastrado, cai no nome técnico mesmo (comportamento de sempre,
+sem caso especial). **Fora do escopo de propósito**: os `window.confirm`
+de exclusão em `LotsPanel.jsx`/`PointsPanel.jsx`/`CloseUpsPanel.jsx`
+continuam mostrando o nome técnico — são diálogos do modo desenvolvedor
+(edição/calibração), onde o nome técnico é exatamente o que precisa
+aparecer, não o apelido do operador.
 
 **Área de Close Up** (retângulo livre, sem rotação, criado por
 clique-e-arrasto no modo `closeup`): `{ id, name, x, y, width, height,
@@ -325,15 +348,21 @@ Interação" abaixo.
   nenhum (sem risco de marcar ocupação ou selecionar rota sem querer).
   Acessível a **qualquer usuário**, não só dev. Ver "Close Up e modo
   Interação" abaixo.
+- **`queue`**: painel dedicado à fila de rotas (rota em andamento +
+  próximas), fora do `ptp`. Acessível a **qualquer usuário**. Ver "Painel
+  Fila dedicado" abaixo.
 
-Acesso a `ptp`/`mark`/`interaction` é por **botões flutuantes** sobre o
-canvas (não pelo Toolbar): mãozinha (entrar/sair de `interaction` —
-substituiu o antigo alternador de vista topo/isométrica, ver "Duas vistas
-independentes" acima), X (entrar/sair de `mark`) e ícone de rota
-(entrar/sair de `ptp`) — empilhados no canto superior direito do mapa,
-mesmo tamanho (56px), 20px de espaço entre eles. Sair de
-`ptp`/`mark`/`interaction` sempre volta pro modo de repouso (`baseMode()`
-em `MainApp.jsx`): `edit` se for dev, `ptp` pra todo mundo mais.
+Acesso a `ptp`/`mark`/`interaction`/`queue` é por **botões flutuantes**
+sobre o canvas (não pelo Toolbar), empilhados no canto superior direito do
+mapa, mesmo tamanho (56px), 20px de espaço entre eles, de cima pra baixo:
+reset de zoom, mãozinha (entrar/sair de `interaction` — substituiu o antigo
+alternador de vista topo/isométrica, ver "Duas vistas independentes"
+acima), X (entrar/sair de `mark`), ícone de rota (entrar/sair de `ptp`) e
+ícone de índice/listagem (entrar/sair de `queue` — no lugar do antigo
+slider vertical de zoom, ver seção acima). Sair de
+`ptp`/`mark`/`interaction`/`queue` sempre volta pro modo de repouso
+(`baseMode()` em `MainApp.jsx`): `edit` se for dev, `ptp` pra todo mundo
+mais.
 
 `ptp` e `mark` compartilham o mesmo **gesto de interação de base**: passar
 o mouse/dedo por cima de um quadrado o faz crescer (animação, `usePtpScale`
@@ -422,6 +451,63 @@ de Close Up, o mapa em `interaction` não reage a clique nenhum —
 `PointMarker`/`LotMarker` só ficam interativos em `edit`/`ptp`/`mark`, e
 `interaction` não é nenhum dos três, então herda essa inércia de graça, sem
 precisar de nenhuma mudança neles.
+
+**Banner "VISUALIZANDO: KANBAN X"** (IMPLEMENTADO 2026-09-18,
+`CloseUpStatusBanner.jsx`): mesmo retângulo semitransparente do
+`RobotStatusBanner`, espelhado pro centro-inferior da tela (`bottom: 84px`
+— não os mesmos 24px do `.toast`, de propósito, pra nunca sobrepor um
+toast que apareça com o banner ativo). Mostra o nome do Close Up tocado
+por último (`activeCloseUpId` em `MainApp.jsx`, resolvido contra `closeUps`
+a cada render — acompanha rename ao vivo). Liga em `handleCloseUpClick`
+(`FloorPlanCanvas.jsx`), chamando `onCloseUpActivate(closeUp)` já no toque,
+sem esperar a animação de zoom terminar.
+
+Desliga (`onCloseUpActivate(null)`) em QUALQUER mudança de ZOOM — pedido
+explícito do usuário (2026-09-18): "persistente enquanto o zoom da
+aproximação está rolando, qualquer alteração no zoom tira ele". `handleResetView`,
+`handleWheel` (roda do mouse) e o ramo de pinça de `handleTouchMove`
+(2 dedos) chamam isso; **pan/arrasto (1 dedo ou clica-arrasta) NÃO chama**
+— só mover o mapa no mesmo nível de zoom não derruba o banner, só uma
+mudança de ESCALA de verdade. Também desliga em `resetSelection()` em
+`MainApp.jsx` — que roda em TODA troca de modo, então sair de
+`interaction` por qualquer botão (inclusive entrar nele de novo, começando
+sempre "sem nada ativo") também limpa. Tocar um Close Up diferente troca o
+nome na hora (a mesma chamada
+`onCloseUpActivate` dispara de novo).
+
+**Seleção de Ponto a Ponto sobrevive ao modo Interação (BUG, corrigido
+2026-09-16, em DUAS partes)**: entrar/sair de `interaction` (botão
+mãozinha) chamava `resetSelection()` igual a qualquer outro toggle de
+modo, que zerava `pickupNames`/`dropoffNames` — ou seja, escolher a
+origem, abrir Interação pra conferir um lote de perto (dar zoom numa área
+de Close Up) e voltar pro `ptp` perdia a origem já selecionada. Como
+Interação é um modo de "só olhar" (não seleciona nada no mapa, não
+conflita com nenhuma regra de Caso 3), não devia derrubar uma seleção em
+andamento.
+1. **Estado**: `resetSelection` (`MainApp.jsx`) ganhou o parâmetro
+   opcional `{ keepRoute }`, que pula só `setPickupNames`/
+   `setDropoffNames`/`setActiveSlot` (mantém tudo mais — seleção de
+   ponto/lote/close-up em edição, addTool etc.). **Não bastava** só
+   `handleToggleInteractionMode` passar `keepRoute: true`: o usuário sai
+   de Interação clicando o botão de ROTA (ptp), não necessariamente de
+   novo no de mãozinha — e `handleTogglePtpMode` (e igualmente
+   `handleToggleMarkMode`/`handleToggleQueueMode`/`handleModeChange`)
+   chamava `resetSelection()` incondicionalmente, jogando fora o que
+   acabara de ser preservado. Fix completo: todo toggle de modo calcula
+   `const keepRoute = mode === 'interaction'` (lendo o modo ATUAL, antes
+   da troca) e passa isso pra `resetSelection` — ou seja, sair de
+   Interação por QUALQUER botão preserva a seleção; sair de qualquer outro
+   modo continua limpando normalmente.
+2. **Visual**: mesmo com o estado preservado, o destaque azul/âmbar
+   sumia do mapa assim que entrava em Interação, porque `highlightsRoute`
+   (`FloorPlanCanvas.jsx`, ver "Fila de rotas compartilhada"/BUG DE
+   LANÇAMENTO acima) só cobria `ptp`/`queue` — passou a cobrir também
+   `interaction`, então a origem/destino já escolhidos continuam visíveis
+   no mapa enquanto o operador navega lá dentro, sem parecer que sumiu.
+
+O botão de reset de zoom (`handleResetView` em `FloorPlanCanvas.jsx`)
+nunca teve esse problema: é 100% local ao canvas (só mexe em
+`stageScale`/`stagePos`), nunca tocou estado de seleção em `MainApp.jsx`.
 
 **Triângulo de "facing"**: bônus independente do Close Up. Toda célula de
 índice 0 de um lote (a sem numeração) ganha um triangulozinho saindo da
@@ -796,6 +882,40 @@ dispatch service (3 rotas criadas com o pareamento certo, mesmo
 com a mensagem certa; cancelar a atual derruba o resto do grupo); e a UI
 via Playwright (checkbox desligada por padrão, foco alternando entre os
 slots, envio bloqueado sem seleção).
+
+### Pulsar vermelho em clique inválido (IMPLEMENTADO 2026-09-18)
+
+**Motivação** (pedido do usuário): o toast de recusa (`pickupDeniedMessage`/
+`dropoffDeniedMessage`/"Ordem inválida"/etc) já existia, mas não dizia
+visualmente QUAL quadrado no mapa foi o clicado — só um texto no canto.
+Agora, toda vez que um clique de Ponto a Ponto (normal ou "Lotes em
+sequência") é rejeitado, o próprio quadrado/ponto clicado pulsa em
+vermelho no mapa, além do toast de sempre.
+
+**Onde dispara** (`triggerInvalidPulse(name)` em `MainApp.jsx`, chamado
+logo antes de cada `return` de rejeição):
+- Modo normal (`handlePointToPointClick`): `isPickupAllowed` falha (vazio
+  ou obstrução) / `isDropoffAllowed` falha (já ocupado ou obstrução).
+- "Lotes em sequência" (`handleSequenceClick`): origens de lote
+  misturando colunas diferentes; `isPickupAllowed`/`isDropoffAllowed`
+  falha (ordem errada/obstrução); clicar um destino sem ter origem
+  correspondente ainda (toast tipo `info`, mas ainda assim pulsa — é um
+  clique que não fez nada, mesma lógica das rejeições `error`).
+
+**Como funciona** (`useInvalidPulse` em `FloorPlanCanvas.jsx`, usado por
+`PointMarker` e `LotCell`): um `<Circle>` extra dentro do Group de cada
+marcador/célula, raio ~0.75× do tamanho, `stroke=COLORS.stateError`,
+começa com `opacity=0` (invisível). `MainApp.jsx` guarda `{ name, id }`
+(`id` incrementa a cada disparo via `pulseIdRef`, nunca reseta — é o que
+faz o efeito disparar de novo mesmo clicando o MESMO ponto inválido duas
+vezes seguidas, já que o nome sozinho não mudaria). Cada marcador recebe
+`invalidPulseActive` (`name === invalidPulseName`, comparado contra o nome
+TÉCNICO — igual a `isPickup`/`isDropoff`, sem relação com nome fantasia) e
+`invalidPulseId`; o hook reage a `[active, pulseId]` e dispara DOIS pulsos
+encadeados (expande + desvanece, `node.to(...)` — mesmo padrão de
+`usePtpScale`), pra ler como "pulsar" de verdade em vez de um flash único.
+100% imperativo (Konva) — o estado React (`invalidPulse` em `MainApp.jsx`)
+nunca precisa ser limpo depois, só serve de gatilho.
 
 ### Tema claro/escuro — preferência POR CONTA
 
@@ -1266,6 +1386,33 @@ fundo + os handlers HTTP), serializado por lock.
   thread de fundo; mais correto que a versão antiga (cliente), onde o
   registro no histórico ficava por conta de qual ABA estava rodando a
   sondagem no momento, meio ao acaso.
+- **Concorrência de tasks (IMPLEMENTADO 2026-09-18, pedido do supervisor)**
+  — preocupação: duas pessoas enviando a MESMA task quase ao mesmo tempo,
+  ou uma task cujo pickup/dropoff já está em uso por uma rota em
+  andamento/pendente/na fila. **Gap que existia**: `validate_route_chain`
+  (Caso 3, acima) só enxerga `occupied` (a calibração) — nunca a fila — e
+  `occupied[pickup]` só é liberado quando o PICKUP termina de verdade
+  (Caso 2, `_queue_tick`), não no instante em que a rota vira `current`.
+  Ou seja: enquanto o robô ainda está a caminho de pegar em `A`, `A`
+  continua marcado como ocupado, então uma SEGUNDA rota pro mesmo `A` (ou
+  pro mesmo destino de uma rota já na fila) passava pela validação de
+  ocupação sem problema nenhum — nada cruzava o pickup/dropoff novo contra
+  a fila de verdade. **Fix**: `_active_routes(state)` (junta
+  `currentRoute` + `pendingRoute` + `routeQueue`) e
+  `_find_route_conflict(pickup, dropoff, active_routes)` (colide se o
+  pickup OU dropoff novo bater com o pickup OU dropoff de qualquer rota
+  ativa — os 4 jeitos de colidir) rodam **dentro do mesmo `QUEUE_LOCK`**
+  que decide os slots logo abaixo, ANTES de despachar qualquer rota do
+  lote (uma barra, todas ficam de fora — nunca despacha metade de uma
+  sequência pra depois rejeitar o resto). Isso fecha a race de verdade:
+  duas requisições concorrentes disputam o mesmo lock, a segunda a entrar
+  já vê a rota que a primeira acabou de enfileirar. Rejeita com **409** e
+  `{"error": "..."}` nomeando a posição em conflito e quem enviou a rota
+  existente (`route["user"]`) — o frontend já mostra isso automaticamente
+  como toast (`jsonRequest` em `useLiveState.js` já extrai `data.error` de
+  qualquer resposta não-200 e propaga; `handleEnqueueRoute` em
+  `MainApp.jsx` já tinha o `catch` mostrando `err.message` — não precisou
+  de nenhuma mudança no cliente pra esse aviso aparecer).
 - **`POST /api/queue/cancel-current`** — cancela SÓ a rota em andamento,
   **por id** (`robot_cancel_task_record`, nunca mais `all-cancel`), e a
   fila segue: a `pendingRoute` (que o dispatch já tem como "próxima")
@@ -1356,9 +1503,68 @@ próximo ciclo) e expõe `enqueueRoute`/`cancelCurrent`/`removeQueued`/
 inteiramente `fireRoute`/`advanceQueue`/o `useEffect` de sondagem — só
 manda a intenção e mostra o que o servidor devolve. `useCalibration.js`
 perdeu `occupied` (migrou pro hook novo) — continua dono só de
-`points`/`lots`/`view`. Os componentes-folha (`PointToPointBar`,
-`RouteQueue`, `OccupancyPanel`, `FloorPlanCanvas`) não mudaram — já
-recebiam esses dados/callbacks só via props.
+`points`/`lots`/`view`/`closeUps`. Os componentes-folha (`PointToPointBar`,
+`OccupancyPanel`, `FloorPlanCanvas`) não mudaram — já recebiam esses
+dados/callbacks só via props. `RouteQueue` foi substituído por `QueuePanel`
+(ver "Painel Fila dedicado" abaixo) — a fonte de dados é a mesma
+(`currentRoute`/`pendingRoute`/`routeQueue`), só a UI que consome mudou.
+
+### Painel Fila dedicado (IMPLEMENTADO 2026-09-16)
+
+Motivação: a fila de rotas vivia dentro do modo `ptp` (`RouteQueue.jsx`,
+apertada na sidebar normal junto do seletor de pickup/dropoff). Virou seu
+próprio modo (`queue`), com sidebar mais larga (`.sidebar--queue`, 448px,
+~60% maior que a normal — a largura anima com `transition: width 0.3s` no
+`.sidebar` base) e botão flutuante próprio (ícone de índice/listagem, ver
+"Modos de interação" acima) no lugar do antigo slider vertical de zoom.
+
+`QueuePanel.jsx` (substitui `RouteQueue.jsx`) mostra duas seções, igual
+antes: "Rota em andamento" (no máximo uma, nome em **verde vivo**
+`--state-success` + barra pulsando indeterminada — `.queue-route__bar-fill`,
+animação `queue-bar-sweep`, sem `prefers-reduced-motion` vira pulso de
+opacidade em vez de deslizar — não é % real, o robô não expõe progresso
+fino) e "Próximas rotas" (tom **âmbar** `--accent-amber`, "standby"). A
+LÓGICA de fila/cancelamento/prioridade não mudou nada — é toda do servidor
+(ver "Fila de rotas compartilhada" acima), o componente só lê
+`currentRoute`/`waitingRoutes` e manda intenções pra cima.
+
+**Seleção clicável** (`selectedQueueRouteId`/`handleSelectQueueRoute` em
+`MainApp.jsx`): clicar numa rota da lista de espera isola sua
+origem/destino no mapa (`mapPickupNames`/`mapDropoffNames`), substituindo
+temporariamente a rota atual em destaque; clicar de novo na mesma (ou na
+rota em andamento) volta ao padrão. Se a rota clicada faz parte de um
+grupo de "Lotes em sequência" (mesmo `groupId`, só existe quando o
+servidor recebeu mais de 1 par — ver `POST /api/queue/enqueue-batch`),
+isola o **grupo inteiro** (`selectedQueueGroup` filtra `waitingRoutes` por
+`groupId`), não só aquele par. Prioridade de destaque no mapa, em ordem:
+seleção do Ponto a Ponto sendo montada > seleção do painel Fila > rota
+atual (padrão de repouso). Sair do modo `queue` (qualquer outro botão/aba
+— todos passam por `resetSelection()`) zera `selectedQueueRouteId`, então
+o mapa volta sozinho a destacar a rota atual.
+
+**BUG DE LANÇAMENTO, corrigido em seguida**: o destaque azul/âmbar
+(pickup/dropoff) no mapa era pintado só quando `mode === 'ptp'`
+(`markerColors`/`pointMarkerColors`/`pointOccupiedColor`/`lotCellColors`/
+`occupiedColor`, todos com esse gate) — resquício de quando só o modo
+`ptp` tinha pickup/dropoff pra mostrar. Com o painel Fila, `mode` é
+`'queue'` ao clicar numa rota, então `mapPickupNames`/`mapDropoffNames`
+chegavam certos no `FloorPlanCanvas` mas o mapa não pintava nada. Fix:
+`highlightsRoute(mode)` (`mode === 'ptp' || mode === 'queue'`) substitui o
+gate nas 5 funções de cor. Gestos de clique no mapa (`usesHoverGesture`,
+crescer no hover, confirmar ao soltar) continuam só em `ptp`/`mark` de
+propósito — a seleção no modo `queue` é sempre pela lista na sidebar,
+nunca tocando o mapa.
+
+**Notificação** (bolinha vermelha no canto superior esquerdo do botão
+Fila, `.queue-toggle__badge`): conta quantas tasks foram solicitadas
+(`pairs.length` de cada `enqueueRoutes`, soma todas — não é contagem da
+fila em si) desde a última vez que o painel foi aberto; zera em
+`handleToggleQueueMode` ao entrar no modo `queue`.
+
+`robot_simulator.py` (novo, raiz do projeto): simulador local da API do
+dispatch service do robô (mesmo formato de `ROBOT_HOST`), pra testar
+fila/tasks sem o robô físico ligado. Não documentado em detalhe aqui ainda
+— ver o arquivo.
 
 **Trade-off consciente**: os handlers de fila (`_queue_enqueue` etc.)
 seguram `QUEUE_LOCK` durante a chamada de verdade ao robô (até ~10-20s no

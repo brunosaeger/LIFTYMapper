@@ -1,3 +1,5 @@
+import RobotStatusBanner from './RobotStatusBanner';
+
 const SAVE_LABEL = {
   loading: 'Carregando…',
   idle: 'Salvo',
@@ -5,13 +7,19 @@ const SAVE_LABEL = {
   error: 'Erro ao salvar',
 };
 
-export default function Toolbar({ mode, onModeChange, addTool, onStartAddPoint, onStartAddLot, onCancelAdd, saveStatus, theme, onToggleTheme, devMode, onDevButtonClick, user, onLogout }) {
+export default function Toolbar({ mode, onModeChange, addTool, onStartAddPoint, onStartAddLot, onCancelAdd, saveStatus, theme, onToggleTheme, devMode, onDevButtonClick, user, onLogout, robotCharging }) {
   return (
     <header className="toolbar">
       <div className="toolbar__brand">
         <span className="toolbar__brand-33">33</span>
         <span>LIFTY MAPPER</span>
       </div>
+
+      {/* Centralizado no header (pedido do usuário: "fica menos poluído" que
+          flutuando sobre o mapa) — posicionamento absoluto (ver App.css),
+          então não se importa com a largura variável de .toolbar__modes/
+          .toolbar__actions ao redor. */}
+      <RobotStatusBanner charging={robotCharging} />
 
       {/* "Editar pontos" é só modo desenvolvedor (ver MainApp.jsx:
           DEV_PASSWORD, botão "{ }" no fim da toolbar) — sem ele, mode nunca

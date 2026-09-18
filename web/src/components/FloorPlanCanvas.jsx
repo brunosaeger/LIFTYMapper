@@ -3,7 +3,7 @@ import { Stage, Layer, Image as KonvaImage, Rect, Text, Line, Circle, Group, Tra
 import useImage from 'use-image';
 import Konva from 'konva';
 import { useContainerSize } from '../hooks/useContainerSize';
-import { lotCellName } from '../hooks/useCalibration';
+import { lotCellName, lotCellDisplayName } from '../hooks/useCalibration';
 import { COLORS, LOT_COLORS, hexToRgba, darkenHex } from '../theme';
 import topViewUrl from '../assets/floorplan.jpg';
 import isoViewUrl from '../assets/isometric.jpg';
@@ -18,8 +18,8 @@ const EMPTY_NAMES = [];
 const ZOOM_STEP = 1.08;
 const MAX_ZOOM_MULT = 8; // múltiplo do "encaixar na tela" — teto de quanto dá pra aproximar
 // Piso de zoom: múltiplo do "encaixar na tela" — o quanto dá pra AFASTAR
-// além do encaixe (metade do tamanho de encaixe). Usado tanto pelo slider
-// vertical (bolinha no fundo) quanto pelo clamp de roda/pinça.
+// além do encaixe (metade do tamanho de encaixe). Usado pelo clamp de
+// roda/pinça (clampScale).
 const MIN_ZOOM_MULT = 0.5;
 const LOT_FILL_ALPHA = 0.32;
 // Tamanho padrão de célula ao criar um lote novo (px "de conteúdo", ou seja,
@@ -63,8 +63,20 @@ function usesHoverGesture(mode) {
   return mode === 'ptp' || mode === 'mark';
 }
 
+// pickupNames/dropoffNames (azul/âmbar) são desenhados no gesto ativo de
+// Ponto a Ponto, na seleção passiva do painel Fila (clicar numa task lá
+// manda o par pro mapa via mapPickupNames/mapDropoffNames em MainApp.jsx),
+// e também em Interação: entrar/sair desse modo PRESERVA a seleção de ptp
+// em andamento (MainApp.jsx, handleToggleInteractionMode/keepRoute) — é um
+// modo de "ir olhar de perto sem perder o que já tava escolhendo", então o
+// destaque precisa continuar visível enquanto o operador navega lá, senão
+// pareceria que a seleção sumiu mesmo continuando viva por baixo.
+function highlightsRoute(mode) {
+  return mode === 'ptp' || mode === 'queue' || mode === 'interaction';
+}
+
 function markerColors(mode, { isSelected, isPickup, isDropoff }) {
-  if (mode === 'ptp') {
+  if (highlightsRoute(mode)) {
     if (isPickup) return { fill: COLORS.accentCyanDim, stroke: COLORS.accentCyan };
     if (isDropoff) return { fill: COLORS.accentAmberDim, stroke: COLORS.accentAmber };
     return { fill: COLORS.panelRaised, stroke: COLORS.textMuted };
@@ -79,7 +91,7 @@ function markerColors(mode, { isSelected, isPickup, isDropoff }) {
 // cheia + borda numa versão escurecida (ver lotCellColors). O destaque de
 // Ponto a Ponto continua vencendo, pra seleção nunca ficar ambígua.
 function pointMarkerColors(mode, { isSelected, isPickup, isDropoff }) {
-  if (mode === 'ptp') {
+  if (highlightsRoute(mode)) {
     if (isPickup) return { fill: COLORS.accentCyanDim, stroke: COLORS.accentCyan };
     if (isDropoff) return { fill: COLORS.accentAmberDim, stroke: COLORS.accentAmber };
   }
@@ -99,8 +111,8 @@ function pointMarkerColors(mode, { isSelected, isPickup, isDropoff }) {
 // Cor do X de ocupação num ponto avulso — mesma lógica de occupiedColor
 // (cor cheia, nunca a diluída do fill nem a escurecida da borda).
 function pointOccupiedColor(mode, { isSelected, isPickup, isDropoff }) {
-  if (mode === 'ptp' && isPickup) return COLORS.accentCyan;
-  if (mode === 'ptp' && isDropoff) return COLORS.accentAmber;
+  if (highlightsRoute(mode) && isPickup) return COLORS.accentCyan;
+  if (highlightsRoute(mode) && isDropoff) return COLORS.accentAmber;
   if (mode === 'edit' && isSelected) return COLORS.accentAmber;
   return COLORS.accentOrange;
 }
@@ -111,8 +123,8 @@ function pointOccupiedColor(mode, { isSelected, isPickup, isDropoff }) {
 // contraste, divisão entre células grudadas fica mais evidente); senão, cai
 // no esquema padrão (markerColors).
 function lotCellColors(mode, lot, state) {
-  if (mode === 'ptp' && state.isPickup) return { fill: COLORS.accentCyanDim, stroke: COLORS.accentCyan };
-  if (mode === 'ptp' && state.isDropoff) return { fill: COLORS.accentAmberDim, stroke: COLORS.accentAmber };
+  if (highlightsRoute(mode) && state.isPickup) return { fill: COLORS.accentCyanDim, stroke: COLORS.accentCyan };
+  if (highlightsRoute(mode) && state.isDropoff) return { fill: COLORS.accentAmberDim, stroke: COLORS.accentAmber };
   if (lot.color && LOT_COLORS[lot.color]) {
     const hex = LOT_COLORS[lot.color];
     return { fill: hexToRgba(hex, LOT_FILL_ALPHA), stroke: darkenHex(hex) };
@@ -126,8 +138,8 @@ function lotCellColors(mode, lot, state) {
 // duas mesmo puxando pro mesmo tom. `lot` é null pra ponto avulso (sem cor
 // própria, cai no par acento do modo).
 function occupiedColor(mode, lot, state) {
-  if (mode === 'ptp' && state.isPickup) return COLORS.accentCyan;
-  if (mode === 'ptp' && state.isDropoff) return COLORS.accentAmber;
+  if (highlightsRoute(mode) && state.isPickup) return COLORS.accentCyan;
+  if (highlightsRoute(mode) && state.isDropoff) return COLORS.accentAmber;
   if (lot && lot.color && LOT_COLORS[lot.color]) return LOT_COLORS[lot.color];
   if (state.isSelected) return COLORS.accentAmber;
   return COLORS.accentCyan;
@@ -210,6 +222,35 @@ function usePtpScale(nodeRef, targetScale) {
   }, [nodeRef, targetScale]);
 }
 
+// Pulsar vermelho num ponto/célula clicado com seleção INVÁLIDA — obstrução
+// (Caso 3), vazio na coleta, já ocupado na entrega, ou ordem errada em
+// "Lotes em sequência" (ver MainApp.jsx, triggerInvalidPulse). `pulseId`
+// muda a CADA disparo (mesmo clicando o mesmo nome duas vezes seguidas) —
+// é ele que dispara o efeito, `active` só diz se ESTE marcador é o alvo
+// atual. Dois anéis em sequência (`node.to` encadeado via onFinish, mesmo
+// padrão do usePtpScale acima) — expande + desvanece, duas vezes, pra ler
+// como "pulsar" de verdade em vez de um único flash.
+function useInvalidPulse(ringRef, active, pulseId) {
+  useEffect(() => {
+    const node = ringRef.current;
+    if (!node || !active || !pulseId) return;
+    function pulse(timesLeft) {
+      if (timesLeft <= 0) return;
+      node.scale({ x: 0.55, y: 0.55 });
+      node.opacity(0.9);
+      node.to({
+        scaleX: 1.25,
+        scaleY: 1.25,
+        opacity: 0,
+        duration: 0.35,
+        easing: Konva.Easings.EaseOut,
+        onFinish: () => pulse(timesLeft - 1),
+      });
+    }
+    pulse(2);
+  }, [ringRef, active, pulseId]);
+}
+
 // Número de ordem dentro da sequência ("Lotes em sequência", ver MainApp.jsx)
 // — o balãozinho ao lado do quadrado que diz "esse é o 1º, esse é o 2º...".
 // Sem ele o operador não teria como saber em que ordem montou a fila, já que
@@ -262,11 +303,13 @@ function SeqBadge({ seq, size, color, rotation = 0, scaleX = 1, scaleY = 1 }) {
   );
 }
 
-function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNumber, isHovered, isOccupied, isPreviewing, showName, onSelect, onChange, onHoverEnter, onHoverLeave, onPressStart }) {
+function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNumber, isHovered, isOccupied, isPreviewing, showName, invalidPulseActive, invalidPulseId, onSelect, onChange, onHoverEnter, onHoverLeave, onPressStart }) {
   const groupRef = useRef(null);
   const trRef = useRef(null);
+  const pulseRingRef = useRef(null);
   const editable = mode === 'edit';
   const gestureActive = usesHoverGesture(mode);
+  useInvalidPulse(pulseRingRef, invalidPulseActive, invalidPulseId);
 
   useEffect(() => {
     if (editable && isSelected && trRef.current && groupRef.current) {
@@ -323,7 +366,7 @@ function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNu
         <SeqBadge seq={seqNumber} size={size} color={stroke} rotation={point.rotation} />
         {showName && (
         <Text
-          text={point.name}
+          text={point.displayName || point.name}
           fontFamily="ui-monospace, 'SF Mono', 'Cascadia Code', monospace"
           fontSize={12}
           fill={COLORS.textPrimary}
@@ -335,6 +378,10 @@ function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNu
           listening={false}
         />
         )}
+        {/* Anel de pulso vermelho (ver useInvalidPulse acima) — começa
+            invisível (opacity 0), só a animação imperativa acorda ele. Por
+            cima de tudo (último filho do Group = desenhado por último). */}
+        <Circle ref={pulseRingRef} radius={size * 0.75} stroke={COLORS.stateError} strokeWidth={3} opacity={0} listening={false} />
       </Group>
       {editable && isSelected && (
         <Transformer
@@ -353,9 +400,11 @@ function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNu
 // Uma célula de lote — extraída em componente próprio (em vez de inline no
 // .map() de LotMarker) porque precisa da sua própria ref+efeito pra animar o
 // crescimento no modo Ponto a Ponto, e hooks não podem viver dentro de loop.
-function LotCell({ name, index, cellSize, fill, stroke, xColor, showName, isOccupied, isPreviewing, seqNumber, lotRotation, lotScaleX, lotScaleY, gestureActive, isHovered, isSelectedEndpoint, onHoverEnter, onHoverLeave, onPressStart }) {
+function LotCell({ name, displayName, index, cellSize, fill, stroke, xColor, showName, isOccupied, isPreviewing, seqNumber, lotRotation, lotScaleX, lotScaleY, gestureActive, isHovered, isSelectedEndpoint, invalidPulseActive, invalidPulseId, onHoverEnter, onHoverLeave, onPressStart }) {
   const cellRef = useRef(null);
+  const pulseRingRef = useRef(null);
   usePtpScale(cellRef, gestureActive ? ptpTargetScale(isHovered, isSelectedEndpoint) : 1);
+  useInvalidPulse(pulseRingRef, invalidPulseActive, invalidPulseId);
 
   return (
     <Group
@@ -403,7 +452,7 @@ function LotCell({ name, index, cellSize, fill, stroke, xColor, showName, isOccu
       />
       {showName && (
         <Text
-          text={name}
+          text={displayName}
           fontFamily="ui-monospace, 'SF Mono', 'Cascadia Code', monospace"
           fontSize={11}
           fill={COLORS.textPrimary}
@@ -417,6 +466,9 @@ function LotCell({ name, index, cellSize, fill, stroke, xColor, showName, isOccu
           listening={false}
         />
       )}
+      {/* Anel de pulso vermelho (ver useInvalidPulse/PointMarker acima) —
+          mesmo padrão: começa invisível, só a animação imperativa acorda. */}
+      <Circle ref={pulseRingRef} radius={cellSize * 0.75} stroke={COLORS.stateError} strokeWidth={3} opacity={0} listening={false} />
     </Group>
   );
 }
@@ -425,7 +477,7 @@ function LotCell({ name, index, cellSize, fill, stroke, xColor, showName, isOccu
 // única unidade arrastável/rotacionável/redimensionável. Em Ponto a Ponto,
 // cada célula tem sua própria animação de hover (ver LotCell) — a seleção em
 // si acontece ao soltar o mouse/dedo, tratada no Stage.
-function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames, hoverName, occupiedNames, previewingNames, onSelectLot, onHoverEnter, onHoverLeave, onPressStart, onChange, isPreview }) {
+function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames, hoverName, occupiedNames, previewingNames, invalidPulseName, invalidPulseId, onSelectLot, onHoverEnter, onHoverLeave, onPressStart, onChange, isPreview }) {
   const groupRef = useRef(null);
   const trRef = useRef(null);
   const editable = mode === 'edit' && !isPreview;
@@ -470,6 +522,7 @@ function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames,
       >
         {Array.from({ length: lot.count }).map((_, i) => {
           const name = lotCellName(lot.prefix, i);
+          const displayName = lotCellDisplayName(lot, i);
           // Índice na sequência (ver SeqBadge/MainApp) — em modo normal as
           // listas têm no máximo 1 nome, então isso equivale ao antigo
           // `name === pickupName`, só que já preparado pra vários.
@@ -489,6 +542,7 @@ function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames,
             <LotCell
               key={i}
               name={name}
+              displayName={displayName}
               index={i}
               cellSize={cellSize}
               fill={fill}
@@ -497,6 +551,8 @@ function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames,
               showName={lot.namesVisible || isPreview}
               isOccupied={occupiedNames.includes(name)}
               isPreviewing={!!previewingNames && previewingNames.has(name)}
+              invalidPulseActive={name === invalidPulseName}
+              invalidPulseId={invalidPulseId}
               seqNumber={seqNumber}
               lotRotation={lot.rotation}
               lotScaleX={lot.scaleX}
@@ -614,6 +670,7 @@ export default function FloorPlanCanvas({
   onUpdateCloseUp,
   selectedCloseUpId,
   onSelectCloseUp,
+  onCloseUpActivate,
   // Listas (não nomes soltos) porque o modo "Lotes em sequência" seleciona
   // vários de uma vez — ver MainApp.jsx. No modo normal vêm com 0 ou 1 nome.
   pickupNames,
@@ -631,6 +688,8 @@ export default function FloorPlanCanvas({
   queueModeActive,
   onToggleQueueMode,
   queueNotifCount,
+  invalidPulseName,
+  invalidPulseId,
   emergencyActive,
   onToggleEmergency,
 }) {
@@ -672,6 +731,10 @@ export default function FloorPlanCanvas({
   // precisar do caminho imperativo do Konva.
   function handleResetView() {
     if (!baseScale) return;
+    // Voltar pro enquadramento geral não é mais "olhar de perto" nenhum
+    // Close Up específico — some o banner "VISUALIZANDO: KANBAN X" (ver
+    // handleCloseUpActivate em MainApp.jsx).
+    onCloseUpActivate?.(null);
     setStageScale(baseScale);
     setStagePos({
       x: (containerWidth - image.width * baseScale) / 2,
@@ -692,6 +755,9 @@ export default function FloorPlanCanvas({
   function handleCloseUpClick(closeUp) {
     const stage = stageRef.current;
     if (!stage || !image || !containerWidth || !containerHeight) return;
+    // Banner "VISUALIZANDO: KANBAN X" (ver CloseUpStatusBanner.jsx) — avisa
+    // MainApp.jsx já no toque, sem esperar a animação de zoom terminar.
+    onCloseUpActivate?.(closeUp);
     const scaleX = closeUp.scaleX || 1;
     const scaleY = closeUp.scaleY || 1;
     const width = closeUp.width * scaleX;
@@ -1059,6 +1125,10 @@ export default function FloorPlanCanvas({
     const stage = e.target.getStage();
     const pointer = stage.getPointerPosition();
     if (!pointer) return;
+    // Qualquer mudança de ZOOM (roda, pinça, reset — não pan/arrasto) some
+    // o banner "VISUALIZANDO: KANBAN X" — ele só sobrevive a mover o mapa
+    // no mesmo nível de zoom (ver CONTEXT.md).
+    onCloseUpActivate?.(null);
     const oldScale = stage.scaleX();
     const pointTo = {
       x: (pointer.x - stage.x()) / oldScale,
@@ -1114,6 +1184,10 @@ export default function FloorPlanCanvas({
       pinchRef.current = { dist, center };
       return;
     }
+    // Mesmo motivo do handleWheel acima — pinça É mudança de zoom, some o
+    // banner de Close Up (chamado a cada frame do gesto de propósito: é
+    // barato — setActiveCloseUpId(null) já null não re-renderiza nada).
+    onCloseUpActivate?.(null);
     const oldScale = stage.scaleX();
     const pointTo = {
       x: (center.x - stage.x()) / oldScale,
@@ -1186,10 +1260,13 @@ export default function FloorPlanCanvas({
         aria-label="Resetar posição e zoom do mapa"
         title="Resetar posição/zoom"
       >
+        {/* Lupa com "-" (zoom-out) — pedido do usuário no lugar do ícone de
+            refresh antigo. A AÇÃO continua sendo resetar zoom/posição
+            (handleResetView acima), só o ícone mudou. */}
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <polyline points="23 4 23 10 17 10" />
-          <polyline points="1 20 1 14 7 14" />
-          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+          <circle cx="11" cy="11" r="8" />
+          <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          <line x1="8" y1="11" x2="14" y2="11" />
         </svg>
       </button>
       <button
@@ -1199,15 +1276,14 @@ export default function FloorPlanCanvas({
         aria-label={interactionModeActive ? 'Sair do modo Interação' : 'Entrar no modo Interação'}
         title="Modo Interação"
       >
-        {/* Mãozinha — substituiu o antigo alternador de vista topo/isométrica
-            (legado, ver CONTEXT.md). Palma + polegar + 4 dedos, primitivas
-            simples (retângulos arredondados) no mesmo estilo dos outros
-            ícones deste arquivo. */}
+        {/* Lupa com "+" (zoom-in) — substituiu a mãozinha (que já tinha
+            substituído o alternador de vista topo/isométrica, legado, ver
+            CONTEXT.md). Par visual do zoom-out no reset-toggle acima. */}
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M8 13V5a1.5 1.5 0 0 1 3 0v6" />
-          <path d="M11 11V4a1.5 1.5 0 0 1 3 0v7" />
-          <path d="M14 11.5V5a1.5 1.5 0 0 1 3 0v8" />
-          <path d="M17 12.5V9a1.5 1.5 0 0 1 3 0v6c0 3.87-3.13 7-7 7h-1a6 6 0 0 1-5.2-3l-2.3-4a1.34 1.34 0 0 1 2.3-1.34L8 13" />
+          <circle cx="11" cy="11" r="8" />
+          <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          <line x1="11" y1="8" x2="11" y2="14" />
+          <line x1="8" y1="11" x2="14" y2="11" />
         </svg>
       </button>
       <button
@@ -1296,6 +1372,8 @@ export default function FloorPlanCanvas({
                 hoverName={hoveredName}
                 occupiedNames={effectiveOccupied}
                 previewingNames={previewingNames}
+                invalidPulseName={invalidPulseName}
+                invalidPulseId={invalidPulseId}
                 onSelectLot={onSelectLot}
                 onHoverEnter={handleHoverEnter}
                 onHoverLeave={handleHoverLeave}
@@ -1326,6 +1404,8 @@ export default function FloorPlanCanvas({
                 isOccupied={effectiveOccupied.includes(p.name)}
                 isPreviewing={previewingNames.has(p.name)}
                 showName={!!p.namesVisible}
+                invalidPulseActive={p.name === invalidPulseName}
+                invalidPulseId={invalidPulseId}
                 onSelect={onSelectPoint}
                 onHoverEnter={handleHoverEnter}
                 onHoverLeave={handleHoverLeave}

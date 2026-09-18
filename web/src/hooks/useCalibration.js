@@ -101,7 +101,10 @@ export function useCalibration() {
       const name = 'ponto-' + (cur.points.length + 1);
       // namesVisible começa false: o padrão é o nome ESCONDIDO no mapa,
       // igual aos lotes — liga no olho do PointsPanel quando precisar.
-      return { ...prev, [view]: { ...cur, points: [...cur.points, { id, name, x, y, rotation: 0, namesVisible: false }] } };
+      // displayName: apelido puramente visual (ver displayCellName abaixo)
+      // — null = sem apelido, cai no nome técnico (`name`, já calibrado
+      // idêntico ao ponto no robô — NUNCA muda por causa de apelido).
+      return { ...prev, [view]: { ...cur, points: [...cur.points, { id, name, displayName: null, x, y, rotation: 0, namesVisible: false }] } };
     });
     return id;
   }, [view]);
@@ -128,7 +131,12 @@ export function useCalibration() {
     const id = generateId();
     setData((prev) => {
       const cur = prev[view];
-      const lot = { id, prefix, x, y, rotation, count, cellSize, scaleX: 1, scaleY: 1, color: null, namesVisible: false };
+      // displayName: apelido puramente visual (ver lotCellDisplayName
+      // abaixo) — null = sem apelido cadastrado ainda, cai no prefixo
+      // técnico mesmo. NUNCA usado pra identificar a célula de verdade
+      // (isso continua sendo só `prefix`, já configurado no backend do
+      // robô) — editável em LotsPanel.jsx, junto do prefixo.
+      const lot = { id, prefix, displayName: null, x, y, rotation, count, cellSize, scaleX: 1, scaleY: 1, color: null, namesVisible: false };
       return { ...prev, [view]: { ...cur, lots: [...cur.lots, lot] } };
     });
     return id;
@@ -206,6 +214,42 @@ export function useCalibration() {
 // Nome de uma célula do lote a partir do índice (0-based): a primeira célula
 // é só o prefixo (conta como "1" implícito), as demais numeram a partir de 2
 // — ex prefixo "A": A, A2, A3, A4...
+// Esse é o nome TÉCNICO — usado nas regras de fronteira (Caso 3), enviado
+// pro robô, guardado em pickupNames/dropoffNames/occupied/route.pickup etc.
+// Já está configurado no backend do robô — NUNCA muda por causa de nome
+// fantasia (ver lotCellDisplayName/displayCellName abaixo).
 export function lotCellName(prefix, index) {
   return index === 0 ? prefix : prefix + String(index + 1);
+}
+
+// Nome fantasia de uma célula — AO CONTRÁRIO do lotCellName técnico acima
+// (que omite o número na 1ª célula, "A"/"A2"/"A3"), aqui TODA célula é
+// numerada a partir de 1: "Linha Norte 1", "Linha Norte 2"... Pedido
+// explícito do usuário: essa regra vale SÓ pra fantasia, o nome técnico
+// continua sem número na primeira célula, sem mudança nenhuma. Puramente
+// visual: nunca entra em nenhuma lógica de identificação/validação. Lote
+// sem apelido cadastrado (displayName null/vazio) cai no nome técnico
+// mesmo — a UI nunca mostra "undefined" ou uma célula sem nome.
+export function lotCellDisplayName(lot, index) {
+  return lot.displayName ? lot.displayName + ' ' + (index + 1) : lotCellName(lot.prefix, index);
+}
+
+// Resolve o nome fantasia a partir do nome TÉCNICO — usado em qualquer
+// lugar que só tem a string técnica em mãos (fila, ocupação, seleção de
+// ponto a ponto: essas vêm do servidor ou de arrays de nomes, não do
+// objeto `lot`/`point` direto) e precisa mostrar o apelido em vez dela.
+// Procura primeiro nos lotes (célula de lote), depois nos pontos avulsos
+// (`points`, opcional — quem não precisa dessa parte, como o mapa que já
+// tem o objeto `point` em mãos, pode omitir). Sem apelido cadastrado em
+// nenhum dos dois: devolve o nome técnico sem mudar nada — substituição
+// estritamente visual.
+export function displayCellName(technicalName, lots, points) {
+  for (const lot of lots) {
+    for (let i = 0; i < lot.count; i++) {
+      if (lotCellName(lot.prefix, i) === technicalName) return lotCellDisplayName(lot, i);
+    }
+  }
+  const point = points && points.find((p) => p.name === technicalName);
+  if (point && point.displayName) return point.displayName;
+  return technicalName;
 }
