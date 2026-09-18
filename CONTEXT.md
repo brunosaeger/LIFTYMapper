@@ -1249,61 +1249,90 @@ emergência (server.py) ficou como best-effort: **não resolve o caso
 travado** (testado), mas é inofensivo e pode ajudar em navegação normal
 (não testado isolado).
 
-### Recuperação de posição perdida ao cancelar (IMPLEMENTADO 2026-09-18, NÃO TESTADO EM CAMPO)
+### Recuperação de posição perdida ao cancelar — TENTADO E REMOVIDO (2026-09-18)
 
-**Motivação** (relato do usuário): cancelar uma rota com o robô no meio do
-caminho às vezes deixa ele "perdido" — sem achar caminho de volta pra
-carga, aparentando não ter espaço de manobra (turning radius) num ponto
-específico. Relacionado ao "ponto de destino fantasma" acima, mas focado
-especificamente no efeito colateral do CANCELAMENTO em si, não na causa
-raiz de MA/MB/DC.
+**Motivação original** (relato do usuário): cancelar uma rota com o robô
+no meio do caminho às vezes deixa ele "perdido" — sem achar caminho de
+volta pra carga. Relacionado ao "ponto de destino fantasma" acima.
 
-**Achado**: o PDF do fabricante "REEMAN SLAM WEB API 3.0" (2025-05-24,
-trazido pelo usuário) finalmente decodifica `GET /reeman/nav_status`
-(`{"res","reason","goal","dist","mileage"}`, endpoint que já existia na
-API mas cujo significado nunca tinha sido confirmado — só sabíamos que
-`goal` virava `-1` de forma pouco confiável, ver "O ponto de destino
-fantasma" acima):
-- `res` = fase da navegação: `1`=navegando, `3`=terminou, `4`=cancelamento
-  manual, `6`=comando aceito mas ainda não começou.
-- `reason` = resultado dessa fase. Quando `res=3`, `reason=-6` significa
-  **"Positioning abnormality"** — o robô perdeu a própria localização.
-- O mesmo PDF documenta (pela 1ª vez) `POST /cmd/reloc_pose` e
-  `POST /cmd/reloc_absolute` — forçam a posição/orientação do robô pra
-  coordenadas específicas (relocalização manual).
+**O que foi tentado**: a partir do PDF do fabricante "REEMAN SLAM WEB API
+3.0" (trazido pelo usuário), que decodifica `GET /reeman/nav_status`
+(`res`/`reason` — `res=3` + `reason=-6` = "Positioning abnormality", robô
+perdeu a localização) e documenta `POST /cmd/reloc_pose` (força
+posição/orientação manualmente) — implementei
+`robot_stop_navigation_with_recovery()`: capturava a pose antes de
+cancelar, conferia `nav_status` depois, e forçava `reloc_pose` de volta
+se detectasse `reason=-6`. Só no cancelamento pontual (`/api/queue/
+cancel-current`), nunca no loop de emergência (por causa do
+`EMERGENCY_POLL_INTERVAL_SECONDS` de 1.5s — um `sleep` ali enfraqueceria
+o loop de segurança).
 
-**Implementação** (`server.py`):
-- `robot_get_pose()` (`GET /reeman/pose`), `robot_get_nav_status()`
-  (`GET /reeman/nav_status`), `robot_reloc_pose(x, y, theta)`
-  (`POST /cmd/reloc_pose`) — wrappers novos em cima de `_slam_call`.
-- `robot_stop_navigation_with_recovery()`: captura a pose ANTES do
-  `cancel_goal` (`robot_get_pose`), cancela, espera
-  `_RECOVERY_CHECK_DELAY_SECONDS` (1s) pro robô processar, confere
-  `nav_status` — se `res=3` e `reason=-6`, manda `reloc_pose` de volta pra
-  posição capturada. Tudo dentro de `try/except` silencioso (best-effort,
-  nunca deve impedir o cancelamento de verdade, que já rodou antes).
-- **Usada SÓ em `POST /api/queue/cancel-current`** (cancelar uma rota
-  pontual) — **NÃO** no loop de emergência (`_emergency_suppress`,
-  `_queue_emergency`), que continua chamando `robot_stop_navigation()`
-  (a versão lisa, sem pose/sleep/checagem). Motivo: `_emergency_suppress`
-  roda a cada `EMERGENCY_POLL_INTERVAL_SECONDS` (1.5s) — é um loop de
-  SEGURANÇA que precisa martelar `cancel_goal` o mais rápido possível pra
-  manter o robô parado; o `time.sleep(1)` da checagem de recuperação
-  enfraqueceria exatamente esse loop na hora que mais importa. Cancelar
-  uma rota pontual não tem essa urgência, então paga o ~1s extra sem
-  problema (mesmo raciocínio de tolerância a latência já documentado pros
-  handlers de fila, que seguram `QUEUE_LOCK` até ~10-20s no pior caso).
-- **Testado isoladamente** (mock de `_slam_call`, sem o robô real): dispara
-  `reloc_pose` com a pose certa quando `nav_status` devolve
-  `res=3`/`reason=-6`; NÃO dispara em cancelamento normal (`res=4`).
-- **NÃO CONFIRMADO EM CAMPO** (diferente do `cancel_goal`/`chargeFlag`,
-  já testados com o robô real): não sabemos ainda (a) se `reason=-6`
-  realmente aparece no caso relatado pelo usuário, (b) se 1s de espera é
-  tempo suficiente pro robô atualizar o `nav_status`, (c) se as unidades
-  de `x`/`y`/`theta` de `GET /reeman/pose` batem exatamente com as que
-  `POST /cmd/reloc_pose` espera (o PDF não confirma explicitamente — os
-  exemplos de `/cmd/nav` usam a mesma escala de `/reeman/pose`, então a
-  suposição é que sim, mas fica marcado aqui até confirmar ao vivo).
+**Por que foi removido** (pedido explícito do usuário, mesma sessão):
+testado ao vivo, o cenário real nunca bateu `reason=-6` — a causa raiz de
+verdade era outra (ver "Erros estruturados do robô" logo abaixo). Forçar
+uma relocalização automática sem confirmação de que é segura é mais risco
+do que ajuda (se a pose capturada estiver errada por qualquer motivo, o
+`reloc_pose` faria o robô "acreditar" estar num lugar errado). O usuário
+julgou que não era mais útil e estava atrapalhando — removido por completo
+(`robot_get_pose`/`robot_get_nav_status`/`robot_reloc_pose`/
+`robot_stop_navigation_with_recovery`/`_RECOVERY_CHECK_DELAY_SECONDS`,
+todos fora do código). `robot_stop_navigation()` voltou a ser só o
+`cancel_goal` puro, sem efeito colateral nenhum, usada igual nos 3
+lugares de sempre (cancel-current, `_emergency_suppress`,
+`_queue_emergency`).
+
+**Fica registrado pra não reinventar**: `GET /reeman/nav_status` E
+`POST /cmd/reloc_pose` existem e têm essa forma — só não são o caminho
+certo pro problema de "robô parado depois de cancelar". Ver seção
+seguinte pro que realmente funciona.
+
+### Erros estruturados do robô — a causa raiz de verdade (CONFIRMADO EM CAMPO 2026-09-19)
+
+**Diagnóstico ao vivo** (usuário cancelou uma rota, robô no meio do
+caminho, e deixou parado de propósito pra eu investigar): consultei
+`GET /reeman/nav_status` (ficou parado em `res=4`/`reason=0` — cancelamento
+limpo, SEM erro, nunca voltou a tentar navegar) e o próprio
+`GET /api/reeman-dispatch-service/task-record/page` do dispatch — que
+mostrou uma task **`AUTO_SYSTEM` criada sozinha** (o robô TENTOU voltar
+pra carga, o mecanismo de "volta pra base quando ocioso" existe e disparou),
+mas com **`status: "ASSIGNED"` e `startTime: null`** — atribuída, nunca
+efetivamente iniciada. Bate exatamente com o `nav_status` congelado (nunca
+saiu de `res=4` pra `res=1`, o que apareceria se a navegação tivesse
+começado de verdade).
+
+**A causa, confirmada pelo usuário lendo o aviso na plataforma do
+fabricante**: *"Espaço de giro insuficiente no ponto virtual_851 do mapa
+dbc5b2b4cd6d2505d78fe894403fe2c5; o AGV não consegue girar ali"* — o
+MESMO tipo de limitação física/geométrica já documentada em "O ponto de
+destino fantasma" (lá era MA/MB/DC; aqui é um ponto virtual específico no
+caminho de volta pra carga). **Não é bug de software, é espaço de manobra
+insuficiente num ponto do mapa** — só se resolve fisicamente (liberar
+espaço) ou recalibrando o mapa/pontos, nunca por chamada de API.
+
+**Achado valioso, esse sim acionável**: `GET /error/records` (API do
+dispatch — documentada em "REEMAN Dispatch Service Third-Party API",
+JÁ parcialmente usada nesse projeto pro painel Histórico, ver
+`fetchErrorRecords`) devolve o log estruturado de erros do AGV, com
+`error` (código curto, filtrável) + `description` (texto, vem em chinês
+por padrão — o cabeçalho `Accept-Language` da API de terceiros aceita
+`en-US`, não testado ainda se muda o idioma). Confirmados ao vivo:
+- **`ROTATE_ERROR`** (nível `DEBUG`) — exatamente o caso acima: espaço de
+  giro insuficiente num ponto específico do mapa. Bloqueio físico, sem
+  recuperação automática possível — só dá pra AVISAR o operador.
+- **`LOCATION_LOST`** (nível `ERROR`) — "AGV desviou da rota"/perdeu a
+  localização. Esse SIM é o cenário que a tentativa de `reloc_pose` (acima)
+  mirava — só que não foi o que aconteceu no teste de campo. Continua sem
+  recuperação automática implementada; pelo menos agora dá pra DETECTAR
+  via esse endpoint (mais confiável que inferir pelo `nav_status`).
+
+**Ainda não implementado**: usar esse endpoint pra avisar o operador no
+tablet em tempo real (a pergunta original desse fio de investigação, "é
+possível emitir um aviso pra quando o robô parar por obstáculo?") — a
+resposta é sim, via `GET /error/records`, filtrando por `error` novo/não
+lido pro AGV em uso. Combinaria bem com `robotWarning` em
+`/api/live-state` (mesmo padrão de `robotCharging`/`robotBattery`) e um
+banner/toast no app. Não implementado ainda — próxima sessão, se o
+usuário confirmar que quer isso.
 
 ## Segunda API do fabricante: SLAM WEB API (parcialmente usada agora)
 
