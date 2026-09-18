@@ -1249,6 +1249,62 @@ emergência (server.py) ficou como best-effort: **não resolve o caso
 travado** (testado), mas é inofensivo e pode ajudar em navegação normal
 (não testado isolado).
 
+### Recuperação de posição perdida ao cancelar (IMPLEMENTADO 2026-09-18, NÃO TESTADO EM CAMPO)
+
+**Motivação** (relato do usuário): cancelar uma rota com o robô no meio do
+caminho às vezes deixa ele "perdido" — sem achar caminho de volta pra
+carga, aparentando não ter espaço de manobra (turning radius) num ponto
+específico. Relacionado ao "ponto de destino fantasma" acima, mas focado
+especificamente no efeito colateral do CANCELAMENTO em si, não na causa
+raiz de MA/MB/DC.
+
+**Achado**: o PDF do fabricante "REEMAN SLAM WEB API 3.0" (2025-05-24,
+trazido pelo usuário) finalmente decodifica `GET /reeman/nav_status`
+(`{"res","reason","goal","dist","mileage"}`, endpoint que já existia na
+API mas cujo significado nunca tinha sido confirmado — só sabíamos que
+`goal` virava `-1` de forma pouco confiável, ver "O ponto de destino
+fantasma" acima):
+- `res` = fase da navegação: `1`=navegando, `3`=terminou, `4`=cancelamento
+  manual, `6`=comando aceito mas ainda não começou.
+- `reason` = resultado dessa fase. Quando `res=3`, `reason=-6` significa
+  **"Positioning abnormality"** — o robô perdeu a própria localização.
+- O mesmo PDF documenta (pela 1ª vez) `POST /cmd/reloc_pose` e
+  `POST /cmd/reloc_absolute` — forçam a posição/orientação do robô pra
+  coordenadas específicas (relocalização manual).
+
+**Implementação** (`server.py`):
+- `robot_get_pose()` (`GET /reeman/pose`), `robot_get_nav_status()`
+  (`GET /reeman/nav_status`), `robot_reloc_pose(x, y, theta)`
+  (`POST /cmd/reloc_pose`) — wrappers novos em cima de `_slam_call`.
+- `robot_stop_navigation_with_recovery()`: captura a pose ANTES do
+  `cancel_goal` (`robot_get_pose`), cancela, espera
+  `_RECOVERY_CHECK_DELAY_SECONDS` (1s) pro robô processar, confere
+  `nav_status` — se `res=3` e `reason=-6`, manda `reloc_pose` de volta pra
+  posição capturada. Tudo dentro de `try/except` silencioso (best-effort,
+  nunca deve impedir o cancelamento de verdade, que já rodou antes).
+- **Usada SÓ em `POST /api/queue/cancel-current`** (cancelar uma rota
+  pontual) — **NÃO** no loop de emergência (`_emergency_suppress`,
+  `_queue_emergency`), que continua chamando `robot_stop_navigation()`
+  (a versão lisa, sem pose/sleep/checagem). Motivo: `_emergency_suppress`
+  roda a cada `EMERGENCY_POLL_INTERVAL_SECONDS` (1.5s) — é um loop de
+  SEGURANÇA que precisa martelar `cancel_goal` o mais rápido possível pra
+  manter o robô parado; o `time.sleep(1)` da checagem de recuperação
+  enfraqueceria exatamente esse loop na hora que mais importa. Cancelar
+  uma rota pontual não tem essa urgência, então paga o ~1s extra sem
+  problema (mesmo raciocínio de tolerância a latência já documentado pros
+  handlers de fila, que seguram `QUEUE_LOCK` até ~10-20s no pior caso).
+- **Testado isoladamente** (mock de `_slam_call`, sem o robô real): dispara
+  `reloc_pose` com a pose certa quando `nav_status` devolve
+  `res=3`/`reason=-6`; NÃO dispara em cancelamento normal (`res=4`).
+- **NÃO CONFIRMADO EM CAMPO** (diferente do `cancel_goal`/`chargeFlag`,
+  já testados com o robô real): não sabemos ainda (a) se `reason=-6`
+  realmente aparece no caso relatado pelo usuário, (b) se 1s de espera é
+  tempo suficiente pro robô atualizar o `nav_status`, (c) se as unidades
+  de `x`/`y`/`theta` de `GET /reeman/pose` batem exatamente com as que
+  `POST /cmd/reloc_pose` espera (o PDF não confirma explicitamente — os
+  exemplos de `/cmd/nav` usam a mesma escala de `/reeman/pose`, então a
+  suposição é que sim, mas fica marcado aqui até confirmar ao vivo).
+
 ## Segunda API do fabricante: SLAM WEB API (parcialmente usada agora)
 
 Existe uma **outra** API HTTP no mesmo IP do robô, sem o prefixo
@@ -1271,7 +1327,59 @@ uma task completa:
   calibração manual na plataforma do fabricante, não usada (calibramos
   visualmente no nosso próprio editor, que não precisa disso).
 
-## Sistema de login (IMPLEMENTADO)
+### Terceiro PDF do fabricante: "SLAM 3.0 API" (comunicação SERIAL) — achado sobre obstáculo, NÃO confirmado em campo (2026-09-18)
+
+Usuário trouxe um manual mais completo da API do fabricante — mas dessa
+vez é a comunicação **serial** (RS232, 115200 baud, entre a placa de
+navegação e o computador de bordo), não necessariamente a mesma coisa que
+os endpoints HTTP `/reeman/*`/`/cmd/*` acima (que existem, mas não se sabe
+ao certo o quanto espelham 1:1 esse protocolo serial — o PDF não é sobre
+HTTP). Não está no repo (mesma regra dos outros PDFs do fabricante).
+
+**Achado relevante pra "avisar o operador quando o robô para por
+obstáculo"** (pedido do usuário, ainda NÃO implementado — ver decisão
+abaixo): existe um relatório nativo `move_status:x`, **diferente** do
+`nav_result`/`nav_status` já testado e descartado (aquele é sobre
+progresso até o alvo — `state`/`goal`/`dist_to_goal`; mostrou `goal=-1`
+mesmo com o robô andando, ver "O ponto de destino fantasma" acima). Os
+códigos de `move_status`:
+- `3`: não conseguiu planejar a rota (ou `4`, o PDF tem um problema de
+  OCR/paginação aqui — os dois "4" aparecem em sequência, um dos dois é
+  bug de extração do PDF, não confirmado qual é o certo);
+- `4`: há obstáculos no caminho local;
+- `5`: reinicia navegação automaticamente se uma navegação única falhar
+  (rota fixa);
+- `6`: encontrou obstáculo e está começando a contornar (confirmado de
+  novo na seção "Navigate given target point name" do mesmo PDF: *"There
+  is an obstacle: move_status:6"*).
+
+**Por que não implementei em cima disso ainda**: não há confirmação de
+que `move_status` aparece em algum endpoint HTTP que o `server.py` já
+consegue ler — o PDF documenta o protocolo serial, e a ponte serial↔HTTP
+roda dentro do próprio robô (Android embarcado, ver "Investigação
+pausada" acima), fora do nosso controle/visibilidade. Implementar uma
+UI de aviso em cima de um campo que talvez nem chegue até nós seria
+chute. **Caminho de verificação sugerido ao usuário**: (1) bloquear o
+robô de propósito com um obstáculo e observar `GET /reeman/nav_status`
+ao vivo — se algum campo (`reason`? outro?) mudar pra um valor
+compatível com "obstáculo" nesse momento específico, achamos o link; (2)
+se não aparecer em `nav_status`, tentar farejar outros `/reeman/*` ainda
+não mapeados (o HTTP API é "parcialmente usada", pode ter mais
+endpoints); (3) como último recurso, o app de navegação grava log de
+texto em `/storage/emulated/0/forklift_log/AAAA-MM-DD.log` (acessível
+por ADB sem fio, já usado na investigação do robô parando sozinho a cada
+~10-15m, ver acima) — se `move_status` aparecer nesse log durante um
+obstáculo de propósito, dá pra ler o log por fora em vez de expor um
+endpoint HTTP novo (mais frágil, mas função enquanto não se acha o
+caminho HTTP).
+
+**Decisão pendente com o usuário**: perguntei se ele queria (a) um
+heurístico best-effort agora baseado em `/reeman/speed` (vx≈0 por muito
+tempo com rota `RUNNING`) — risco real de falso positivo por causa do
+comportamento já documentado do robô parar sozinho a cada ~10-15m em
+retas longas (descartado como obstáculo naquela investigação, mas não
+resolvido) — ou (b) testar em campo primeiro pra achar um sinal de
+verdade. A pergunta foi interrompida sem resposta ainda.
 
 Uso real: múltiplos operadores (até ~10), cada um via tablet, todos na
 mesma rede local fechada (sem internet, sem domínio — ver seção sobre

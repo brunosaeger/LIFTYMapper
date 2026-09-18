@@ -304,10 +304,91 @@ def _slam_call(method, path, body=None):
         return raw.decode("utf-8", "replace")
 
 
+def robot_get_pose():
+    """GET /reeman/pose — posição atual {x,y,theta}. Usado pra guardar a
+    última posição BOA do robô antes de cancelar a navegação (ver
+    robot_stop_navigation abaixo) — é o par de leitura do robot_reloc_pose."""
+    return _slam_call("GET", "/reeman/pose")
+
+
+def robot_get_nav_status():
+    """GET /reeman/nav_status — {res,reason,goal,dist,mileage} (documentado
+    no PDF do fabricante "SLAM WEB API" 3.0, 2026-09-18 — antes só
+    sabíamos que o endpoint existia, ver "O ponto de destino fantasma" em
+    CONTEXT.md). res=3 (navegação terminou) + reason=-6 ("Positioning
+    abnormality") é o sinal de que o robô perdeu a própria localização."""
+    return _slam_call("GET", "/reeman/nav_status")
+
+
+def robot_reloc_pose(x, y, theta):
+    """POST /cmd/reloc_pose — força a posição/orientação do robô pra
+    coordenadas específicas (relocalização manual, não documentado até
+    2026-09-18). Usado como recuperação quando o robô perde a localização
+    depois de um cancelamento no meio da rota (ver robot_stop_navigation)."""
+    return _slam_call("POST", "/cmd/reloc_pose", {"x": x, "y": y, "theta": theta})
+
+
 def robot_stop_navigation():
     """POST /cmd/cancel_goal — aborta a navegação ATUAL. É o comando que de
-    fato para o robô no meio do caminho."""
+    fato para o robô no meio do caminho.
+
+    Fica DE PROPÓSITO sem nenhum efeito colateral (sem pose, sem sleep, sem
+    checagem depois) — é chamada a cada 1.5s por `_emergency_suppress`
+    (`EMERGENCY_POLL_INTERVAL_SECONDS`), o loop de segurança que precisa
+    martelar esse comando o mais rápido possível pra manter o robô parado
+    durante uma emergência. Qualquer delay aqui (mesmo 1s) enfraqueceria
+    esse loop bem na hora que mais importa. A recuperação de posição (ver
+    robot_stop_navigation_with_recovery abaixo) é SÓ pro cancelamento
+    pontual de uma rota (não emergência), onde um segundo a mais não
+    importa."""
     return _slam_call("POST", "/cmd/cancel_goal", {})
+
+
+# Recuperação de posição perdida (pedido do usuário, 2026-09-18, a partir do
+# PDF do fabricante "SLAM WEB API" 3.0): cancelar a navegação no meio de uma
+# rota às vezes deixa o robô "perdido" — sem achar caminho de volta pra
+# carga (turning radius/espaço de manobra insuficiente num ponto específico,
+# ver CONTEXT.md "O ponto de destino fantasma"). Em vez de deixar o robô
+# tentando se resolver sozinho, captura a última posição BOA
+# (GET /reeman/pose) ANTES do cancel_goal, espera um instante pro robô
+# processar o cancelamento, e se o nav_status confirmar "Positioning
+# abnormality" (res=3, reason=-6) depois, força a reposição
+# (POST /cmd/reloc_pose) pra essa posição conhecida.
+#
+# Usada SÓ no cancelamento pontual de uma rota (POST /api/queue/cancel-
+# current) — NUNCA no loop de emergência (ver robot_stop_navigation acima,
+# o motivo é lá). NÃO CONFIRMADO EM CAMPO AINDA (diferente do cancel_goal
+# em si, já testado) — best-effort de propósito: qualquer falha na
+# captura/checagem/reposição é engolida e só logada, nunca impede o
+# cancelamento de verdade de seguir (que já aconteceu antes dessa lógica
+# rodar).
+_RECOVERY_CHECK_DELAY_SECONDS = 1.0
+
+
+def robot_stop_navigation_with_recovery():
+    """Mesmo cancel_goal de robot_stop_navigation, mas com a checagem/
+    recuperação de posição perdida em volta (ver comentário acima)."""
+    pose_before = None
+    try:
+        pose_before = robot_get_pose()
+    except Exception:
+        pass  # sem a pose de referência não dá pra recuperar depois — segue o cancel normalmente
+
+    result = robot_stop_navigation()
+
+    if pose_before:
+        try:
+            time.sleep(_RECOVERY_CHECK_DELAY_SECONDS)
+            status = robot_get_nav_status()
+            if status.get("res") == 3 and status.get("reason") == -6:
+                robot_reloc_pose(pose_before["x"], pose_before["y"], pose_before["theta"])
+                print("cancel_goal: robô perdeu a localização (nav_status reason=-6), "
+                      "reposicionado em (%.2f, %.2f, %.2f)" % (
+                          pose_before["x"], pose_before["y"], pose_before["theta"]))
+        except Exception as err:
+            print("cancel_goal: checagem de recuperação de posição falhou: %s" % err)
+
+    return result
 
 
 # --- status ao vivo do robô pro banner "Em Operação" / "Recarregando" -----
@@ -1762,8 +1843,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # o job da fila. cancel_goal (SLAM) é o comando de navegação que
             # de fato para. Best-effort — se a promoção da pendingRoute logo
             # abaixo disparar, ela manda um goal novo por cima.
+            # *_with_recovery (não a versão lisa) só aqui, de propósito: é
+            # um cancelamento PONTUAL (não o loop de emergência, que precisa
+            # ficar rápido) — dá pra pagar o ~1s extra da checagem de
+            # posição perdida (ver comentário em
+            # robot_stop_navigation_with_recovery).
             try:
-                robot_stop_navigation()
+                robot_stop_navigation_with_recovery()
             except Exception as err:
                 print("cancel-current: cancel_goal falhou: %s" % err)
 
