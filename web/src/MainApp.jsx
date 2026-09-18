@@ -66,7 +66,7 @@ export default function MainApp({ user, onLogout }) {
   // pra ele em vez de mudar estado local direto (quem decide/dispara de
   // verdade é sempre o server.py, nunca o navegador).
   const {
-    currentRoute, pendingRoute, routeQueue, occupied, emergency, robotCharging,
+    currentRoute, pendingRoute, routeQueue, occupied, emergency, robotCharging, robotBattery,
     enqueueRoutes, cancelCurrent, removeQueued, setOccupiedMany, toggleOccupied, setEmergency,
   } = useLiveState();
   const [toast, showToast] = useToast();
@@ -173,13 +173,19 @@ export default function MainApp({ user, onLogout }) {
 
   // keepRoute: true preserva pickupNames/dropoffNames/activeSlot — usado só
   // ao entrar/sair do modo Interação (ver handleToggleInteractionMode): é
-  // um modo de "só olhar" (dar zoom numa área de Close Up pra conferir um
-  // lote de longe), não deveria derrubar uma seleção de Ponto a Ponto em
-  // andamento — o operador precisa poder ir lá conferir o destino de perto
-  // e voltar pro ptp com a origem ainda escolhida. Nos outros modos (mark,
-  // edit, queue, closeup, history, users, ou sair do próprio ptp) a
-  // seleção continua sendo limpa — trocar pra eles é uma intenção
-  // diferente o suficiente pra justificar recomeçar.
+  // um modo de "só olhar/mexer em outra coisa" — Interação (dar zoom numa
+  // área de Close Up pra conferir um lote de longe) e Marcação (corrigir
+  // uma ocupação errada) — não deveria derrubar uma seleção de Ponto a
+  // Ponto em andamento — o operador precisa poder resolver aquilo e voltar
+  // pro ptp com a origem/destino ainda escolhidos. Nos outros modos (edit,
+  // queue, closeup, history, users, ou sair do próprio ptp) a seleção
+  // continua sendo limpa — trocar pra eles é uma intenção diferente o
+  // suficiente pra justificar recomeçar. Ver isPeekMode/resetSelection
+  // abaixo.
+  function isPeekMode(m) {
+    return m === 'interaction' || m === 'mark';
+  }
+
   function resetSelection({ keepRoute = false } = {}) {
     setAddTool(null);
     setPendingLotPrefix('');
@@ -196,11 +202,11 @@ export default function MainApp({ user, onLogout }) {
   }
 
   function handleModeChange(next) {
-    // Se estava em Interação, a seleção de ptp foi preservada de propósito
-    // (ver handleToggleInteractionMode) — sair dela por QUALQUER caminho
-    // (aba do Toolbar, aqui, ou os botões flutuantes abaixo) não pode
-    // jogar fora o que só estava "em pausa".
-    const keepRoute = mode === 'interaction';
+    // Se estava num "peek mode" (Interação/Marcação), a seleção de ptp foi
+    // preservada de propósito — sair dele por QUALQUER caminho (aba do
+    // Toolbar, aqui, ou os botões flutuantes abaixo) não pode jogar fora o
+    // que só estava "em pausa".
+    const keepRoute = isPeekMode(mode);
     setMode(next);
     resetSelection({ keepRoute });
   }
@@ -215,13 +221,15 @@ export default function MainApp({ user, onLogout }) {
   }
 
   // Modo de marcação de ocupação: botão flutuante próprio (ver
-  // FloorPlanCanvas), não é uma aba do Toolbar. Sair sempre volta pro modo
-  // de repouso — é uma ação de manutenção pontual, não um estado que
-  // precise "lembrar" onde você estava antes.
+  // FloorPlanCanvas), não é uma aba do Toolbar. keepRoute sempre true (é
+  // um "peek mode", ver isPeekMode acima) — corrigir uma ocupação errada
+  // não pode derrubar uma seleção de Ponto a Ponto em andamento; o
+  // operador volta pro ptp com a origem/destino ainda escolhidos, tanto no
+  // painel quanto no destaque do mapa (ver highlightsRoute em
+  // FloorPlanCanvas.jsx).
   function handleToggleMarkMode() {
-    const keepRoute = mode === 'interaction'; // ver handleModeChange acima
     setMode((m) => (m === 'mark' ? baseMode() : 'mark'));
-    resetSelection({ keepRoute });
+    resetSelection({ keepRoute: true });
   }
 
   // Ponto a Ponto: mesmo padrão do modo de marcação acima — só acessível
@@ -229,7 +237,7 @@ export default function MainApp({ user, onLogout }) {
   // dev, ptp JÁ é o modo de repouso — sair dele não muda nada (baseMode()
   // devolve 'ptp' de novo), o que é o comportamento certo.
   function handleTogglePtpMode() {
-    const keepRoute = mode === 'interaction'; // ver handleModeChange acima
+    const keepRoute = isPeekMode(mode); // ver handleModeChange acima
     setMode((m) => (m === 'ptp' ? baseMode() : 'ptp'));
     resetSelection({ keepRoute });
   }
@@ -238,8 +246,8 @@ export default function MainApp({ user, onLogout }) {
   // substituiu o antigo alternador de vista topo/isométrica (ver botão
   // "olho" -> "mãozinha" em FloorPlanCanvas.jsx). Acessível a qualquer
   // usuário (não só dev) — é o modo seguro de navegação pro operador.
-  // keepRoute sempre true aqui (é o próprio toggle de Interação — cobre
-  // tanto entrar quanto sair dela).
+  // keepRoute sempre true aqui (é o próprio toggle de Interação, outro
+  // "peek mode" — cobre tanto entrar quanto sair dela).
   function handleToggleInteractionMode() {
     setMode((m) => (m === 'interaction' ? baseMode() : 'interaction'));
     resetSelection({ keepRoute: true });
@@ -251,7 +259,7 @@ export default function MainApp({ user, onLogout }) {
   // gesto). Abrir o painel zera a notificação (bolinha vermelha com a
   // contagem de tasks solicitadas desde a última vez que foi aberto).
   function handleToggleQueueMode() {
-    const keepRoute = mode === 'interaction'; // ver handleModeChange acima
+    const keepRoute = isPeekMode(mode); // ver handleModeChange acima
     const entering = mode !== 'queue';
     setMode(entering ? 'queue' : baseMode());
     resetSelection({ keepRoute });
@@ -733,6 +741,7 @@ export default function MainApp({ user, onLogout }) {
         user={user}
         onLogout={onLogout}
         robotCharging={robotCharging}
+        robotBattery={robotBattery}
       />
       <CloseUpStatusBanner name={activeCloseUpId ? closeUps.find((c) => c.id === activeCloseUpId)?.name : null} />
 

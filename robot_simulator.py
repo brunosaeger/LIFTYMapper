@@ -79,7 +79,12 @@ STATE = {
     "actions": {},      # task_record_id -> [action dicts] (ordem = serialNumber)
     "fifo": [],          # ids de task-record em ordem; fifo[0] = ativa agora
     "idle_since": None,  # timestamp (epoch) desde quando fifo está vazia, ou None
+    "battery": 78.0,      # % simulada — drena rodando, carrega parado na base (ver h_base_encode)
+    "battery_tick": time.time(),
 }
+
+BATTERY_DRAIN_PCT_PER_MIN = 0.5   # rodando/aguardando
+BATTERY_CHARGE_PCT_PER_MIN = 2.0  # na base (chargeFlag == 2)
 
 
 def _now_iso():
@@ -318,7 +323,17 @@ def h_base_encode(_body, _query, _match):
         fifo = STATE["fifo"]
         head = STATE["records"].get(fifo[0]) if fifo else None
         charging = head is None or head["taskType"] == "AUTO_SYSTEM"
-    return 200, {"chargeFlag": 2 if charging else 0}
+        # Simula a bateria subindo/descendo (`battery`, ver server.py —
+        # documentado desde antes, nunca lido até 2026-09-18): avança
+        # proporcional ao tempo real desde o último poll, não a um tick fixo
+        # (base_encode é chamado por qualquer request, não só pela thread de
+        # fundo — mesmo raciocínio de `elapsed` em h_task_record_page).
+        now = time.time()
+        elapsed_min = (now - STATE["battery_tick"]) / 60
+        STATE["battery_tick"] = now
+        delta = (BATTERY_CHARGE_PCT_PER_MIN if charging else -BATTERY_DRAIN_PCT_PER_MIN) * elapsed_min
+        STATE["battery"] = max(0.0, min(100.0, STATE["battery"] + delta))
+    return 200, {"chargeFlag": 2 if charging else 0, "battery": round(STATE["battery"])}
 
 
 def h_cancel_goal(_body, _query, _match):

@@ -389,6 +389,21 @@
   background: var(--accent-amber);
 }
 
+/* Ícone de pilha + % (ver BatteryIcon/RobotStatusBanner.jsx) — cor do
+   ícone e do número mudam com o nível (vermelho/âmbar/mint), calculado
+   inline via style (não dá pra fazer isso só com classe fixa, o nível é
+   contínuo 0-100). Some sozinho (`hasBattery`) se o servidor não souber a
+   carga ainda. */
+.robot-status-banner__battery {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.robot-status-banner__battery-pct {
+  font-variant-numeric: tabular-nums; /* número não "dança" de largura a cada poll */
+}
+
 /* --- banner "visualizando kanban X" (Close Up, modo Interação) ------------
    Mesmo retângulo do .robot-status-banner acima, espelhado pro centro-
    INFERIOR (ver CloseUpStatusBanner.jsx). `bottom: 84px` (não 24px) de

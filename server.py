@@ -321,13 +321,28 @@ def robot_stop_navigation():
 # só a THREAD DE FUNDO escreve (um GET por tick, mesmo padrão de
 # _emergency_suppress), os handlers HTTP só leem — assim nenhum poll de
 # tablet bate no robô direto, e não têm N tablets multiplicando chamada.
-_robot_status_cache = {"charging": None}  # None = ainda não sabemos (1ª leitura não chegou ainda)
+_robot_status_cache = {"charging": None, "battery": None}  # None = ainda não sabemos (1ª leitura não chegou ainda)
+
+
+# `battery` em `/reeman/base_encode` (documentado, nunca lido até agora —
+# ver CONTEXT.md, "A API do dispatch service") — assumido 0-100 (%), a
+# convenção mais comum nesse tipo de API; NÃO confirmado em campo ainda
+# (diferente do chargeFlag, que já foi). Clampa/arredonda pra nunca exibir
+# um número fora da faixa se a suposição do formato estiver errada; valor
+# não numérico ou ausente vira None (esconde o ícone, não mostra lixo).
+def _normalize_battery(raw):
+    try:
+        pct = round(float(raw))
+    except (TypeError, ValueError):
+        return None
+    return max(0, min(100, pct))
 
 
 def _refresh_robot_status():
     try:
         data = _slam_call("GET", "/reeman/base_encode")
         _robot_status_cache["charging"] = (data.get("chargeFlag") == 2)
+        _robot_status_cache["battery"] = _normalize_battery(data.get("battery"))
     except Exception:
         pass  # robô/rede indisponível agora — mantém o último valor conhecido, tenta de novo no próximo tick
 
@@ -1605,6 +1620,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "occupied": cal.get("occupied") or [],
             "emergency": bool(state.get("emergency")),
             "robotCharging": _robot_status_cache.get("charging"),
+            "robotBattery": _robot_status_cache.get("battery"),
         }, ensure_ascii=False).encode("utf-8")
         self._relay(200, "application/json", body)
 

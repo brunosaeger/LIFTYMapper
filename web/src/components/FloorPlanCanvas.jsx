@@ -66,13 +66,14 @@ function usesHoverGesture(mode) {
 // pickupNames/dropoffNames (azul/âmbar) são desenhados no gesto ativo de
 // Ponto a Ponto, na seleção passiva do painel Fila (clicar numa task lá
 // manda o par pro mapa via mapPickupNames/mapDropoffNames em MainApp.jsx),
-// e também em Interação: entrar/sair desse modo PRESERVA a seleção de ptp
-// em andamento (MainApp.jsx, handleToggleInteractionMode/keepRoute) — é um
-// modo de "ir olhar de perto sem perder o que já tava escolhendo", então o
-// destaque precisa continuar visível enquanto o operador navega lá, senão
-// pareceria que a seleção sumiu mesmo continuando viva por baixo.
+// e também em Interação e Marcação: entrar/sair desses dois modos PRESERVA
+// a seleção de ptp em andamento (MainApp.jsx, isPeekMode/keepRoute) — são
+// "peek modes" (ir olhar de perto / corrigir uma ocupação sem perder o que
+// já tava escolhendo), então o destaque precisa continuar visível enquanto
+// o operador está neles, senão pareceria que a seleção sumiu mesmo
+// continuando viva por baixo.
 function highlightsRoute(mode) {
-  return mode === 'ptp' || mode === 'queue' || mode === 'interaction';
+  return mode === 'ptp' || mode === 'queue' || mode === 'interaction' || mode === 'mark';
 }
 
 function markerColors(mode, { isSelected, isPickup, isDropoff }) {

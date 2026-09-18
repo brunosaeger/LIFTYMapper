@@ -475,8 +475,9 @@ sempre "sem nada ativo") também limpa. Tocar um Close Up diferente troca o
 nome na hora (a mesma chamada
 `onCloseUpActivate` dispara de novo).
 
-**Seleção de Ponto a Ponto sobrevive ao modo Interação (BUG, corrigido
-2026-09-16, em DUAS partes)**: entrar/sair de `interaction` (botão
+**Seleção de Ponto a Ponto sobrevive aos "peek modes" — Interação
+(BUG, corrigido 2026-09-16, em DUAS partes) e Marcação (mesmo tratamento,
+pedido do usuário, 2026-09-18)**: entrar/sair de `interaction` (botão
 mãozinha) chamava `resetSelection()` igual a qualquer outro toggle de
 modo, que zerava `pickupNames`/`dropoffNames` — ou seja, escolher a
 origem, abrir Interação pra conferir um lote de perto (dar zoom numa área
@@ -491,19 +492,26 @@ andamento.
    `handleToggleInteractionMode` passar `keepRoute: true`: o usuário sai
    de Interação clicando o botão de ROTA (ptp), não necessariamente de
    novo no de mãozinha — e `handleTogglePtpMode` (e igualmente
-   `handleToggleMarkMode`/`handleToggleQueueMode`/`handleModeChange`)
-   chamava `resetSelection()` incondicionalmente, jogando fora o que
-   acabara de ser preservado. Fix completo: todo toggle de modo calcula
-   `const keepRoute = mode === 'interaction'` (lendo o modo ATUAL, antes
-   da troca) e passa isso pra `resetSelection` — ou seja, sair de
-   Interação por QUALQUER botão preserva a seleção; sair de qualquer outro
-   modo continua limpando normalmente.
+   `handleToggleQueueMode`/`handleModeChange`) chamava `resetSelection()`
+   incondicionalmente, jogando fora o que acabara de ser preservado. Fix:
+   `isPeekMode(m)` (`m === 'interaction' || m === 'mark'`) — todo toggle
+   de modo calcula `const keepRoute = isPeekMode(mode)` (lendo o modo
+   ATUAL, antes da troca) e passa isso pra `resetSelection`; os dois
+   toggles dos próprios peek modes (`handleToggleMarkMode`/
+   `handleToggleInteractionMode`) passam `keepRoute: true`
+   incondicionalmente, já que entrar OU sair deles sempre preserva. Ou
+   seja: sair de Interação/Marcação por QUALQUER botão preserva a
+   seleção; sair de qualquer outro modo continua limpando normalmente.
+   Marcação virou peek mode pelo mesmo motivo de Interação: corrigir uma
+   ocupação errada é uma "ida rápida resolver outra coisa", não devia
+   custar a seleção de ptp em andamento.
 2. **Visual**: mesmo com o estado preservado, o destaque azul/âmbar
-   sumia do mapa assim que entrava em Interação, porque `highlightsRoute`
+   sumia do mapa assim que entrava num peek mode, porque `highlightsRoute`
    (`FloorPlanCanvas.jsx`, ver "Fila de rotas compartilhada"/BUG DE
-   LANÇAMENTO acima) só cobria `ptp`/`queue` — passou a cobrir também
-   `interaction`, então a origem/destino já escolhidos continuam visíveis
-   no mapa enquanto o operador navega lá dentro, sem parecer que sumiu.
+   LANÇAMENTO acima) só cobria `ptp`/`queue`, depois `ptp`/`queue`/
+   `interaction` — passou a cobrir também `mark`, então a origem/destino
+   já escolhidos continuam visíveis no mapa enquanto o operador está lá
+   dentro, sem parecer que sumiu.
 
 O botão de reset de zoom (`handleResetView` em `FloorPlanCanvas.jsx`)
 nunca teve esse problema: é 100% local ao canvas (só mexe em
@@ -961,12 +969,20 @@ resposta inteira, funcionava). Agora repassa a resposta inteira nos dois
 caminhos. Se acrescentar mais campo de sessão no futuro, não voltar a
 filtrar ali.
 
-### Banner de status do robô (IMPLEMENTADO 2026-09-14)
+### Banner de status do robô (IMPLEMENTADO 2026-09-14, mexido depois)
 
-Retângulo semitransparente **centralizado sobre o mapa** (`RobotStatusBanner.jsx`,
-renderizado dentro de `FloorPlanCanvas.jsx`, `pointer-events: none` — não
-atrapalha clique no mapa embaixo) — indicação rápida de longe do que o
-robô está fazendo: **"Robô: Em Operação"** ou **"Robô: Recarregando"**.
+Retângulo semitransparente **centralizado no HEADER** (`RobotStatusBanner.jsx`,
+montado dentro de `Toolbar.jsx` — mudou de lugar em 2026-09-18, era
+centralizado sobre o mapa antes; pedido do usuário: "fica menos poluído"
+flutuando por cima do canvas. `.toolbar` virou a âncora `position:relative`
+pra isso, `.app` continua âncora só do `.closeup-status-banner`) —
+indicação rápida de longe do que o robô está fazendo: **"ROBÔ: EM
+OPERAÇÃO"** ou **"ROBÔ: RECARREGANDO"**. Cores (pedido do usuário,
+`.robot-status-banner__label`/`__status` no CSS): "ROBÔ:" na cor neutra
+das abas do header (`--text-muted`, mesma de "Editar pontos"/"Histórico"/
+"Usuários" quando inativas); o status inteiro em mint vibrante
+(`--accent-cyan`) quando operando, âmbar (`--accent-amber`) quando
+recarregando — a bolinha ao lado segue a mesma cor.
 
 **Lógica BINÁRIA de propósito por enquanto** (pedido do usuário, refinar
 depois se precisar): vem de `chargeFlag` em `GET /reeman/base_encode`
@@ -994,6 +1010,28 @@ Operação", **mesmo que o robô esteja só parado/ocioso sem fazer nada**
 **Testado** (stub simulando `/reeman/base_encode`): `null` antes do 1º
 tick; `chargeFlag=1` → `false`; `chargeFlag=2` → `true`; robô ficando
 inalcançável → mantém o último valor, não reseta.
+
+**% de bateria + ícone de pilha (IMPLEMENTADO 2026-09-18)**: dentro do
+MESMO retângulo, ao lado do status. `battery` já vinha documentado em
+`GET /reeman/base_encode` (junto de `chargeFlag`/`emergencyButton` — ver
+"A API do dispatch service" abaixo) mas nunca tinha sido lido por nenhum
+código até agora. `_normalize_battery(raw)` em `server.py` converte pra
+int e clampa 0-100 — **formato assumido, NÃO confirmado em campo ainda**
+(diferente do `chargeFlag`, que já foi testado com o robô de verdade em
+2026-09-14); se o robô mandar algo fora dessa convenção (ex: 0-1 float,
+ou millivolts), o número vai aparecer errado até alguém confirmar o
+formato real e ajustar essa função. Exposto em `/api/live-state` como
+`robotBattery` (0-100 ou `null` — mesma regra do `robotCharging`: `null`
+esconde o indicador em vez de mostrar lixo). `robot_simulator.py` também
+simula (`STATE["battery"]`, drena ~0.5%/min rodando, carrega ~2%/min na
+base — só pra ter algo pra olhar testando local sem o robô físico).
+
+`BatteryIcon` (função local em `RobotStatusBanner.jsx`): pilha com 4
+"pauzinhos" — quantos acendem = `Math.ceil(battery / 25)` (1 barra a cada
+25%); cor do ícone INTEIRO (contorno + barras + número da %) muda com o
+nível: **<20% vermelho** (`--state-error`), **<50% âmbar**, senão **mint**
+— independente de estar carregando ou não (é sobre o nível, não sobre o
+estado de carga).
 
 ### Diferenciação de pallets: Azul (metálico) vs Madeira
 
