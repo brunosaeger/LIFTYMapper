@@ -17,6 +17,7 @@ node_modules/
 calibration.json
 route_log.json
 queue_state.json
+robot_host.txt
 
 # Login — users.json tem hash de senha (nunca texto puro, mas ainda assim
 # não é pra commitar) e session_secret.key é a chave que assina os cookies

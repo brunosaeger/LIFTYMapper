@@ -59,12 +59,63 @@ python3 server.py        # porta 8000 — proxy pro robô + /api/calibration
 `web/vite.config.js` já encaminha `/api/*` do dev server (5173) pro `server.py`
 (8000), então funciona sem CORS em dev também.
 
-**Antes de rodar em campo:** editar `ROBOT_HOST` no topo do `server.py` com o
-IP do robô na rede daquele dia (muda toda vez que troca de rede — já foi
-`192.168.43.74` no hotspot de celular e `172.16.1.244` numa rede fixa,
-nesta mesma sessão). O IP que o TABLET usa pra acessar o app é outro —
-é o IP desta máquina (a que roda o `server.py`), não o do robô; descobre
-com `hostname -I` (Linux) e confere que caiu na mesma faixa do robô.
+**Antes de rodar em campo:** não precisa mais editar `ROBOT_HOST` na mão —
+o servidor descobre o IP do robô sozinho ao subir (ver "Descoberta
+automática do IP do robô" logo abaixo). O IP que o TABLET usa pra acessar
+o app é outro — é o IP desta máquina (a que roda o `server.py`), não o do
+robô; descobre com `hostname -I` (Linux) e confere que caiu na mesma faixa
+do robô.
+
+**Descoberta automática do IP do robô (IMPLEMENTADO 2026-09-21)**: o robô
+troca de IP toda vez que a rede muda (hotspot de celular vs roteador fixo,
+ou o próprio DHCP reatribuindo) — mas só o ÚLTIMO octeto muda dentro da
+MESMA sub-rede (observado pelo usuário: já foi `.193`, virou `.195`, sempre
+`192.168.5.x`). Editar `ROBOT_HOST` na mão a cada troca já era uma dor
+recorrente documentada nesta seção em sessões anteriores (`192.168.43.74`
+no hotspot, `172.16.1.244` na rede fixa, `192.168.5.193`→`.195` depois).
+Resolvido: `discover_robot_host()` em `server.py`, chamada automaticamente
+por `start_server()` sempre que nenhum `robot_host` explícito é passado —
+a GUI do `.exe` (campo de IP manual, ver "Empacotamento em .exe" abaixo)
+continua sendo respeitada quando o usuário digita algo ali; a descoberta
+automática entra quando ninguém informou nada, o que já cobre
+`python3 server.py` direto.
+
+Como funciona:
+1. **Atalho rápido**: tenta o último IP que funcionou (`robot_host.txt` ao
+   lado do `calibration.json`, gitignorado — mesmo padrão de dado de
+   runtime) e o `ROBOT_HOST` atual, testando cada um contra
+   `GET {ip}/api/reeman-dispatch-service/project/infos` (endpoint mais
+   leve do dispatch service) e conferindo se a resposta tem a cara certa
+   (`{"code": ...}`) — não só se a porta 80 está aberta, pra não "achar"
+   qualquer outro serviço HTTP que por acaso esteja na rede. Cobre o caso
+   comum ("nada mudou desde o último boot") sem varrer nada.
+2. **Varredura completa**, só se o atalho falhar: descobre a sub-rede /24
+   da PRÓPRIA máquina via um truque de socket UDP "conectado" (não manda
+   pacote de verdade, só resolve a rota — funciona mesmo sem internet,
+   só precisa da wifi já conectada) e testa os 254 endereços em paralelo
+   (`ThreadPoolExecutor`, 40 workers, timeout de 0,5s por tentativa) até
+   achar quem responde certo. **Testado contra o robô real** nesta sessão
+   (2026-09-21, a máquina de dev estava na mesma rede do robô): achou em
+   ~2,7s varrendo os 254 endereços.
+3. **Redescoberta em runtime**: se uma chamada ao robô falhar por problema
+   de CONEXÃO (não uma resposta HTTP de erro normal, que significa que o
+   robô respondeu e só não gostou do pedido — `_note_possible_ip_change`
+   distingue os dois via `isinstance(err, urllib.error.HTTPError)`),
+   dispara uma nova descoberta numa thread separada, com cooldown de 30s
+   entre tentativas (`DISCOVERY_RESCAN_COOLDOWN_SECONDS`) pra não martelar
+   a rede inteira se o robô estiver genuinamente desligado.
+
+Se a descoberta não achar nada (robô fora da mesma sub-rede /24, rede
+ainda não subiu no boot etc.), mantém o `ROBOT_HOST` que já estava
+(hardcoded no topo do arquivo, agora só semente/fallback) — nunca apaga um
+valor que já funcionava.
+
+**Fora do escopo desta implementação**: a GUI do `.exe`
+(`packaging/lifty_gui.py`) continua com o campo de IP manual + o valor
+salvo em `lifty_config.json`, sem chamar `discover_robot_host()`. Dava pra
+fazer a GUI também se beneficiar disso (campo manual vira fallback
+opcional em vez de obrigatório), mas é decisão separada, ainda não
+discutida/implementada.
 
 **CUIDADO — `crypto.randomUUID()` não funciona fora de "contexto seguro"**:
 essa API (usada pra gerar id de ponto/lote/rota) só existe em HTTPS ou em
@@ -1333,6 +1384,177 @@ lido pro AGV em uso. Combinaria bem com `robotWarning` em
 `/api/live-state` (mesmo padrão de `robotCharging`/`robotBattery`) e um
 banner/toast no app. Não implementado ainda — próxima sessão, se o
 usuário confirmar que quer isso.
+
+**Descoberta relacionada, útil pra planejar a próxima implementação
+(abaixo)**: não existe (ou não achamos — testado e descartado, ver
+"Recuperação de posição perdida" acima) uma forma de PERGUNTAR ao robô
+"tenho espaço de giro aqui?" antes de agir — só fica sabendo DEPOIS, via
+`ROTATE_ERROR`. Em compensação, dá pra saber **de qual ponto calibrado o
+robô está mais perto agora**, combinando dois GETs que já sabemos
+funcionar: `GET /reeman/pose` (posição ao vivo, `{x,y,theta}`) e
+`GET /api/reeman-dispatch-service/map/point/list/{map}` (todos os pontos
+de verdade — os mesmos nomes de kanban do app — cada um com
+`position: [x,y,theta]`, **mesmo referencial** de `/reeman/pose`,
+confirmado ao vivo). Calculando distância euclidiana da pose atual até
+cada ponto e ordenando, o mais próximo é uma aproximação confiável de
+"onde ele está agora" — testado ao vivo com o robô na base: `energy`
+(0.01m) na frente, `PROD` (2.16m) em seguida. **Limitação**: é "ponto mais
+próximo por distância reta", não "está exatamente no segmento entre A e
+B" — mas é preciso o suficiente pra validação física andando na planta.
+
+### Plano da próxima implementação (definido pelo usuário, 2026-09-19, AINDA NÃO FEITO)
+
+Decisão do usuário depois de todo o diagnóstico acima: em vez de tentar
+detectar/evitar `ROTATE_ERROR` via API (não dá, é limitação física do
+mapa, não tem "pergunta" pra fazer antes), ele vai **mapear
+empiricamente, ele mesmo, quais pontos são seguros pra cancelar** — usando
+o app pra andar até perto de cada ponto suspeito e testar na prática se o
+robô consegue girar ali.
+
+1. **Usuário define uma lista de pontos "válidos pra girar"** (fora do
+   código por enquanto — precisa decidir onde essa lista mora: hardcoded
+   em `server.py`? Um campo novo no `calibration.json`, editável pela UI,
+   tipo um checkbox "permite cancelar aqui" por ponto/lote? Em aberto,
+   discutir na implementação).
+2. **Nova condição no cancelamento de tasks** (`POST /api/queue/cancel-
+   current`, provavelmente comparando contra o ponto calibrado mais
+   próximo da pose atual, técnica confirmada acima): enquanto o robô NÃO
+   estiver perto de um ponto da lista "válida", o cancelamento deve
+   mostrar a mensagem:
+
+   > **"ESPAÇO DE GIRO INSUFICIENTE: O Robô irá se re-orientar e cancelar
+   > sua tarefa."**
+
+   (Formato exato da mensagem já definido pelo usuário — usar literal,
+   não parafrasear.) Semântica ainda a esclarecer na implementação: o
+   cancelamento ainda acontece (só que avisando que vai levar um
+   reposicionamento antes), ou fica bloqueado até o robô chegar num ponto
+   válido? Confirmar com o usuário antes de implementar.
+
+**Pré-requisitos técnicos já resolvidos** (ver achados acima, só falta
+juntar): `GET /reeman/pose` + `GET /map/point/list/{map}` pra achar o
+ponto mais próximo; `GET /error/records` como plano B/complementar pra
+confirmar `ROTATE_ERROR` de verdade se quiser validar contra o log em vez
+de só a lista pré-definida.
+
+### SUPERADO (2026-09-21) — achamos como perguntar pro robô de verdade, ao vivo, sem lista pré-definida
+
+O plano acima (mapear pontos manualmente, testando cancelamento de
+verdade e vendo o robô reclamar) foi **substituído** por algo bem
+melhor: o robô tem, de fábrica, exatamente a pergunta "posso girar
+aqui?" — só que ela não está na API HTTP que usamos até hoje (dispatch
+service / SLAM WEB API), está numa camada mais baixa (ROS, interna ao
+computador de bordo). Achamos ela, confirmamos que funciona de verdade
+no robô físico, e desenhamos como usar sem depender de lista fixa.
+
+**Acesso obtido**: usuário tem SSH **root** no computador de bordo do
+robô, alcançável por **cabo Ethernet** na porta interna
+(`192.168.10.2`/`192.168.11.2` — ver `ip_lan`/`enp1s0`/`enp2s0` no SLAM
+3.0 API). Robô confirmado rodando **ROS1** (hostname do robô:
+`rbot55f-260318-003-001`).
+
+**Descoberta 1 — o comando existe como PAR DE TÓPICOS, não como serviço.**
+`rostopic list -v` no robô revelou:
+```
+/robot_api/turn_check_angle  [std_msgs/Float32]  1 publisher, 1 subscriber
+/robot_api/turn_check_ok     [std_msgs/Bool]      1 publisher, 1 subscriber
+```
+Isso é exatamente o `check:turn_angle[angle]` → `turn_angle_check:x` da
+seção "Unique to Forklift" do PDF SLAM 3.0 API, só que exposto como ROS
+puro: publica um ângulo (graus, mesmo sinal do doc — positivo esquerda/
+negativo direita) em `turn_check_angle`, o robô responde em
+`turn_check_ok` (`True` = pode girar, `False` = tem obstáculo). Também
+apareceu `/area_reachable [std_msgs/String]`, provável equivalente do
+`check:area_reachable[...]` — ainda não testado.
+
+**Validado ao vivo, na mão** (`rostopic pub -1 ... "data: 180.0"` +
+`rostopic echo` num segundo terminal), em três situações reais:
+- Corredor apertado, robô parado: `False`.
+- Área aberta, robô parado: `True`.
+- **No meio de uma task real em andamento** (não parado/ocioso): `False`,
+  coerente, **sem nenhum efeito colateral aparente na navegação em
+  curso** — confirma que a pergunta é mesmo só-leitura/não-invasiva,
+  segura de fazer ao vivo, inclusive durante uma rota.
+
+**Descoberta 2 — o computador de bordo é o MESMO que serve o dispatch
+service pro tablet.** `ip addr` dentro da sessão SSH:
+```
+enp1s0: 192.168.10.2/24   (cabo, onde a gente entra)
+enp2s0: 192.168.11.2/24   (outra interface interna)
+wlp1s0: 192.168.5.195/24  (WIFI — o MESMO IP que ROBOT_HOST usa hoje!)
+```
+Ou seja: não são dois computadores separados — é uma máquina só, com
+uma perna na rede interna (cabo) e outra na wifi do galpão (a mesma que
+tablets e `server.py` já usam). Isso muda tudo: **dá pra expor essa
+pergunta ao vivo, pela mesma wifi de sempre, sem cabo no dia a dia** —
+o cabo só foi necessário pra essa investigação.
+
+**Descoberta 3 — acesso "de fora" (sem tocar na máquina do robô de
+jeito nenhum) foi tentado e NÃO funciona hoje**: testamos conectar na
+porta do ROS master (11311) de uma máquina externa na mesma wifi
+(`socket.create_connection(("192.168.5.195", 11311))`) → **`Connection
+refused`**. O ROS master não aceita conexão de fora da própria máquina
+— pra isso funcionar precisaria reconfigurar como o `roscore` sobe no
+robô, o que é bem mais arriscado que adicionar algo novo e isolado
+(mexeria em algo que já está funcionando na navegação de produção).
+Opção descartada por enquanto.
+
+**Decisão de arquitetura**: um script Python **standalone, novo e
+independente**, rodando na própria máquina de bordo do robô (não numa
+máquina externa), que fala com esses tópicos ROS locais (igual o
+`rostopic pub`/`echo` que já validamos na mão) e expõe isso como HTTP
+simples na wifi (`GET /check-turn?angle=180` → `{"safe": true/false}`).
+`server.py` chamaria esse endpoint pela mesma wifi que já usa pra tudo
+mais — nenhuma mudança de rede, nenhum cabo, nenhuma dependência nova
+no `server.py` em si (ele só passa a fazer mais uma chamada HTTP comum).
+
+**Cuidados inegociáveis, pedidos explicitamente pelo usuário (2026-09-21)
+— vale pra QUALQUER sessão futura que mexer nisso**:
+- **Nunca** rodar `colcon build`/`catkin_make` em nada.
+- **Nunca** editar, sobrescrever ou mesmo depender de arquivo nenhum da
+  REEMAN (workspace `catkin_ws` deles, launch files, configuração).
+- **Nunca** mexer em systemd, boot, firewall ou rede do robô.
+- O script só usa tipos de mensagem **padrão** do ROS
+  (`std_msgs.Float32`/`Bool`) — nunca um pacote/mensagem customizada da
+  REEMAN.
+- É um arquivo **novo e isolado**, fora de qualquer workspace catkin —
+  ver `robot-bridge/lifty_turn_check_bridge.py` neste repo (só a
+  REFERÊNCIA/fonte; o arquivo de verdade precisa ser copiado pro robô
+  via SSH, esse repo não roda automaticamente lá).
+- Modo de operação por enquanto: **manual, sob demanda** (SSH, roda em
+  primeiro plano, `Ctrl+C` pra parar — nada de systemd/boot automático)
+  até decidirem explicitamente tornar permanente, depois de validado.
+
+**Status ao encerrar a sessão de 2026-09-21**: script escrito e
+revisado, cópia pro robô **em andamento** (esbarrou num limite de
+~4096 caracteres por linha do terminal em modo canônico do Linux — duas
+tentativas de transferência falharam de forma inofensiva, sem escrever
+nada em disco nem executar nada de verdade, ver raciocínio na sessão;
+resolvido quebrando o `base64` em ~10 pedaços de 500 caracteres, cada
+um colado como comando separado). **Ainda não confirmado** que o
+arquivo chegou íntegro no robô nem que o bridge roda lá de ponta a
+ponta — retomar isso primeiro na próxima sessão.
+
+**Próximos passos (nesta ordem)**:
+1. Terminar de copiar `lifty_turn_check_bridge.py` pro robô (comandos
+   já prontos, só faltou executar); confirmar com
+   `python3 -m py_compile`.
+2. Rodar (`python3 lifty_turn_check_bridge.py`), testar local
+   (`curl localhost:8091/check-turn?angle=180`) e **remoto**
+   (`curl http://192.168.5.195:8091/check-turn?angle=180` de outra
+   máquina na wifi — é o teste que prova que dá pra usar ao vivo sem
+   cabo).
+3. Validar em MAIS pontos reais (não só "um aberto, um apertado") —
+   especialmente as bocas de corredor onde hoje acontece o
+   `ROTATE_ERROR` de verdade.
+4. Decidir a semântica do cancelamento (bloquear até ficar seguro vs.
+   avisar e prosseguir — mensagem literal já definida, ver plano
+   2026-09-19 acima) e então integrar no `server.py`: uma função tipo
+   `_slam_call`, mas apontando pro bridge (`http://<ROBOT_HOST>:8091/
+   check-turn`), chamada em `POST /api/queue/cancel-current` antes de
+   cancelar de verdade.
+5. Só depois de tudo validado em campo: decidir se o bridge vira
+   permanente (systemd) ou continua manual.
 
 ## Segunda API do fabricante: SLAM WEB API (parcialmente usada agora)
 

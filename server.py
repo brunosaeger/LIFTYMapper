@@ -22,10 +22,16 @@ uma requisicao HTTP comum (que nao passa por regra de CORS nenhuma,
 porque CORS e uma restricao do navegador, nao do protocolo HTTP).
 
 Uso:
-    1. Edite ROBOT_HOST abaixo com o IP do robo no dia da demo.
-    2. cd web && npm run build && cd ..   (gera web/dist)
-    3. python3 server.py
-    4. Abra http://localhost:8000 no navegador/tablet (mesma rede do robo).
+    1. cd web && npm run build && cd ..   (gera web/dist)
+    2. python3 server.py
+    3. Abra http://localhost:8000 no navegador/tablet (mesma rede do robo).
+
+ROBOT_HOST abaixo e so um FALLBACK/semente inicial — ao subir, o servidor
+varre sozinho a rede local procurando quem responde como o dispatch service
+de verdade e atualiza o host automaticamente (ver discover_robot_host() e
+"Descoberta automatica do robo" mais abaixo). So importa editar a mao se a
+varredura falhar (robo fora da mesma sub-rede /24, rede ainda nao subiu no
+boot etc.).
 
 Em desenvolvimento (npm run dev dentro de web/), o Vite serve o app na 5173
 e encaminha /api pra este processo na 8000 (ver web/vite.config.js) — rode
@@ -34,6 +40,7 @@ os dois processos em paralelo.
 Sem dependencias externas - só biblioteca padrão do Python 3.
 """
 import base64
+import concurrent.futures
 import functools
 import hashlib
 import hmac
@@ -41,6 +48,7 @@ import http.cookies
 import http.server
 import json
 import secrets
+import socket
 import sys
 import threading
 import time
@@ -76,7 +84,7 @@ def _app_dir():
 # CONFIGURAÇÃO — confirme o IP do robô antes da demo (ver seção 1.1 do PDF /
 # ip_nav confirmado em testes anteriores).
 # ---------------------------------------------------------------------------
-ROBOT_HOST = "http://192.168.5.193/" #http://192.168.43.74 ou http://172.16.1.244/
+ROBOT_HOST = "http://192.168.5.195/" #http://192.168.43.74 ou http://172.16.1.244/
 LISTEN_PORT = 8000
 # ---------------------------------------------------------------------------
 
@@ -96,7 +104,127 @@ def set_robot_host(host):
         host += "/"
     ROBOT_HOST = host
 
+
+# --- Descoberta automática do robô -----------------------------------------
+# Motivo: o robô troca de IP toda vez que a rede muda (hotspot de celular vs
+# roteador fixo, ou o próprio DHCP reatribuindo) — só o ÚLTIMO octeto muda
+# dentro da mesma sub-rede (ex: .193 virou .195), nunca os três primeiros.
+# Antes disso exigia editar ROBOT_HOST à mão a cada troca (já rendeu mais de
+# um susto em campo, ver histórico no topo do arquivo). Agora, ao subir (e
+# quando uma chamada ao robô falha por problema de CONEXÃO, não uma resposta
+# de erro normal), o servidor varre sozinho a sub-rede /24 da própria
+# máquina procurando quem responde como o dispatch service de verdade —
+# bate no endpoint mais leve que existe (lista de projetos) e confere se a
+# resposta tem a cara certa ({"code":...}), não só se a porta está aberta
+# (evita "achar" qualquer outro serviço HTTP que por acaso esteja na rede).
 API_PREFIX = "/api/reeman-dispatch-service"
+DISCOVERY_PROBE_PATH = API_PREFIX + "/project/infos"
+ROBOT_HOST_CACHE_FILE = _app_dir() / "robot_host.txt"  # último IP achado — testado primeiro no próximo boot, evita varrer 254 endereços se nada mudou
+DISCOVERY_TIMEOUT_SECONDS = 0.5
+DISCOVERY_WORKERS = 40
+DISCOVERY_RESCAN_COOLDOWN_SECONDS = 30  # evita martelar a rede inteira a cada chamada falhando, se o robô estiver genuinamente desligado
+
+
+def _local_subnet_prefix():
+    """Descobre o prefixo /24 (ex: '192.168.5.') e o próprio IP local, olhando
+    qual interface o SO usaria pra sair — via "connect" UDP, que só resolve
+    rota (não manda pacote nenhum), então funciona mesmo sem internet de
+    verdade, só precisando de uma rota local configurada (wifi conectado)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("10.255.255.255", 1))
+        local_ip = sock.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        sock.close()
+    parts = local_ip.split(".")
+    if len(parts) != 4:
+        return None
+    return ".".join(parts[:3]) + ".", local_ip
+
+
+def _looks_like_dispatch_service(ip):
+    """True se `ip` responder no endpoint do dispatch service com a cara
+    certa ({"code": ...}) — não só se a porta 80 estiver aberta (qualquer
+    outro serviço HTTP na rede também responderia a isso)."""
+    url = "http://%s%s" % (ip, DISCOVERY_PROBE_PATH)
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, method="GET"), timeout=DISCOVERY_TIMEOUT_SECONDS) as resp:
+            data = json.loads(resp.read())
+        return isinstance(data, dict) and "code" in data
+    except Exception:
+        return False
+
+
+def discover_robot_host():
+    """Varre a rede procurando o robô e atualiza ROBOT_HOST sozinho. Tenta
+    primeiro o último IP que funcionou (arquivo ROBOT_HOST_CACHE_FILE) e o
+    ROBOT_HOST atual — cobre o caso comum de "nada mudou" sem varrer nada. Só
+    varre a sub-rede /24 inteira se isso falhar. Sempre devolve algo utilizável
+    em ROBOT_HOST: se não achar nada, mantém o que já estava (não apaga o
+    valor anterior)."""
+    candidates_first = []
+    if ROBOT_HOST_CACHE_FILE.exists():
+        cached = ROBOT_HOST_CACHE_FILE.read_text().strip()
+        if cached:
+            candidates_first.append(cached)
+    current = ROBOT_HOST.rstrip("/").replace("http://", "").replace("https://", "")
+    if current and current not in candidates_first:
+        candidates_first.append(current)
+    for ip in candidates_first:
+        if _looks_like_dispatch_service(ip):
+            set_robot_host(ip)
+            ROBOT_HOST_CACHE_FILE.write_text(ip)
+            print("Robô encontrado em %s (sem precisar varrer a rede)." % ip)
+            return ip
+
+    prefix_info = _local_subnet_prefix()
+    if not prefix_info:
+        print("Aviso: não deu pra determinar a sub-rede local pra varrer — mantendo ROBOT_HOST atual (%s)." % ROBOT_HOST)
+        return None
+    prefix, own_ip = prefix_info
+    candidates = [prefix + str(i) for i in range(1, 255) if prefix + str(i) != own_ip]
+
+    print("Procurando o robô em %s0/24..." % prefix)
+    found = None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=DISCOVERY_WORKERS) as pool:
+        futures = {pool.submit(_looks_like_dispatch_service, ip): ip for ip in candidates}
+        for future in concurrent.futures.as_completed(futures):
+            if future.result():
+                found = futures[future]
+                break
+
+    if found:
+        set_robot_host(found)
+        ROBOT_HOST_CACHE_FILE.write_text(found)
+        print("Robô encontrado em %s (varredura de %s0/24)." % (found, prefix))
+        return found
+
+    print("Aviso: não achei nenhum robô respondendo como dispatch service em %s0/24 — mantendo ROBOT_HOST atual (%s). Confira se o robô está ligado e na mesma rede." % (prefix, ROBOT_HOST))
+    return None
+
+
+_last_discovery_attempt = 0.0
+_discovery_attempt_lock = threading.Lock()
+
+
+def _note_possible_ip_change(err):
+    """Chamado quando uma chamada ao robô falha por problema de CONEXÃO
+    (robô não respondeu nada — pode ter trocado de IP). Diferente de uma
+    resposta HTTP de erro (o robô respondeu, só não gostou do pedido — não
+    é sinal de IP errado). Dispara uma redescoberta em segundo plano, com
+    cooldown pra não martelar a rede inteira a cada chamada se o robô
+    estiver genuinamente desligado/fora da rede."""
+    if isinstance(err, urllib.error.HTTPError):
+        return
+    global _last_discovery_attempt
+    now = time.monotonic()
+    with _discovery_attempt_lock:
+        if now - _last_discovery_attempt < DISCOVERY_RESCAN_COOLDOWN_SECONDS:
+            return
+        _last_discovery_attempt = now
+    threading.Thread(target=discover_robot_host, daemon=True).start()
 CALIBRATION_PATH = "/api/calibration"
 # Sempre absoluto, nunca relativo ao diretório de trabalho do processo —
 # SimpleHTTPRequestHandler resolve `directory=` relativo ao CWD em tempo de
@@ -272,8 +400,12 @@ def _robot_call(method, path, body=None):
     req = urllib.request.Request(target, data=data, method=method)
     if data is not None:
         req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        parsed = json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            parsed = json.loads(resp.read())
+    except Exception as err:
+        _note_possible_ip_change(err)
+        raise
     if parsed.get("code") != 0:
         raise RobotError(parsed.get("message") or "erro desconhecido do robô")
     return parsed.get("data")
@@ -296,8 +428,12 @@ def _slam_call(method, path, body=None):
     req = urllib.request.Request(target, data=data, method=method)
     if data is not None:
         req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        raw = resp.read()
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read()
+    except Exception as err:
+        _note_possible_ip_change(err)
+        raise
     try:
         return json.loads(raw)
     except (json.JSONDecodeError, ValueError):
@@ -1024,7 +1160,9 @@ def start_server(robot_host=None, port=None):
     if _httpd is not None:
         return  # já no ar
     if robot_host:
-        set_robot_host(robot_host)
+        set_robot_host(robot_host)  # IP explícito (ex: digitado na GUI do .exe) — respeita, não varre por cima
+    else:
+        discover_robot_host()
     listen_port = port or LISTEN_PORT
     _seed_calibration_if_missing()
     _bootstrap_users_if_missing()
@@ -1950,6 +2088,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # o dispatch service respondeu com um erro HTTP (400/500) — repassa como veio
             self._relay(err.code, "application/json", err.read())
         except Exception as err:  # rede indisponível, timeout, robô desligado, etc.
+            _note_possible_ip_change(err)
             payload = ('{"code":4,"message":"Proxy: %s"}' % str(err)).encode("utf-8")
             self._relay(502, "application/json", payload)
 
