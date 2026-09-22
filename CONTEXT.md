@@ -1375,6 +1375,12 @@ por padrão — o cabeçalho `Accept-Language` da API de terceiros aceita
   mirava — só que não foi o que aconteceu no teste de campo. Continua sem
   recuperação automática implementada; pelo menos agora dá pra DETECTAR
   via esse endpoint (mais confiável que inferir pelo `nav_status`).
+- **`GENERATE_PATH_UNKNOWN_ERROR`** (nível `DEBUG`) — ver incidente
+  completo "AUTO_SYSTEM travado longe de casa" logo abaixo. Categoria
+  DIFERENTE do `ROTATE_ERROR`: não é falta de espaço pra girar, é falha
+  em GERAR o caminho de volta pra carga quando o robô está fisicamente
+  longe da região dos pontos que esse caminho usa como "escada"
+  intermediária.
 
 **Ainda não implementado**: usar esse endpoint pra avisar o operador no
 tablet em tempo real (a pergunta original desse fio de investigação, "é
@@ -1385,8 +1391,133 @@ lido pro AGV em uso. Combinaria bem com `robotWarning` em
 banner/toast no app. Não implementado ainda — próxima sessão, se o
 usuário confirmar que quer isso.
 
-**Descoberta relacionada, útil pra planejar a próxima implementação
-(abaixo)**: não existe (ou não achamos — testado e descartado, ver
+### Incidente de campo — AUTO_SYSTEM travado longe de casa (2026-09-23)
+
+Descoberto DEPOIS de validar o `check-turn` (ver "Bridge validado de
+ponta a ponta"/"Cancelamento adiado até giro seguro" acima) — categoria
+de problema DIFERENTE, não relacionada ao `ROTATE_ERROR`/espaço de giro.
+
+**Sintoma**: usuário cancelou uma rota (com o `check-turn` novo já
+protegendo — funcionou certo, sem reclamar de giro) longe da área normal
+de operação, depois de uma sessão de testes onde o robô foi dirigido
+manualmente pra vários cantos do galpão. Sem task, o robô criou sozinho
+a `AUTO_SYSTEM` de retorno à carga (`energy_...`) — que ficou **travada**
+(`ASSIGNED` sem nunca iniciar, ou `RUNNING` sem nunca progredir),
+reaparecendo automaticamente do mesmo jeito a cada vez que era cancelada,
+mesmo enviando rotas normais pelo app entre as tentativas.
+
+**Causa raiz, confirmada com dados reais** (não é posição corrompida —
+checado com `GET /reeman/pose` vs. `GET /map/point/list/{map}`: o robô
+estava genuinamente a só 0.37m do ponto calibrado `HEXA`, localização
+ótima): `GET /error/records` mostrou `GENERATE_PATH_UNKNOWN_ERROR`
+(nível DEBUG) — *"生成路线失败：... 已偏离当前路线 P3 -> P1，距离路线
+24.60m"* ("Falha ao gerar rota: ... desviou da rota atual P3 -> P1,
+distância da rota 24.60m") — confirmado por cálculo: `P3` e `P1`
+calibrados ficam a ~24-28m da pose real do robô naquele momento. O
+retorno automático pra carga usa algum mecanismo de rota em
+etapas/grafo (parece tratar P3→P1 como um trecho intermediário
+fixo do caminho de volta) que só funciona se o robô estiver
+razoavelmente perto dessa região — longe dali, a geração do caminho
+falha e a task de retorno nunca sai do papel. **Mecanismo interno da
+REEMAN, não documentado nos PDFs que temos, sem controle nosso via API.**
+
+**O mesmo erro já tinha acontecido em 2026-09-19** (26.12m de desvio,
+quase idêntico) — ou seja, não tem relação com a feature `reloc_pose`
+removida na mesma época (que, pelo próprio commit de remoção, nunca
+chegou a disparar de verdade em campo) nem com nada implementado nesta
+sessão. É uma característica de como o robô lida com retorno de longa
+distância, que só aparece quando ele acaba MUITO longe da área normal —
+o que só aconteceu por causa da sessão extensa de testes manuais
+(`check-turn`/calibração de pontos), não é esperado na operação normal
+do dia a dia.
+
+**Diagnóstico passo a passo** (tudo leitura, direto na API — não
+precisou do `server.py`):
+1. `GET /reeman/pose` (posição real) vs. `GET /map/point/list/{map}`
+   (posição calibrada de cada ponto) — cálculo de distância euclidiana
+   confirmou o robô perto de `HEXA` e longe de `P1`/`P3`, batendo com o
+   texto do erro quase ao decimal.
+2. `GET /task-record/page` mostrou a task `AUTO_SYSTEM` mais recente
+   travada (`ASSIGNED`/`RUNNING` sem progresso).
+3. `POST /task-record/cancel/{id}` nela (mesmo comando que o próprio
+   `server.py` já usa automaticamente pra task de carga órfã) — limpou,
+   mas uma nova reapareceu na hora (comportamento esperado, documentado:
+   "ao ficar sem NENHUMA task, o robô recria a de carga sozinho").
+4. Uma rota normal (`FAST`, ponto-a-ponto de verdade) rodou e terminou
+   SEM erro nenhum na mesma área — confirma que a navegação normal
+   funciona bem dali, só o mecanismo específico de retorno automático é
+   que falha.
+
+**Primeira hipótese testada, DESCARTADA**: dirigir o robô manualmente até
+o ponto calibrado `energy` (a base de carga) uma vez pareceu resolver na
+hora (a `AUTO_SYSTEM` seguinte terminou em 2s, `FINISHED` limpo) — mas
+**não era a causa real**. Confirmado pelo próprio usuário logo depois:
+colocando o robô em cima de OUTRO ponto calibrado qualquer (não a base de
+carga), a task de retorno automático **continuou travando**. Ou seja,
+"estar perto de um ponto conhecido" não era a variável que importava —
+foi coincidência de a base de carga, nesse caso, também estar num trecho
+sem curva acentuada (ver causa raiz de verdade abaixo).
+
+**Causa raiz de verdade, RESOLVIDO (2026-09-23)**: o caminho entre a
+posição do robô e o destino (`P3`/`P1`/o trecho usado pelo retorno
+automático) exigia **curvas acentuadas em ângulo pequeno**. O próprio
+PDF do fabricante ("SLAM 3.0 API", seção de rota fixa/`list_point`) avisa
+disso explicitamente: *"Ensure that the path does not pass through
+obstacles or sharp turns at small angles"* — curva fechada demais faz o
+algoritmo de geração de rota falhar (exatamente o `GENERATE_PATH_
+UNKNOWN_ERROR` visto no log), **não é sobre distância nem localização**.
+
+**Correção aplicada pelo usuário**: simplificou a rota, reduzindo as
+curvas acentuadas que o robô precisava fazer pra se locomover naquele
+trecho (ajuste de configuração/pontos, fora do `server.py` — não foi
+uma mudança de código nosso). Confirmado resolvido em campo.
+
+**Prática recomendada, registrada aqui pra não repetir o susto**: se
+`GET /error/records` mostrar `GENERATE_PATH_UNKNOWN_ERROR` (nível
+DEBUG, texto tipo "已偏离当前路线... 距离路线 Xm"), **não pensar em
+localização/posição perdida primeiro** — checar se o trajeto entre a
+posição atual e o destino exige curva fechada em algum ponto, e
+simplificar a rota (menos curvas acentuadas) ali. **Diferente do
+`ROTATE_ERROR`** (falta de ESPAÇO pra girar no lugar) e diferente de
+`LOCATION_LOST` (perda de localização de verdade) — os três aparecem
+parecidos ("robô travado sem task") mas têm causas e correções
+completamente diferentes. Sempre checar `GET /error/records` primeiro
+pra saber qual dos três é, antes de tentar qualquer correção.
+
+### Próxima ideia (AINDA NÃO IMPLEMENTADA) — perguntar "existe rota até X?" antes de despachar
+
+Motivação: o `GENERATE_PATH_UNKNOWN_ERROR` acima só foi descoberto
+DEPOIS de já ter travado o robô (via `GET /error/records`, depois do
+fato). Seria melhor perguntar ANTES — mesmo espírito do `check-turn`
+(pergunta ao vivo em vez de listar pontos seguros na mão).
+
+**Dois candidatos achados no PDF "SLAM 3.0 API"** (mesma camada
+serial/ROS do `check:turn_angle`, não expostos na API HTTP que já
+usamos):
+- **`get_defined_plan[point]`** → `getplan_dij:nofind` (sem rota) ou
+  `getplan_dij:path_point1 path_point2...` (rota válida, com os pontos
+  do caminho) — específico de **rota fixa**, o modo que parece estar
+  por trás do `GENERATE_PATH_UNKNOWN_ERROR` (o texto do erro fala em
+  "P3 -> P1" no formato de grafo).
+- **`get_plan_name[point]`** / **`get_plan_point[x,y,radian]`** →
+  `get_plan:error` (falhou, geralmente obstáculo no destino/caminho) ou
+  `get_plan:x1,y1,radian1,...` (rota válida) — planejamento geral, **só
+  funciona com pontos que NÃO estão em modo de rota fixa**.
+
+**Próximo passo pra confirmar** (mesma técnica do `check-turn`): na
+próxima sessão com SSH no robô, `rostopic list | grep -iE "plan|route|
+reachable"` — se aparecer um tópico parecido (padrão já visto:
+`/robot_api/turn_check_angle`, `/area_reachable`), estender o MESMO
+bridge (`robot-bridge/lifty_turn_check_bridge.py`) com um segundo
+endpoint (`/check-route?point=X`, mesmo padrão publish/subscribe do
+`/check-turn`) — mesmos cuidados de sempre (script novo/isolado, sem
+tocar workspace da REEMAN, ver seção "Cancelamento adiado até giro
+seguro" acima). **Ainda não implementado** — combinar com o usuário
+antes de partir pra isso.
+
+### Descoberta relacionada (histórico, antes do check-turn existir)
+
+Não existe (ou não achamos — testado e descartado, ver
 "Recuperação de posição perdida" acima) uma forma de PERGUNTAR ao robô
 "tenho espaço de giro aqui?" antes de agir — só fica sabendo DEPOIS, via
 `ROTATE_ERROR`. Em compensação, dá pra saber **de qual ponto calibrado o
@@ -2345,3 +2476,10 @@ máquina que roda o `server.py`.
   (`size=30`, sem paginação) — se um dia precisar navegar o histórico
   inteiro (923+ registros no teste), dá pra adicionar paginação de verdade
   em `HistoryPanel.jsx`.
+
+
+
+  SETEMBRO 2022
+  CANCELAMENTO DE ROTAS: CHECK_TURN APROVADO !!!!!
+
+
