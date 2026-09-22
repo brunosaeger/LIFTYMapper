@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import Toolbar from './components/Toolbar';
 import CloseUpStatusBanner from './components/CloseUpStatusBanner';
+import CancelPendingBanner from './components/CancelPendingBanner';
 import PointsPanel from './components/PointsPanel';
 import LotsPanel from './components/LotsPanel';
 import CloseUpsPanel from './components/CloseUpsPanel';
@@ -66,7 +67,7 @@ export default function MainApp({ user, onLogout }) {
   // pra ele em vez de mudar estado local direto (quem decide/dispara de
   // verdade é sempre o server.py, nunca o navegador).
   const {
-    currentRoute, pendingRoute, routeQueue, occupied, emergency, robotCharging, robotBattery,
+    currentRoute, pendingRoute, routeQueue, occupied, emergency, cancelPending, cancelPendingMessage, robotCharging, robotBattery,
     enqueueRoutes, cancelCurrent, removeQueued, setOccupiedMany, toggleOccupied, setEmergency,
   } = useLiveState();
   const [toast, showToast] = useToast();
@@ -647,11 +648,21 @@ export default function MainApp({ user, onLogout }) {
     }
   }
 
+  // Cancelamento adiado até giro seguro (ver CONTEXT.md e useLiveState.js):
+  // `result.pending` true significa que o robô não tem espaço pra girar
+  // AGORA — o cancelamento de verdade não aconteceu ainda, o servidor
+  // continua tentando sozinho (CancelPendingBanner, acima, mostra o aviso
+  // persistente enquanto isso durar). Clicar de novo enquanto pending é
+  // inofensivo (idempotente no servidor), só repete o mesmo toast.
   async function handleCancelCurrent() {
     if (!currentRoute) return;
     try {
-      await cancelCurrent();
-      showToast('Rota em andamento cancelada.', 'success');
+      const result = await cancelCurrent();
+      if (result && result.pending) {
+        showToast(result.message || 'Aguardando o robô achar espaço seguro pra girar...', 'info');
+      } else {
+        showToast('Rota em andamento cancelada.', 'success');
+      }
     } catch (err) {
       showToast('Erro ao cancelar: ' + err.message, 'error');
     }
@@ -744,6 +755,7 @@ export default function MainApp({ user, onLogout }) {
         robotBattery={robotBattery}
       />
       <CloseUpStatusBanner name={activeCloseUpId ? closeUps.find((c) => c.id === activeCloseUpId)?.name : null} />
+      <CancelPendingBanner message={cancelPendingMessage} />
 
       <div className="app__body">
         {/*
@@ -869,6 +881,7 @@ export default function MainApp({ user, onLogout }) {
               onSelectRoute={handleSelectQueueRoute}
               onCancelCurrent={handleCancelCurrent}
               onRemoveQueued={handleRemoveQueued}
+              cancelPending={cancelPending}
             />
           </aside>
         )}

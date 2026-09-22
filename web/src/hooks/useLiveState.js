@@ -24,7 +24,7 @@ async function jsonRequest(path, options) {
 // dispositivos nunca "decidem" a mesma coisa duas vezes (ver server.py,
 // QUEUE_LOCK).
 export function useLiveState() {
-  const [state, setState] = useState({ currentRoute: null, pendingRoute: null, routeQueue: [], occupied: [], emergency: false, robotCharging: null, robotBattery: null });
+  const [state, setState] = useState({ currentRoute: null, pendingRoute: null, routeQueue: [], occupied: [], emergency: false, cancelPending: false, cancelPendingMessage: null, robotCharging: null, robotBattery: null });
   const [status, setStatus] = useState('loading'); // loading | idle | error
 
   const refresh = useCallback(() => {
@@ -70,9 +70,16 @@ export function useLiveState() {
     return result;
   }, [refresh]);
 
+  // Cancelamento adiado até giro seguro (ver CONTEXT.md e server.py,
+  // _queue_cancel_current): a resposta pode voltar com `pending: true` —
+  // significa que o robô ainda NÃO tem espaço pra girar agora, então o
+  // cancelamento de verdade não aconteceu ainda; o servidor continua
+  // tentando sozinho em segundo plano (o `cancelPending`/
+  // `cancelPendingMessage` que vêm do próximo poll refletem isso).
   const cancelCurrent = useCallback(async () => {
-    await jsonRequest('/api/queue/cancel-current', { method: 'POST' });
+    const result = await jsonRequest('/api/queue/cancel-current', { method: 'POST' });
     await refresh();
+    return result; // { ok, pending?, message? }
   }, [refresh]);
 
   // Parada de emergência (liga/desliga). Ligar cancela tudo no robô e
@@ -133,6 +140,10 @@ export function useLiveState() {
     routeQueue: state.routeQueue,
     occupied: state.occupied,
     emergency: state.emergency,
+    // Ver comentário de cancelCurrent acima — true enquanto o servidor
+    // espera uma janela segura pra girar antes de cancelar de verdade.
+    cancelPending: state.cancelPending,
+    cancelPendingMessage: state.cancelPendingMessage,
     // null = ainda não sabemos (servidor não conseguiu falar com o robô
     // ainda); true/false = carregando ou não, ver server.py _refresh_robot_status.
     robotCharging: state.robotCharging,

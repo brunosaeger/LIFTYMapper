@@ -1,6 +1,13 @@
 import { displayCellName } from '../hooks/useCalibration';
 
-function QueueRoute({ pickup, dropoff, lots, points, variant, selected, onSelect, onCancel, cancelLabel }) {
+function QueueRoute({ pickup, dropoff, lots, points, variant, selected, onSelect, onCancel, cancelLabel, cancelPending }) {
+  // Cancelamento adiado (ver CONTEXT.md, "Cancelamento adiado até giro
+  // seguro") — só existe pra rota EM ANDAMENTO (variant "current"); as
+  // outras (pending/queued na fila) não têm essa espera, cancelam na hora
+  // como sempre. Clicar de novo enquanto pending é inofensivo (servidor
+  // idempotente), então o botão continua clicável — só troca o
+  // rótulo/ícone pra deixar claro que já foi pedido e está esperando.
+  const pendingLabel = 'Aguardando giro seguro para cancelar...';
   return (
     <li className={'queue-route queue-route--' + variant + (selected ? ' is-selected' : '')}>
       <button type="button" className="queue-route__main" onClick={onSelect}>
@@ -16,8 +23,14 @@ function QueueRoute({ pickup, dropoff, lots, points, variant, selected, onSelect
         )}
       </button>
       {onCancel && (
-        <button type="button" className="queue-route__cancel" aria-label={cancelLabel} title={cancelLabel} onClick={onCancel}>
-          ✕
+        <button
+          type="button"
+          className={'queue-route__cancel' + (cancelPending ? ' queue-route__cancel--pending' : '')}
+          aria-label={cancelPending ? pendingLabel : cancelLabel}
+          title={cancelPending ? pendingLabel : cancelLabel}
+          onClick={onCancel}
+        >
+          {cancelPending ? '⏳' : '✕'}
         </button>
       )}
     </li>
@@ -41,7 +54,7 @@ function QueueRoute({ pickup, dropoff, lots, points, variant, selected, onSelect
 // (null = mostrando a rota em andamento, o padrão). Clicar numa rota alterna
 // a seleção; clicar na rota em andamento sempre volta pro padrão (ver
 // MainApp.jsx, handleSelectQueueRoute/mapPickupNames).
-export default function QueuePanel({ currentRoute, waitingRoutes, lots, points, selectedRouteId, onSelectRoute, onCancelCurrent, onRemoveQueued }) {
+export default function QueuePanel({ currentRoute, waitingRoutes, lots, points, selectedRouteId, onSelectRoute, onCancelCurrent, onRemoveQueued, cancelPending }) {
   return (
     <div className="queue-panel">
       <section className="queue-panel__section">
@@ -58,6 +71,7 @@ export default function QueuePanel({ currentRoute, waitingRoutes, lots, points, 
               onSelect={() => onSelectRoute(null)}
               onCancel={onCancelCurrent}
               cancelLabel="Cancelar rota em andamento (a próxima assume)"
+              cancelPending={cancelPending}
             />
           </ul>
         ) : (

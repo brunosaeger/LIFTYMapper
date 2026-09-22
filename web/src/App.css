@@ -438,6 +438,37 @@
   color: var(--accent-cyan); /* "azul mint vibrante" */
 }
 
+/* --- banner "aguardando giro seguro" (cancelamento adiado) ---------------
+   Mesmo retângulo semitransparente do .robot-status-banner, mas fixo no
+   TOPO do mapa (não centro-superior do header, que já tem o robot-status-
+   banner) — é um aviso ativo esperando ação, merece mais destaque que o
+   status passivo do robô. Cor âmbar (mesma de "Recarregando"): é uma
+   espera, não um erro. Ao contrário dos outros banners, o texto pode ser
+   longo (mensagem literal pedida pelo usuário — ver CONTEXT.md), então
+   permite quebrar linha em vez de nowrap; largura maxima pra não esticar
+   de ponta a ponta em telas largas. Posição ajustável ao vivo no tablet,
+   como os outros banners deste arquivo. */
+.cancel-pending-banner {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 25;
+  max-width: min(90%, 520px);
+  padding: 12px 22px;
+  border-radius: 12px;
+  background: rgba(15, 17, 20, 0.7);
+  border: 1px solid var(--accent-amber);
+  color: var(--accent-amber);
+  font-family: 'Arial Black', 'Helvetica Neue', Arial, sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-align: center;
+  white-space: normal;
+  pointer-events: none;
+}
+
 .closeup-status-banner__rest {
   color: #fff;
 }
@@ -1455,6 +1486,19 @@
 
 .queue-route__cancel:hover {
   background: var(--state-error);
+  color: var(--text-primary);
+}
+
+/* Cancelamento adiado (ver CancelPendingBanner/server.py) — mesma cor
+   âmbar do banner de espera, pra ficar claro que já foi solicitado e está
+   só aguardando o robô achar espaço pra girar, não é mais um "cancelar"
+   comum. */
+.queue-route__cancel--pending {
+  color: var(--accent-amber);
+}
+
+.queue-route__cancel--pending:hover {
+  background: var(--accent-amber);
   color: var(--text-primary);
 }
 

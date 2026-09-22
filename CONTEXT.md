@@ -1593,6 +1593,102 @@ Sessão seguinte, com o robô ligado de novo. Descobertas e ajustes:
 5. Só depois de tudo validado em campo: decidir se o bridge vira
    permanente (systemd) ou continua manual.
 
+### Cancelamento adiado até giro seguro (IMPLEMENTADO 2026-09-22) — SUPERA a ideia de marcar pontos
+
+Decisão final do usuário, depois de todo o caminho acima: **não precisa
+marcar ponto/lote nenhum como "seguro pra girar"**. Em vez de decidir de
+antemão (lista fixa), o servidor **pergunta ao vivo** pro bridge a cada
+vez, e resolve isso sozinho em segundo plano. Bem mais simples que os
+planos de 2026-09-19/21 (lista pré-calibrada), que ficam superados por
+esta abordagem — o bridge em si (a descoberta do `check_turn_angle`, a
+transferência, o fix do DNS reverso) continua sendo o pré-requisito
+técnico, só a "lista de pontos seguros" que deixou de ser necessária.
+
+**Comportamento antigo (o problema)**: operador cancela → servidor
+cancela a task na hora → se o robô estava num lugar sem espaço pra
+girar, ele fica travado tentando se reorientar sozinho (`ROTATE_ERROR`)
+até alguém destravar no modo manual — exatamente o que este projeto
+existe pra evitar.
+
+**Comportamento novo**: operador cancela → servidor pergunta pro bridge
+"posso girar aqui?" (`robot_can_turn_safely()`, 180° — giro de meia-volta,
+o cenário de retorno pra carga que motivou tudo isso):
+- **Sim** (ou bridge indisponível — `None`, tratado como "não sei",
+  mantém o comportamento de sempre em vez de travar um cancelamento só
+  porque o bridge não está instalado nesse robô) → cancela na hora, como
+  sempre foi.
+- **Não** → **não cancela ainda**. Marca `cancelPending=True` no
+  `queue_state.json`, devolve a mensagem de espera pro operador, e a
+  rota ATUAL continua rodando **normalmente** (nada é tocado nela) — a
+  thread de fundo passa a perguntar de novo a cada
+  `CANCEL_PENDING_POLL_INTERVAL_SECONDS` (2s, mais rápido que o tick
+  normal de 4s) e, assim que a resposta virar "sim", executa o
+  cancelamento de verdade sozinha, sem o operador precisar clicar de
+  novo. Se a rota terminar por conta própria antes disso (chegou no
+  destino normalmente), `cancelPending` é limpo — não sobra nada
+  pendente órfão.
+
+**Mensagem literal mostrada ao operador** (`CANCEL_PENDING_MESSAGE`,
+pedido explícito do usuário 2026-09-22 — **substitui** a mensagem
+"ESPAÇO DE GIRO INSUFICIENTE..." do plano de 2026-09-19, que não chegou
+a ser implementada):
+> **"Aguarde até o robô chegar a uma posição válida para giro
+> seguro..."**
+
+**Implementação (`server.py`)**:
+- `TURN_CHECK_PORT`/`TURN_CHECK_PATH`/`TURN_CHECK_ANGLE_DEGREES` (180.0)/
+  `robot_can_turn_safely(angle)` — chama `http://<host-do-ROBOT_HOST>:8091/
+  check-turn?angle=...` (mesmo host do dispatch, porta do bridge). Devolve
+  `True`/`False`/`None` (indisponível).
+- `cancelPending` (bool) novo campo em `_empty_queue_state()`/
+  `queue_state.json`.
+- `_execute_cancel_current_locked(state, current)` — a lógica de
+  cancelamento de verdade, extraída pra função própria porque agora tem
+  DOIS chamadores: o handler HTTP (giro já seguro na hora do clique) e a
+  thread de fundo (giro ficou seguro depois de esperar).
+- `_queue_cancel_current` (handler `POST /api/queue/cancel-current`):
+  chama `robot_can_turn_safely()` **fora** do `QUEUE_LOCK` (mesma
+  cautela de `_emergency_suppress` — chamada de rede lenta não pode
+  prender o lock e travar os `GET /api/live-state` de todo mundo); se
+  `False`, marca `cancelPending` e devolve `{"ok":true,"pending":true,
+  "message":...}`; senão executa o cancelamento normalmente. Clique
+  repetido enquanto já pending é idempotente (não faz nada novo).
+- `_queue_tick`: antes do tick normal, se `cancelPending`, pergunta de
+  novo (fora do lock); se seguro, executa `_execute_cancel_current_locked`
+  e volta ao intervalo normal; senão segue o tick normal (Caso 2 etc.,
+  a rota continua sendo sondada normalmente) mas devolve
+  `CANCEL_PENDING_POLL_INTERVAL_SECONDS` no final.
+- `_apply_record_status`: limpa `cancelPending=False` nos dois ramos
+  (`FINISHED` e terminal/`CANCELLED`/`FAILED`) — se a rota morreu por
+  conta própria, não há mais nada a cancelar.
+- `GET /api/live-state` expõe `cancelPending`/`cancelPendingMessage`
+  (null quando não pending).
+- **Testado** (sem tocar rede/robô real — `robot_can_turn_safely`/
+  `_robot_try_cancel`/etc. mockados): giro inseguro → `cancelPending=True`
+  e nada cancelado ainda; giro fica seguro depois → cancelamento real
+  executado, `cancelPending` limpo; rota termina (`FINISHED`) com
+  `cancelPending=True` pendente → limpo sem sobrar órfão. **Ainda NÃO
+  testado end-to-end com o robô físico** (o robô não estava disponível
+  pra esse teste específico nesta sessão) — fazer isso assim que possível,
+  provocando um cancelamento de propósito com o robô num corredor
+  apertado de verdade.
+
+**Frontend (`web/src/`)**:
+- `hooks/useLiveState.js` — expõe `cancelPending`/`cancelPendingMessage`;
+  `cancelCurrent()` agora devolve o resultado (`{ok, pending?, message?}`)
+  em vez de void.
+- `components/CancelPendingBanner.jsx` (novo) — banner âmbar fixo no topo
+  do mapa, mesma família visual do `RobotStatusBanner`/
+  `CloseUpStatusBanner`, mostra a mensagem literal enquanto
+  `cancelPending` for true. Posição (`top: 16px`) é ponto de partida,
+  ajustável ao vivo no tablet como os outros banners deste projeto.
+- `components/QueuePanel.jsx` — botão de cancelar da rota em andamento
+  troca pra ícone `⏳` (cor âmbar, `.queue-route__cancel--pending`) e
+  rótulo "Aguardando giro seguro para cancelar..." enquanto pending;
+  continua clicável (idempotente), só a aparência muda.
+- `MainApp.jsx` — `handleCancelCurrent` mostra toast diferente se
+  `result.pending` (info) vs cancelamento imediato (success).
+
 ## Segunda API do fabricante: SLAM WEB API (parcialmente usada agora)
 
 Existe uma **outra** API HTTP no mesmo IP do robô, sem o prefixo
