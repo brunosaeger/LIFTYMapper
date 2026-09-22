@@ -1535,18 +1535,55 @@ um colado como comando separado). **Ainda não confirmado** que o
 arquivo chegou íntegro no robô nem que o bridge roda lá de ponta a
 ponta — retomar isso primeiro na próxima sessão.
 
-**Próximos passos (nesta ordem)**:
-1. Terminar de copiar `lifty_turn_check_bridge.py` pro robô (comandos
-   já prontos, só faltou executar); confirmar com
-   `python3 -m py_compile`.
-2. Rodar (`python3 lifty_turn_check_bridge.py`), testar local
-   (`curl localhost:8091/check-turn?angle=180`) e **remoto**
-   (`curl http://192.168.5.195:8091/check-turn?angle=180` de outra
-   máquina na wifi — é o teste que prova que dá pra usar ao vivo sem
-   cabo).
-3. Validar em MAIS pontos reais (não só "um aberto, um apertado") —
-   especialmente as bocas de corredor onde hoje acontece o
-   `ROTATE_ERROR` de verdade.
+### Bridge validado de ponta a ponta, incluindo acesso remoto pela wifi (2026-09-22)
+
+Sessão seguinte, com o robô ligado de novo. Descobertas e ajustes:
+
+- **Transferência ficou muito mais simples**: o repositório do projeto no
+  GitHub é público, então em vez de repetir o esquema de pedaços em
+  base64, deu pra baixar direto no robô com `curl -o
+  ~/lifty_turn_check_bridge.py
+  https://raw.githubusercontent.com/brunosaeger/LIFTYMapper/main/robot-bridge/lifty_turn_check_bridge.py`
+  — um comando só, sem risco de cortar no meio. Hash (`sha256sum`)
+  conferido igual ao do repo antes de rodar, garantindo integridade.
+- **Bug real encontrado e corrigido**: `curl localhost:8091/...`
+  funcionava, mas `curl http://192.168.5.195:8091/...` (de outra
+  máquina na wifi) voltava "empty reply from server". Causa:
+  `BaseHTTPRequestHandler.address_string()` (chamado automaticamente
+  por `send_response()`, pra log) faz um **DNS reverso**
+  (`socket.getfqdn`) no IP de quem chamou — pra `127.0.0.1` isso
+  resolve na hora, mas pra um IP de rede de verdade, numa rede
+  industrial sem DNS configurado, trava/falha e derruba a resposta
+  ANTES de mandar qualquer byte. Corrigido sobrescrevendo
+  `address_string()` pra devolver o IP puro, sem lookup nenhum (ver
+  `robot-bridge/lifty_turn_check_bridge.py`, commit `480250a`).
+- **Acesso remoto confirmado funcionando de verdade**: depois do fix,
+  chamada feita de uma máquina completamente diferente (a de
+  desenvolvimento, `192.168.5.191`, mesma wifi) devolveu `200` e o JSON
+  esperado. **Essa é a confirmação que faltava**: dá pra usar isso ao
+  vivo, todo santo dia, sem cabo nenhum — o cabo só foi necessário pra
+  essa sessão de investigação/instalação.
+- **Segunda confirmação independente do sinal**: robô estava numa
+  posição genuinamente apertada no momento do teste (confirmado pelo
+  usuário, olhando o robô ao vivo) — `check-turn` devolveu `false` tanto
+  pra 180° quanto pra 10°, coerente com a realidade física. Soma com os
+  três testes de ontem (apertado/aberto/mid-task) — o sinal continua se
+  mostrando confiável.
+- Bridge continua **manual/sob demanda** (rodado via SSH em primeiro
+  plano) — ainda não virou serviço permanente, de propósito, até
+  decidirem isso explicitamente.
+
+**Próximos passos (nesta ordem, atualizados 2026-09-22)**:
+1. ~~Copiar o arquivo pro robô~~ — feito, via `curl` direto (bem mais
+   simples que o plano de base64 de ontem).
+2. ~~Rodar e testar local + remoto~~ — feito e confirmado funcionando
+   dos dois jeitos.
+3. **Validar em MAIS pontos reais** (ainda pendente) — especialmente as
+   bocas de corredor onde já aconteceu `ROTATE_ERROR` de verdade em
+   campo, não só "um aberto, um apertado genéricos". Próxima vez que o
+   robô estiver ligado e acessível: mover ele (pelo app, PTP normal,
+   sem nada manual) até esses pontos suspeitos e chamar
+   `http://<ROBOT_HOST>:8091/check-turn?angle=<graus>` em cada um.
 4. Decidir a semântica do cancelamento (bloquear até ficar seguro vs.
    avisar e prosseguir — mensagem literal já definida, ver plano
    2026-09-19 acima) e então integrar no `server.py`: uma função tipo
