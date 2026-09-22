@@ -88,6 +88,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def address_string(self):
+        # BaseHTTPRequestHandler.address_string() por padrao faz um DNS
+        # reverso (socket.getfqdn) antes de toda resposta -- numa rede
+        # industrial sem DNS isso trava/falha e derruba a resposta ANTES de
+        # mandar qualquer byte (visto na pratica: funcionava via localhost,
+        # dava "resposta vazia" pra qualquer IP de rede de verdade). So usa
+        # o IP puro, sem lookup nenhum.
+        return self.client_address[0]
+
     def log_message(self, fmt, *args):
         print("[%s] %s" % (self.address_string(), fmt % args))
 
