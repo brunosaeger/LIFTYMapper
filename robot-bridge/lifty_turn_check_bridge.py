@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Bridge minimo e independente: expoe check_turn_angle (ROS) como HTTP.
+"""Bridge minimo e independente: expoe check_turn_angle e o liga/desliga do
+sensor de obstaculo 3D (ambos ROS) como HTTP.
 
 ATENCAO — roda no COMPUTADOR DE BORDO DO ROBO (a mesma maquina que serve o
 dispatch service via wifi, ver CONTEXT.md "Descoberta do check_turn_angle
@@ -16,6 +17,16 @@ independente dos topicos ROS que ja existem no robo, nada mais:
 - Fala com os topicos /robot_api/turn_check_angle e /robot_api/turn_check_ok
   exatamente como `rostopic pub`/`echo` ja fizeram manualmente antes deste
   arquivo existir (mesma categoria de acao, so que programatica).
+- /robot_api/set_obs3d_switch (std_msgs/Bool) — descoberto ao vivo via
+  `rostopic list -v | grep -i obs` em 2026-09-24 (mesmo namespace
+  /robot_api/* do turn_check, oficial da REEMAN pra controle externo).
+  Liga/desliga o sensor de obstaculo 3D (camera de profundidade) —
+  usado pelo server.py pra desligar SO durante o giro inicial de rotas
+  pra energia que travam por sensor conservador demais em espaco
+  apertado (ver CONTEXT.md "obs_3d ligado/desligado durante giro"),
+  sempre com teto de tempo do lado do server.py — este bridge nunca
+  decide sozinho por quanto tempo fica desligado, so publica o Bool
+  que pedirem.
 
 Modo de uso pretendido (por enquanto): MANUAL, sob demanda, via SSH — nao
 e um systemd service, nao inicia sozinho no boot. So vira permanente se/
@@ -25,6 +36,21 @@ Uso:
     source /opt/ros/*/setup.bash   # so ambiente da sessao, nada em disco
     python3 lifty_turn_check_bridge.py
     # Ctrl+C pra parar -- nada fica rodando depois.
+
+    ATENCAO (bug de campo 2026-09-23): rodando assim, em primeiro plano, o
+    processo MORRE se a sessao SSH cair -- inclusive so por desconectar o
+    cabo/fechar o terminal (SIGHUP), sem precisar de Ctrl+C nenhum. Isso ja
+    aconteceu: bridge "sumiu" (connection refused na porta 8091, robo
+    normal em tudo mais) so porque o cabo do SSH foi desconectado depois de
+    ja ter rodado o comando. Se for deixar a sessao SSH sem monitorar (ou
+    desconectar o cabo de propósito), usa nohup pra sobreviver:
+
+        nohup python3 lifty_turn_check_bridge.py > bridge.log 2>&1 &
+
+    Isso NAO muda a natureza "manual, sob demanda" do processo (ainda nao
+    e systemd, ainda nao inicia sozinho no boot, ainda precisa ser morto
+    na mao -- `pkill -f lifty_turn_check_bridge` -- quando quiser parar de
+    verdade) -- so evita a morte ACIDENTAL por desconexao de sessao.
 
 Teste local (outra janela SSH, mesma maquina):
     curl "http://localhost:8091/check-turn?angle=180"
@@ -49,6 +75,7 @@ _response_event = threading.Event()
 _last_response = {"value": None}
 
 pub = None  # setado no __main__, antes do HTTP server comecar a atender
+obs3d_pub = None  # idem -- publisher do /robot_api/set_obs3d_switch
 
 
 def _on_turn_check_ok(msg):
@@ -59,10 +86,15 @@ def _on_turn_check_ok(msg):
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path != "/check-turn":
+        if parsed.path == "/check-turn":
+            self._handle_check_turn(parsed)
+        elif parsed.path == "/obstacle-3d":
+            self._handle_obstacle_3d(parsed)
+        else:
             self.send_response(404)
             self.end_headers()
-            return
+
+    def _handle_check_turn(self, parsed):
         params = urllib.parse.parse_qs(parsed.query)
         try:
             angle = float(params["angle"][0])
@@ -79,6 +111,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json(504, {"error": "robo nao respondeu a tempo"})
                 return
             self._json(200, {"safe": _last_response["value"], "angle": angle})
+
+    # Liga/desliga o sensor de obstaculo 3D -- so publica, sem esperar
+    # resposta nenhuma (o topico /robot_api/set_obs3d_switch nao tem par de
+    # confirmacao como o turn_check tem). Por isso nao precisa do _lock:
+    # publicar um Bool nao tem corrida possivel entre chamadas concorrentes.
+    # QUEM decide por quanto tempo fica desligado e o server.py (teto de
+    # seguranca do lado de la) -- este bridge so executa o que pedirem, uma
+    # vez, sem guardar estado nenhum sobre "esta desligado ha quanto tempo".
+    def _handle_obstacle_3d(self, parsed):
+        params = urllib.parse.parse_qs(parsed.query)
+        try:
+            on = params["on"][0] in ("1", "true", "True")
+        except (KeyError, IndexError):
+            self._json(400, {"error": "parametro 'on' (1 ou 0) obrigatorio"})
+            return
+        obs3d_pub.publish(Bool(data=on))
+        self._json(200, {"obs3d": on})
 
     def _json(self, status, payload):
         body = json.dumps(payload).encode("utf-8")
@@ -105,10 +154,13 @@ if __name__ == "__main__":
     rospy.init_node("lifty_turn_check_bridge", anonymous=True)
     pub = rospy.Publisher("/robot_api/turn_check_angle", Float32, queue_size=1)
     rospy.Subscriber("/robot_api/turn_check_ok", Bool, _on_turn_check_ok)
-    rospy.sleep(0.5)  # da tempo do publisher se registrar no master antes do 1o uso
+    obs3d_pub = rospy.Publisher("/robot_api/set_obs3d_switch", Bool, queue_size=1)
+    rospy.sleep(0.5)  # da tempo dos publishers se registrarem no master antes do 1o uso
 
     httpd = http.server.HTTPServer(("0.0.0.0", PORT), Handler)
-    print("Bridge rodando: http://0.0.0.0:%d/check-turn?angle=<graus>" % PORT)
+    print("Bridge rodando:")
+    print("  http://0.0.0.0:%d/check-turn?angle=<graus>" % PORT)
+    print("  http://0.0.0.0:%d/obstacle-3d?on=<1 ou 0>" % PORT)
     print("Ctrl+C pra parar.")
     try:
         httpd.serve_forever()
