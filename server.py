@@ -47,6 +47,7 @@ import hmac
 import http.cookies
 import http.server
 import json
+import math
 import secrets
 import socket
 import sys
@@ -337,6 +338,17 @@ CANCEL_PENDING_POLL_INTERVAL_SECONDS = 2
 # essa string (pedido do usuário), não parafrasear.
 CANCEL_PENDING_MESSAGE = "Aguarde até o robô chegar a uma posição válida para giro seguro..."
 
+# Check-turn também no INÍCIO de uma tarefa (pedido do usuário, 2026-09-22 —
+# ver CONTEXT.md "check-turn no início de tarefas"), não só no cancelamento:
+# rota nova (fila estava vazia), rota promovida depois de um cancelamento, ou
+# rota que estava só na fila local e virou a vez dela — nenhuma delas é
+# disparada de verdade pro robô (`_fire_route`) enquanto `robot_can_turn_
+# safely()` não disser "sim" (ou o bridge estiver indisponível, tratado como
+# "não sei" — mesmo comportamento fail-open do cancelamento). Reusa o mesmo
+# intervalo de sondagem rápida do cancelamento adiado (mesma urgência: alguém
+# pode estar vendo isso na tela).
+TURN_BLOCKED_START_MESSAGE = "Aguardando o robô chegar a uma posição válida para giro seguro antes de iniciar esta rota..."
+
 LIVE_STATE_PATH = "/api/live-state"
 QUEUE_ENQUEUE_BATCH_PATH = "/api/queue/enqueue-batch"
 QUEUE_CANCEL_CURRENT_PATH = "/api/queue/cancel-current"
@@ -492,6 +504,290 @@ def robot_can_turn_safely(angle=TURN_CHECK_ANGLE_DEGREES):
     except Exception as err:
         print("Aviso: check-turn indisponível (%s) — tratando como 'não sei'." % err)
         return None
+
+
+# --- destravamento manual do ROTATE_ERROR (ver "Destravamento manual do
+# ROTATE_ERROR" no CONTEXT.md, ideia e validação de campo do usuário,
+# 2026-09-24) --------------------------------------------------------------
+# Achado em campo: girar o robô manualmente (modo manual, 180°) nesses
+# pontos SEMPRE destrava a navegação, mesmo o check-turn já validando o giro
+# antes — confirma que é a pilha de navegação (`/move_base`, camada
+# diferente do check-turn, ver CONTEXT.md "e quanto a desligar os
+# sensores?") que trava, não falta de espaço de verdade.
+#
+# Ajuste do usuário (2026-09-24): NÃO alinhar com o destino final (energia)
+# — alinhar com o ÚLTIMO NÓ CALIBRADO que o robô percorreu, porque é a
+# orientação da ARESTA do grafo fixo (ex: "parou entre HCD -> P15, sentido
+# P15, alinha com o HCD") que indica se está de verdade alinhado com a
+# rota, não o rumo em linha reta até um destino distante (que pode ficar em
+# qualquer direção, sem relação nenhuma com a aresta local). Como o
+# ROTATE_ERROR não informa quais dois nós formam a aresta onde o
+# "virtual_NNN" travou, a aproximação prática é achar o ponto calibrado
+# MAIS PRÓXIMO da posição atual (arestas do grafo costumam ser curtas, o
+# mais próximo tende a ser uma das duas pontas) e usar o `theta` PRÓPRIO
+# desse ponto (já calibrado com a orientação da aresta) como alvo — não um
+# rumo calculado até ele.
+# `cmd/turn` (o comando "gire X graus e pare sozinho") se mostrou QUEBRADO
+# nesse robô — testado exaustivamente em campo 2026-09-24 (7+ variações de
+# corpo, inclusive de dentro do próprio robô via SSH/localhost, sempre
+# `HTTP 400 "Request body is not correct"`). `cmd/speed` (velocidade
+# contínua, sem noção de ângulo) FUNCIONA — confirmado com giro físico real
+# em teste ao vivo — mas com resposta atrasada/amortecida que não dá pra
+# prever direito ("vth×tempo = ângulo" não bateu, girou muito menos que a
+# conta). Decisão do usuário: não precisa ser exato — um empurrãozinho na
+# direção certa, mesmo pequeno, já é o suficiente pra quebrar o travamento
+# (mesmo espírito do giro manual de 180° que já funcionava — o que importa
+# é sair do estado travado, não acertar um ângulo específico). Por isso: em
+# vez de calcular um tempo pra atingir um ângulo exato, manda uma sequência
+# curta e fixa de `cmd/speed` na direção certa, sempre terminando com um
+# comando de parar garantido (mesmo se algo falhar no meio).
+ROTATE_ERROR_NUDGE_ANGULAR_SPEED = 0.15  # rad/s -- mesmo valor testado ao vivo, confirmado que produz giro real
+ROTATE_ERROR_NUDGE_DURATION_SECONDS = 3.0  # duração total do empurrãozinho -- mesma do teste que girou de verdade
+ROTATE_ERROR_NUDGE_COMMAND_INTERVAL_SECONDS = 0.25  # reenvio (doc pede ~300ms pra movimento contínuo)
+ROTATE_ERROR_NUDGE_CHECK_ANGLE_DEGREES = 20.0  # ângulo conservador (maior que o giro real esperado) pra pedir confirmação do check-turn antes de empurrar
+
+_last_handled_rotate_error_id = {"value": None}  # em memória de propósito -- um reinício do servidor só reseta essa otimização, não é um estado que precise sobreviver
+
+
+def robot_fetch_recent_error_records(size=5):
+    data = _robot_call("GET", "/error/records?size=" + str(size)) or {}
+    return data.get("records") or []
+
+
+def robot_pose():
+    """{'x','y','theta'} — posição/orientação atual do robô (SLAM WEB API,
+    já alcançável sem bridge nenhum)."""
+    data = _slam_call("GET", "/reeman/pose")
+    return {"x": data["x"], "y": data["y"], "theta": data["theta"]}
+
+
+def robot_find_nearest_point(pose, target_map=ROBOT_TARGET_MAP):
+    """{'name','x','y','theta'} do ponto calibrado mais próximo da pose
+    atual, ou None se a lista falhar/vier vazia. Aproximação pro "último nó
+    percorrido" (ver comentário acima) — o `theta` vem direto da
+    calibração do ponto, não de um cálculo de rumo."""
+    try:
+        points = _robot_call("GET", "/map/point/list/" + target_map) or []
+    except Exception:
+        return None
+    best = None
+    best_dist = None
+    for p in points:
+        pos = p.get("position") or []
+        if len(pos) < 3:
+            continue
+        d = math.hypot(pos[0] - pose["x"], pos[1] - pose["y"])
+        if best_dist is None or d < best_dist:
+            best_dist = d
+            best = {"name": p.get("name"), "x": pos[0], "y": pos[1], "theta": pos[2]}
+    return best
+
+
+def _normalize_angle_degrees(delta_radians):
+    """Normaliza uma diferença de ângulo (radianos) pra graus em
+    (-180, 180]."""
+    delta = (delta_radians + math.pi) % (2 * math.pi) - math.pi
+    return math.degrees(delta)
+
+
+# Manda uma sequência curta e fixa de `cmd/speed` (giro no lugar, vx=0) na
+# direção indicada (`direction_sign`: +1 esquerda, -1 direita — mesma
+# convenção do check:turn_angle), reenviando a cada
+# ROTATE_ERROR_NUDGE_COMMAND_INTERVAL_SECONDS (a doc do `cmd/speed` pede
+# reenvio pra movimento contínuo) até completar ROTATE_ERROR_NUDGE_
+# DURATION_SECONDS. O `finally` GARANTE um comando de parar
+# (`vth:0`) no final, mesmo se algo falhar no meio do caminho — nunca deixa
+# o robô girando sem um comando de parada explícito.
+def _send_rotate_nudge(direction_sign):
+    vth = ROTATE_ERROR_NUDGE_ANGULAR_SPEED * (1 if direction_sign >= 0 else -1)
+    deadline = time.time() + ROTATE_ERROR_NUDGE_DURATION_SECONDS
+    try:
+        while time.time() < deadline:
+            try:
+                _slam_call("POST", "/cmd/speed", {"vx": 0, "vth": vth})
+            except Exception as err:
+                print("Aviso: falha ao mandar cmd/speed durante o giro (%s) -- tenta de novo até o teto." % err)
+            time.sleep(ROTATE_ERROR_NUDGE_COMMAND_INTERVAL_SECONDS)
+    finally:
+        try:
+            _slam_call("POST", "/cmd/speed", {"vx": 0, "vth": 0})
+        except Exception as err:
+            print("Aviso: falha ao mandar o comando de PARAR depois do giro manual: %s" % err)
+
+
+# Detecta um ROTATE_ERROR novo (a AUTO_SYSTEM nativa tentou girar rumo à
+# energia e travou, ver CONTEXT.md) e tenta destravar: cancela a task
+# travada, descobre a DIREÇÃO certa alinhando com o último nó calibrado
+# percorrido (ver comentário acima — só a direção importa, não o ângulo
+# exato), confirma com o check-turn pra um ângulo conservador nessa direção
+# (só age com resposta True EXPLÍCITA — diferente do resto do sistema, aqui
+# estamos comandando movimento ativamente, "não sei" não é suficiente) e
+# manda o empurrãozinho. Best-effort em cada etapa — qualquer falha no meio
+# só desiste dessa tentativa, o próximo ROTATE_ERROR novo aciona outra.
+def _recover_from_rotate_error_if_stuck():
+    try:
+        records = robot_fetch_recent_error_records(size=5)
+    except Exception:
+        return
+    error = next((r for r in records if r.get("error") == "ROTATE_ERROR"), None)
+    if not error or error.get("id") == _last_handled_rotate_error_id["value"]:
+        return
+    _last_handled_rotate_error_id["value"] = error["id"]
+    print("ROTATE_ERROR novo detectado (id=%s) -- tentando destravar com um giro (nudge)." % error["id"])
+
+    try:
+        stuck_id = robot_find_active_charge_task_id()
+        if stuck_id:
+            robot_cancel_task_record(stuck_id)
+    except Exception as err:
+        print("Aviso: falha ao cancelar a task travada antes do giro: %s" % err)
+    try:
+        robot_stop_navigation()
+    except Exception as err:
+        print("Aviso: cancel_goal falhou antes do giro: %s" % err)
+
+    try:
+        pose = robot_pose()
+    except Exception as err:
+        print("Aviso: não deu pra ler a pose pra decidir a direção do giro: %s" % err)
+        return
+    nearest = robot_find_nearest_point(pose)
+    if nearest is None:
+        print("Aviso: não achei nenhum ponto calibrado próximo -- desisto do giro.")
+        return
+    angle = _normalize_angle_degrees(nearest["theta"] - pose["theta"])
+    direction_sign = 1 if angle >= 0 else -1
+    check_angle = ROTATE_ERROR_NUDGE_CHECK_ANGLE_DEGREES * direction_sign
+    print("Alinhando com '%s' (nó calibrado mais próximo) -- direção %s (ângulo real %.1f, checando %.0f)." % (
+        nearest["name"], "esquerda" if direction_sign > 0 else "direita", angle, check_angle))
+
+    safe = robot_can_turn_safely(check_angle)
+    if safe is not True:
+        print("Giro NÃO confirmado seguro pelo check-turn (ângulo checado=%.0f, safe=%s) -- desisto." % (check_angle, safe))
+        return
+
+    print("Empurrando pra %s por %.1fs (vth=%.2f rad/s)." % (
+        "esquerda" if direction_sign > 0 else "direita", ROTATE_ERROR_NUDGE_DURATION_SECONDS, ROTATE_ERROR_NUDGE_ANGULAR_SPEED))
+    _send_rotate_nudge(direction_sign)
+
+
+# --- cancelamento pré-pickup via alinhamento do docking point (ver
+# CONTEXT.md, "Cancelamento antes do pickup via alinhamento de docking" —
+# pedido do usuário, 2026-09-24) --------------------------------------------
+# Descoberta de campo: ANTES do pickup, o robô sempre passa por uma sequência
+# fixa e confiável ao chegar no ponto de pallet: para sobre o docking point
+# (nomenclatura "H" + nome do ponto de pallet, ex. pickup "CD" -> docking
+# "HCD") e gira PARA ALINHAR os garfos com o pallet (não é um alinhamento
+# perfeito). É um giro que o robô já faz de qualquer jeito, de forma
+# confiável — diferente de forçar um giro ad-hoc (ver "Destravamento manual
+# do ROTATE_ERROR" acima), não corre risco de ROTATE_ERROR. Por isso é uma
+# referência de segurança MELHOR que o check-turn pra esse trecho específico
+# (que depende do main_forklift_node, já visto divergindo do que o
+# /move_base realmente executa — ver "Varredura ao vivo" no CONTEXT.md).
+#
+# Logo depois desse giro o reconhecimento de câmera começa (quase instantâneo
+# segundo o usuário) e a partir daí não dá mais pra cancelar o pickup. Por
+# isso cancela um pouco ANTES do giro completar (margem de
+# PRE_PICKUP_CANCEL_ALIGNMENT_MARGIN_DEGREES) em vez de esperar o
+# alinhamento perfeito — dá tempo de executar o cancelamento antes da câmera
+# travar o pickup.
+#
+# DEPOIS do pickup (carregando o pallet) não tem um docking point equivalente
+# nesse trecho — continua usando o check-turn normal (ver
+# _current_route_cancel_ready abaixo). Decisão do usuário: por enquanto só
+# testa isso ANTES do pickup ("somente antes do pickup por enquanto"; cancelar
+# DEPOIS de já estar com a carga pode nem fazer sentido, já que a estrutura
+# de task exige pickup+dropoff — sem alternativa decidida ainda).
+PRE_PICKUP_CANCEL_ALIGNMENT_MARGIN_DEGREES = 30.0  # "faltando uns 30" -- pedido explícito do usuário
+PRE_PICKUP_CANCEL_PROXIMITY_METERS = 1.5  # raio pra considerar "já chegou no docking point" -- evita falso-positivo de alinhamento por coincidência longe do docking, ainda em rota normal
+PRE_PICKUP_CANCEL_POLL_INTERVAL_SECONDS = 0.5  # bem mais rápido que o cancelPending comum (2s) -- a janela entre "dentro da margem de 30°" e a câmera travar o pickup é curta
+
+
+def robot_find_point_position(name, target_map=ROBOT_TARGET_MAP):
+    """{'x','y','theta'} do ponto calibrado de nome EXATO `name`, ou None se
+    não existir/a lista falhar -- mesma fonte de robot_find_nearest_point, só
+    que por nome em vez de proximidade (aqui já sabemos exatamente qual
+    ponto queremos: o docking point "H<pallet>" ou o próprio ponto de
+    pallet)."""
+    try:
+        points = _robot_call("GET", "/map/point/list/" + target_map) or []
+    except Exception:
+        return None
+    for p in points:
+        if p.get("name") != name:
+            continue
+        pos = p.get("position") or []
+        if len(pos) < 3:
+            return None
+        return {"x": pos[0], "y": pos[1], "theta": pos[2]}
+    return None
+
+
+def _pre_pickup_cancel_ready(current):
+    """True = o robô já está sobre o docking point ("H" + pickup) e alinhado
+    (dentro da margem) rumo ao pallet -- seguro cancelar agora, é o giro
+    final que o robô já faz de qualquer jeito. False = ainda não chegou lá
+    ou ainda não alinhou o suficiente -- espera mais. None = não deu pra
+    determinar (pose indisponível, ou os pontos "H<pickup>"/pickup não
+    existem no mapa) -- quem chama decide o fallback.
+
+    CORRIGIDO 2026-09-25 (1ª tentativa de campo falhou -- câmera reconheceu
+    antes do cancelamento disparar): o alvo de alinhamento NÃO é o rumo
+    geométrico calculado entre docking e pallet (atan2) -- é o `theta`
+    PRÓPRIO calibrado do ponto de pallet, mesmo erro (e mesma correção) já
+    feitos em _recover_from_rotate_error_if_stuck acima ("usar o theta do
+    ponto, não um rumo calculado até ele"). Comprovado ao vivo: no par
+    EXF/HEXF, o theta calibrado de ambos os pontos é -179.8°, enquanto o
+    rumo geométrico HEXF->EXF dava 0.2° -- 180° de diferença. Com o rumo
+    errado, a checagem de margem (30°) só batia bem depois do robô já ter
+    girado de verdade (ou nunca), explicando o cancelamento tardio demais."""
+    try:
+        pose = robot_pose()
+    except Exception as err:
+        print("pré-pickup cancel: pose indisponível (%s) -- cai pro check-turn." % err)
+        return None
+    docking = robot_find_point_position("H" + current["pickup"])
+    pallet = robot_find_point_position(current["pickup"])
+    if docking is None or pallet is None:
+        print("pré-pickup cancel: docking 'H%s' ou pallet '%s' não encontrado no mapa -- cai pro check-turn." % (
+            current["pickup"], current["pickup"]))
+        return None
+    dist = math.hypot(pose["x"] - docking["x"], pose["y"] - docking["y"])
+    diff = abs(_normalize_angle_degrees(pallet["theta"] - pose["theta"]))
+    print("pré-pickup cancel: dist ao docking=%.2fm (limite %.2fm), diff angular=%.1f (margem %.0f)" % (
+        dist, PRE_PICKUP_CANCEL_PROXIMITY_METERS, diff, PRE_PICKUP_CANCEL_ALIGNMENT_MARGIN_DEGREES))
+    if dist > PRE_PICKUP_CANCEL_PROXIMITY_METERS:
+        return False  # ainda a caminho do docking point
+    return diff <= PRE_PICKUP_CANCEL_ALIGNMENT_MARGIN_DEGREES
+
+
+def _cancel_poll_interval(cancel_pending, pickup_cleared):
+    """Intervalo de sondagem enquanto cancelPending está ativo -- mais
+    rápido ainda (PRE_PICKUP_CANCEL_POLL_INTERVAL_SECONDS) se for a espera
+    pré-pickup (corrida contra a câmera, ver acima), senão o cancelPending
+    comum (CANCEL_PENDING_POLL_INTERVAL_SECONDS)."""
+    if cancel_pending and not pickup_cleared:
+        return PRE_PICKUP_CANCEL_POLL_INTERVAL_SECONDS
+    return CANCEL_PENDING_POLL_INTERVAL_SECONDS
+
+
+def _current_route_cancel_ready(current, pickup_cleared):
+    """Decide se é seguro cancelar a currentRoute JÁ DISPARADA agora --
+    unifica as duas estratégias (ver comentário acima do arquivo):
+    alinhamento de docking ANTES do pickup, check-turn tradicional DEPOIS
+    (carregando o pallet, sem docking point equivalente nesse trecho).
+    Mesmo contrato de robot_can_turn_safely: True/False = resposta de
+    verdade, None nunca é devolvido (cai pro check-turn como rede de
+    segurança em vez de travar o cancelamento pra sempre)."""
+    if not pickup_cleared:
+        ready = _pre_pickup_cancel_ready(current)
+        if ready is True:
+            print("pré-pickup cancel: dentro da margem -- cancelando agora.")
+        if ready is not None:
+            return ready
+        # não achou os pontos calibrados ("H"+pickup / pickup) ou pose
+        # indisponível agora -- cai pro check-turn abaixo em vez de travar.
+    return robot_can_turn_safely()
 
 
 # --- status ao vivo do robô pro banner "Em Operação" / "Recarregando" -----
@@ -688,7 +984,7 @@ def _empty_queue_state():
     # constante no módulo teria a lista routeQueue=[] COMPARTILHADA entre
     # todo mundo que pedisse "o estado vazio", e um .append() em qualquer
     # chamador corromperia esse "vazio" pra sempre (mutable default clássico).
-    return {"currentRoute": None, "pendingRoute": None, "routeQueue": [], "pickupCleared": False, "emergency": False, "cancelPending": False}
+    return {"currentRoute": None, "pendingRoute": None, "routeQueue": [], "pickupCleared": False, "emergency": False, "cancelPending": False, "turnBlocked": False}
 
 
 def _read_queue_state():
@@ -917,19 +1213,15 @@ def _find_route_conflict(pickup, dropoff, active_routes):
 # fisicamente válidas PORQUE essa ia rodar antes, então deixá-las na fila
 # faria o robô tentar pegar uma posição que continua bloqueada.
 #
-# A pendingRoute é caso especial: ela JÁ foi disparada pro dispatch de
-# verdade, então tirar do estado local não basta — precisa cancelar no robô
-# também (melhor esforço; se falhar, ela roda e provavelmente falha lá, mas
-# nunca é pior do que deixar o estado local mentindo).
+# pendingRoute e routeQueue nunca foram disparadas pro robô de verdade (ver
+# "check-turn no início de tarefas" acima — só a currentRoute dispara, e só
+# depois do check-turn liberar), então tirar do estado local já basta pras
+# duas, sem chamada nenhuma ao robô.
 def _drop_group_from_queue(state, group_id):
     if not group_id:
         return
     pending = state.get("pendingRoute")
     if pending and pending.get("groupId") == group_id:
-        try:
-            _robot_try_cancel(pending["taskName"])
-        except Exception as err:
-            print("Aviso: não deu pra cancelar no robô a próxima rota do grupo interrompido: %s" % err)
         log_route_completed(pending["id"], "cancelled")
         state["pendingRoute"] = None
     # O resto do grupo que ainda estava só na fila LOCAL some sem mais nada:
@@ -942,25 +1234,27 @@ def _drop_group_from_queue(state, group_id):
 
 # --- disparo/avanço da fila (chamado com QUEUE_LOCK já adquirido) ---------
 # Dispara de verdade no robô e devolve a rota "disparada" (com taskName
-# preenchido) — NÃO atualiza state[...] sozinho, quem chama decide se vira
-# current ou pending. route["user"] (capturado no momento do ENFILEIRAMENTO,
-# não relido depois) é quem aparece no histórico como requisitante, mesmo
-# que o disparo de verdade só aconteça bem depois, promovido
-# automaticamente pela thread de fundo — mais correto do que a versão
-# antiga (cliente), onde o log ficava por conta de qual ABA estava rodando
-# a sondagem no momento, meio ao acaso.
-def _fire_route(route, as_pending):
-    charge_task_id = None
-    if not as_pending:
-        # Mesmo raciocínio de fireRoute em MainApp.jsx: descobre a task de
-        # carga ativa ANTES de disparar (se checasse depois, o registro
-        # mais recente já seria o nosso, não o dela), dispara a rota nova
-        # (fica pendente atrás da carga, fila nunca some a zero), e só
-        # então cancela a carga — nunca all-cancel aqui.
-        try:
-            charge_task_id = robot_find_active_charge_task_id()
-        except Exception:
-            charge_task_id = None
+# preenchido). NÃO atualiza state[...] sozinho, quem chama decide onde ela
+# fica. route["user"] (capturado no momento do ENFILEIRAMENTO, não relido
+# depois) é quem aparece no histórico como requisitante, mesmo que o disparo
+# de verdade só aconteça bem depois (ver "check-turn no início de tarefas"
+# acima) — mais correto do que a versão antiga (cliente), onde o log ficava
+# por conta de qual ABA estava rodando a sondagem no momento, meio ao acaso.
+#
+# SÓ chama isto quem já checou (fora do QUEUE_LOCK, ver _try_dispatch_current)
+# que é seguro girar agora — esta função em si não pergunta nada pro bridge,
+# só dispara. Único lugar que fala com o robô pra CRIAR uma rota nova; tanto
+# a currentRoute nova quanto a promovida de pendingRoute/routeQueue passam
+# por aqui exatamente uma vez, no momento em que de fato começam a rodar.
+def _fire_route(route):
+    # Descobre a task de carga ativa ANTES de disparar (se checasse depois,
+    # o registro mais recente já seria o nosso, não o dela), dispara a rota
+    # nova (fica pendente atrás da carga, fila nunca some a zero), e só então
+    # cancela a carga — nunca all-cancel aqui.
+    try:
+        charge_task_id = robot_find_active_charge_task_id()
+    except Exception:
+        charge_task_id = None
     task_name = robot_create_and_run_route(
         route["pickup"], route["dropoff"], route.get("palletType", "wood"),
         route.get("palletTop", False), route.get("palletHeights"),
@@ -976,8 +1270,14 @@ def _fire_route(route, as_pending):
     return fired
 
 
-# Chamado com QUEUE_LOCK já adquirido, depois que a rota atual terminou de
-# verdade (FINISHED) — porta de advanceQueue() em MainApp.jsx.
+# Promove pendingRoute/routeQueue pra currentRoute — chamado com QUEUE_LOCK
+# já adquirido, depois que a rota atual terminou de verdade (FINISHED) ou foi
+# cancelada. PURA reorganização local, nenhuma chamada ao robô: a nova
+# currentRoute fica "reservada" (sem taskName) até _try_dispatch_current
+# liberar o disparo de verdade (check-turn), exatamente como pendingRoute e
+# routeQueue sempre estiveram — ver "check-turn no início de tarefas" acima.
+# Quem chama é responsável por tentar _try_dispatch_current() logo depois,
+# fora do QUEUE_LOCK.
 def _advance_queue_locked(state):
     pending = state.get("pendingRoute")
     if pending:
@@ -986,31 +1286,80 @@ def _advance_queue_locked(state):
         state["pickupCleared"] = False
         queue = state.get("routeQueue") or []
         if queue:
-            nxt = queue[0]
-            try:
-                state["pendingRoute"] = _fire_route(nxt, as_pending=True)
-                state["routeQueue"] = queue[1:]
-            except Exception as err:
-                # não conseguiu pré-disparar a próxima — deixa na fila, tenta
-                # de novo no próximo tick, em vez de perder a rota.
-                print("Erro ao pré-disparar a próxima rota da fila: %s" % err)
+            state["pendingRoute"] = queue[0]
+            state["routeQueue"] = queue[1:]
         return
 
     queue = state.get("routeQueue") or []
     if not queue:
         state["currentRoute"] = None
         return
-    nxt = queue[0]
-    try:
-        state["currentRoute"] = _fire_route(nxt, as_pending=False)
-        state["pickupCleared"] = False
-        state["routeQueue"] = queue[1:]
-    except Exception as err:
-        print("Erro ao disparar automaticamente a próxima rota da fila: %s" % err)
-        state["currentRoute"] = None
+    state["currentRoute"] = queue[0]
+    state["pickupCleared"] = False
+    state["routeQueue"] = queue[1:]
 
 
-# Cancelamento de verdade da currentRoute — extraído pra função própria
+# Tenta disparar de verdade a currentRoute RESERVADA (sem taskName ainda) —
+# gateado pelo mesmo check-turn do cancelamento, só que pro lado de INICIAR
+# (ver "check-turn no início de tarefas" acima). Auto-contido (cuida do
+# próprio QUEUE_LOCK, chamada de rede SEMPRE fora dele) e idempotente — pode
+# ser chamado de qualquer lugar, a qualquer momento, sem risco de disparar
+# duas vezes: se não há nada reservado pra disparar, é no-op. Devolve True se
+# disparou agora, False se ficou esperando (ou não havia nada a fazer).
+def _try_dispatch_current():
+    with QUEUE_LOCK:
+        state = _read_queue_state()
+        current = state.get("currentRoute")
+        if not current or current.get("taskName"):
+            return False  # nada reservado, ou já disparada
+
+    # Check-turn não se aplica em cima do ponto de carga (pedido do usuário,
+    # 2026-09-23, confirmado ao vivo): o nicho de encaixe elétrico do
+    # `energy` é apertado demais pra um giro completo de 200° — check-turn
+    # dá `false` ali SEMPRE, mesmo estando perfeitamente seguro pra sair
+    # (a calibração do próprio ponto confirma: `mustTurn: false` — a saída
+    # não exige girar no lugar, é andar pra frente/curva normal, igual
+    # qualquer outro despacho). Sem esse bypass, QUALQUER task nova travava
+    # como `turnBlocked` pra sempre enquanto o robô estivesse carregando.
+    # `_robot_status_cache["charging"]` é o proxy mais simples e confiável
+    # de "estou em cima do ponto de energia agora" (só fica True carregando
+    # de verdade, ou seja, encostado no ponto).
+    if _robot_status_cache.get("charging"):
+        safe = True
+    else:
+        # Chamada de rede FORA do lock (mesma cautela de robot_can_turn_safely
+        # nos outros usos, ver _queue_cancel_current/_queue_tick) — o timeout
+        # dela (TURN_CHECK_TIMEOUT_SECONDS) não pode prender QUEUE_LOCK e
+        # travar os GET /api/live-state de todo mundo.
+        safe = robot_can_turn_safely()
+
+    with QUEUE_LOCK:
+        state = _read_queue_state()
+        current = state.get("currentRoute")
+        if not current or current.get("taskName"):
+            return False  # mudou enquanto perguntávamos (cancelada, por ex.)
+        if safe is False:
+            if not state.get("turnBlocked"):
+                state["turnBlocked"] = True
+                _write_queue_state(state)
+            return False
+        # Seguro (True) ou bridge indisponível (None, tratado como "não sei"
+        # — mesmo comportamento fail-open do cancelamento, pra essa checagem
+        # nova nunca travar o robô ocioso só porque o bridge não está rodando
+        # nesse robô) → dispara de verdade agora.
+        try:
+            state["currentRoute"] = _fire_route(current)
+        except Exception as err:
+            print("Erro ao disparar rota reservada assim que girar ficou seguro: %s" % err)
+            return False  # tenta de novo no próximo tick
+        state["turnBlocked"] = False
+        _write_queue_state(state)
+        return True
+
+
+# Cancelamento de verdade da currentRoute JÁ DISPARADA (current["taskName"]
+# existe — pra rota ainda reservada/sem taskName, ver
+# _cancel_reserved_current_locked abaixo) — extraído pra função própria
 # porque agora tem DOIS chamadores (ver "Cancelamento adiado até giro
 # seguro" no CONTEXT.md): o handler HTTP (`_queue_cancel_current`, quando
 # já é seguro girar na hora do clique) e a thread de fundo
@@ -1042,17 +1391,26 @@ def _execute_cancel_current_locked(state, current):
     # fila não são tocadas.
     _drop_group_from_queue(state, current.get("groupId"))
 
-    if state.get("pendingRoute") or state.get("routeQueue"):
-        try:
-            charge_id = robot_find_active_charge_task_id()
-            if charge_id:
-                robot_cancel_task_record(charge_id)
-        except Exception:
-            pass  # melhor esforço
+    # Promove pendingRoute/routeQueue -> currentRoute (fica RESERVADA, sem
+    # taskName ainda — ver _advance_queue_locked) — mesmo caminho do término
+    # normal (FINISHED). Uma eventual task de carga (AUTO_SYSTEM) que o robô
+    # recrie sozinho nesse meio-tempo é achada e cancelada pela própria
+    # _fire_route, no momento em que a rota promovida for de fato disparada
+    # (ver _try_dispatch_current) — não precisa de guarda extra aqui.
+    _advance_queue_locked(state)
 
-    # Promove pendingRoute -> currentRoute (o dispatch já a pôs pra rodar)
-    # e pré-dispara a próxima da fila como nova pendingRoute — exatamente
-    # o mesmo caminho do término normal (FINISHED).
+
+# Cancela a currentRoute enquanto ela ainda está RESERVADA (sem taskName —
+# esperando o check-turn liberar o disparo, ver "check-turn no início de
+# tarefas" acima). Não tem nada rodando no robô pra frear nem cancelar, então
+# é só remover do estado local e avançar a fila — bem mais simples que
+# _execute_cancel_current_locked (que lida com uma rota DE VERDADE em
+# andamento). QUEUE_LOCK já deve estar adquirido por quem chama.
+def _cancel_reserved_current_locked(state, current):
+    log_route_completed(current["id"], "cancelled")
+    state["currentRoute"] = None
+    state["turnBlocked"] = False
+    _drop_group_from_queue(state, current.get("groupId"))
     _advance_queue_locked(state)
 
 
@@ -1141,6 +1499,17 @@ def _queue_tick():
         _emergency_suppress()
         return EMERGENCY_POLL_INTERVAL_SECONDS
 
+    # Destravamento manual do ROTATE_ERROR (ver CONTEXT.md) — só faz sentido
+    # quando a fila está genuinamente ociosa (é sempre a AUTO_SYSTEM nativa
+    # indo pra energia que trava assim, nunca uma rota nossa) e o robô não
+    # está carregando ainda. Cheque leve (um GET), roda toda vez.
+    with QUEUE_LOCK:
+        state = _read_queue_state()
+        idle_now = (not state.get("currentRoute") and not state.get("pendingRoute")
+                    and not (state.get("routeQueue") or []))
+    if idle_now and not bool(_robot_status_cache.get("charging")):
+        _recover_from_rotate_error_if_stuck()
+
     # Cancelamento adiado até giro seguro (ver CONTEXT.md) — o operador já
     # pediu pra cancelar, mas na hora não tinha espaço pra girar. Decide
     # FORA do lock se precisa perguntar "já dá pra girar?" pro bridge —
@@ -1150,9 +1519,14 @@ def _queue_tick():
     # então prender o QUEUE_LOCK durante ela travaria os
     # GET /api/live-state de todo mundo com mais frequência ainda.
     with QUEUE_LOCK:
-        cancel_pending_now = bool(_read_queue_state().get("cancelPending"))
-    if cancel_pending_now:
-        if robot_can_turn_safely():
+        state = _read_queue_state()
+        cancel_pending_now = bool(state.get("cancelPending"))
+        cancel_pending_current = state.get("currentRoute") if cancel_pending_now else None
+        cancel_pending_pickup_cleared = bool(state.get("pickupCleared"))
+    cancel_poll_interval = _cancel_poll_interval(
+        cancel_pending_now and bool(cancel_pending_current), cancel_pending_pickup_cleared)
+    if cancel_pending_now and cancel_pending_current:
+        if _current_route_cancel_ready(cancel_pending_current, cancel_pending_pickup_cleared):
             with QUEUE_LOCK:
                 state = _read_queue_state()
                 current = state.get("currentRoute")
@@ -1167,21 +1541,34 @@ def _queue_tick():
                         print("cancelPending: erro ao executar cancelamento após janela segura: %s" % err)
                 _write_queue_state(state)
             return QUEUE_POLL_INTERVAL_SECONDS
-        # ainda sem espaço pra girar — a rota ATUAL continua rodando
-        # normalmente (nada abaixo trata isso diferente), só sondamos de
-        # novo mais rápido no final desta função.
+        # ainda sem espaço pra girar / ainda não alinhou no docking point --
+        # a rota ATUAL continua rodando normalmente (nada abaixo trata isso
+        # diferente), só sondamos de novo mais rápido no final desta função.
+
+    # Check-turn no início de tarefas (ver "check-turn no início de tarefas"
+    # acima): se há uma currentRoute RESERVADA (sem taskName — rota nova, ou
+    # promovida de pendingRoute/routeQueue depois de um término/cancelamento)
+    # esperando o check-turn liberar, tenta disparar agora. Idempotente e
+    # auto-contido (própria chamada de rede fora do lock) — no-op se não há
+    # nada reservado pra disparar.
+    _try_dispatch_current()
 
     with QUEUE_LOCK:
         state = _read_queue_state()
         current = state.get("currentRoute")
-        if not current:
-            return QUEUE_POLL_INTERVAL_SECONDS
+        if not current or not current.get("taskName"):
+            # Ou não há currentRoute nenhuma, ou ela ainda está RESERVADA
+            # esperando giro seguro pra começar (turnBlocked) — nada rodando
+            # de verdade no robô ainda pra sondar status.
+            turn_blocked_now = bool(state.get("turnBlocked"))
+            fast = cancel_pending_now or turn_blocked_now
+            return cancel_poll_interval if fast else QUEUE_POLL_INTERVAL_SECONDS
         try:
             record = robot_fetch_latest_task_record(current["taskName"])
         except Exception:
-            return CANCEL_PENDING_POLL_INTERVAL_SECONDS if cancel_pending_now else QUEUE_POLL_INTERVAL_SECONDS  # falha de rede pontual — tenta de novo no próximo tick
+            return cancel_poll_interval if cancel_pending_now else QUEUE_POLL_INTERVAL_SECONDS  # falha de rede pontual — tenta de novo no próximo tick
         if not record:
-            return CANCEL_PENDING_POLL_INTERVAL_SECONDS if cancel_pending_now else QUEUE_POLL_INTERVAL_SECONDS
+            return cancel_poll_interval if cancel_pending_now else QUEUE_POLL_INTERVAL_SECONDS
 
         # Caso 2: desmarca a origem assim que o PICKUP terminar COM SUCESSO —
         # o pallet saiu fisicamente de lá.
@@ -1205,10 +1592,28 @@ def _queue_tick():
             except Exception:
                 pass  # melhor esforço — tenta de novo no próximo tick
 
-        if _apply_record_status(state, current, record):
+        advanced = _apply_record_status(state, current, record)
+        if advanced:
             _write_queue_state(state)
         cancel_pending_now = bool(state.get("cancelPending"))
-    return CANCEL_PENDING_POLL_INTERVAL_SECONDS if cancel_pending_now else QUEUE_POLL_INTERVAL_SECONDS
+        turn_blocked_now = bool(state.get("turnBlocked"))
+        pickup_cleared_now = bool(state.get("pickupCleared"))
+
+    if advanced:
+        # A rota que acabou de terminar/morrer promoveu a próxima (RESERVADA,
+        # sem taskName) — tenta disparar já, no mesmo tick, em vez de esperar
+        # o próximo ciclo. No caminho comum (giro seguro) isso mantém o gap
+        # entre rotas praticamente igual a zero, como era antes; só demora de
+        # verdade quando o check-turn diz "ainda não".
+        _try_dispatch_current()
+        with QUEUE_LOCK:
+            state = _read_queue_state()
+            cancel_pending_now = bool(state.get("cancelPending"))
+            turn_blocked_now = bool(state.get("turnBlocked"))
+            pickup_cleared_now = bool(state.get("pickupCleared"))
+
+    fast = cancel_pending_now or turn_blocked_now
+    return _cancel_poll_interval(cancel_pending_now, pickup_cleared_now) if fast else QUEUE_POLL_INTERVAL_SECONDS
 
 
 def _reconcile_queue_state_on_startup():
@@ -1224,6 +1629,12 @@ def _reconcile_queue_state_on_startup():
             return
         current = state.get("currentRoute")
         if not current:
+            return
+        if not current.get("taskName"):
+            # RESERVADA, esperando o check-turn liberar o disparo (ver
+            # "check-turn no início de tarefas") — nunca chegou a ir pro
+            # robô, nada pra reconciliar aqui. O tick de fundo, assim que
+            # subir, tenta disparar normalmente.
             return
         try:
             record = robot_fetch_latest_task_record(current["taskName"])
@@ -1889,6 +2300,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "emergency": bool(state.get("emergency")),
             "cancelPending": bool(state.get("cancelPending")),
             "cancelPendingMessage": CANCEL_PENDING_MESSAGE if state.get("cancelPending") else None,
+            "turnBlocked": bool(state.get("turnBlocked")),
+            "turnBlockedMessage": TURN_BLOCKED_START_MESSAGE if state.get("turnBlocked") else None,
             "robotCharging": _robot_status_cache.get("charging"),
             "robotBattery": _robot_status_cache.get("battery"),
         }, ensure_ascii=False).encode("utf-8")
@@ -1972,50 +2385,48 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     )
                     self._relay(409, "application/json", json.dumps({"error": msg}, ensure_ascii=False).encode("utf-8"))
                     return
+            # Enfileirar é SEMPRE local, sem chamada nenhuma ao robô (ver
+            # "check-turn no início de tarefas" acima) — mesmo a rota que cai
+            # no slot "current" só fica RESERVADA aqui (sem taskName); quem
+            # dispara de verdade, gateado pelo check-turn, é
+            # _try_dispatch_current logo abaixo, já fora do QUEUE_LOCK.
             for route in routes:
-                try:
-                    if not state.get("currentRoute"):
-                        state["currentRoute"] = _fire_route(route, as_pending=False)
-                        state["pickupCleared"] = False
-                        slot = "current"
-                    elif not state.get("pendingRoute"):
-                        state["pendingRoute"] = _fire_route(route, as_pending=True)
-                        slot = "pending"
-                    else:
-                        state["routeQueue"] = (state.get("routeQueue") or []) + [route]
-                        slot = "queued"
-                except Exception as err:
-                    # As rotas anteriores do lote JÁ foram pro robô — persiste
-                    # o que deu certo antes de reportar, senão o estado local
-                    # mentiria sobre o que o dispatch já recebeu.
-                    _write_queue_state(state)
-                    msg = "Erro ao enviar rota %s → %s: %s" % (route["pickup"], route["dropoff"], err)
-                    self._relay(502, "application/json", json.dumps({"error": msg}, ensure_ascii=False).encode("utf-8"))
-                    return
+                if not state.get("currentRoute"):
+                    state["currentRoute"] = route
+                    state["pickupCleared"] = False
+                    slot = "current"
+                elif not state.get("pendingRoute"):
+                    state["pendingRoute"] = route
+                    slot = "pending"
+                else:
+                    state["routeQueue"] = (state.get("routeQueue") or []) + [route]
+                    slot = "queued"
                 if first_slot is None:
                     first_slot = slot
             _write_queue_state(state)
+        # Tenta disparar a currentRoute reservada AGORA (fora do lock) — no
+        # caminho comum (giro seguro) isso mantém a resposta tão rápida
+        # quanto antes; só demora de verdade quando o check-turn diz "ainda
+        # não" (aí a próxima sondagem de fundo tenta de novo sozinha).
+        _try_dispatch_current()
         # "slot" (o da PRIMEIRA rota) diz onde ela caiu — o cliente usa só
         # pra escolher a mensagem de feedback, não afeta nada no servidor.
         body = json.dumps({"ok": True, "slot": first_slot, "count": len(routes)}, ensure_ascii=False)
         self._relay(200, "application/json", body.encode("utf-8"))
 
     # Cancela SÓ a rota em andamento e deixa a fila seguir — a próxima rota
-    # (pendingRoute, que já foi disparada pro dispatch como "próxima") assume
-    # o lugar dela. NÃO é mais uma parada de emergência que derruba tudo.
+    # (pendingRoute/routeQueue, ainda RESERVADA — ver "check-turn no início
+    # de tarefas" acima) assume o lugar dela. NÃO é mais uma parada de
+    # emergência que derruba tudo.
     #
-    # Por que não some a task de carga no meio: o dispatch já tem a
-    # pendingRoute na fila dele, então cancelar a atual por id nunca deixa a
-    # lista do robô vazia — e a task AUTO_SYSTEM de carga só nasce quando ela
-    # zera. Ainda assim, como defesa contra um piscar de "sem task", se
-    # sobra o que rodar a gente procura e mata uma carga que porventura tenha
-    # aparecido, ANTES de promover (mesmo cuidado do _fire_route no disparo a
-    # partir de ocioso).
-    # Cancelamento adiado até giro seguro (ver CONTEXT.md, "Cancelamento
-    # adiado até giro seguro" — pedido explícito do usuário, 2026-09-22):
-    # cancelar a rota EM ANDAMENTO enquanto o robô não tem espaço pra
-    # girar podia deixá-lo travado (ROTATE_ERROR), exigindo modo manual.
-    # Agora, antes de cancelar de verdade, pergunta pro bridge
+    # Se a currentRoute ainda nem tinha sido disparada de verdade (esperando
+    # o check-turn liberar), cancela na hora, sem chamada nenhuma ao robô —
+    # ver o primeiro `if` abaixo. Só a partir daqui (rota DE VERDADE em
+    # andamento) que entra o cancelamento adiado até giro seguro (ver
+    # CONTEXT.md, "Cancelamento adiado até giro seguro" — pedido explícito do
+    # usuário, 2026-09-22): cancelar a rota EM ANDAMENTO enquanto o robô não
+    # tem espaço pra girar podia deixá-lo travado (ROTATE_ERROR), exigindo
+    # modo manual. Antes de cancelar de verdade, pergunta pro bridge
     # (`robot_can_turn_safely`, ver acima) "posso girar aqui?":
     #   - Sim (True) ou bridge indisponível (None, trata como "não sei",
     #     mantém o comportamento antigo em vez de travar por causa disso) →
@@ -2033,7 +2444,25 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not current:
                 self._relay(200, "application/json", b'{"ok":true}')
                 return
-            already_pending = bool(state.get("cancelPending"))
+            if not current.get("taskName"):
+                # RESERVADA, ainda esperando o check-turn liberar o disparo
+                # (ver "check-turn no início de tarefas" acima) — nada rodando
+                # no robô pra frear, então cancela na hora, sem chamada
+                # nenhuma ao robô nem espera de cancelPending (essa espera só
+                # faz sentido pra rota DE VERDADE em andamento).
+                _cancel_reserved_current_locked(state, current)
+                _write_queue_state(state)
+                reserved_cancelled = True
+            else:
+                reserved_cancelled = False
+                already_pending = bool(state.get("cancelPending"))
+                pickup_cleared = bool(state.get("pickupCleared"))
+        if reserved_cancelled:
+            # A promoção pode já disparar a próxima na hora, se o giro
+            # estiver seguro (mesma otimização do fim de rota normal).
+            _try_dispatch_current()
+            self._relay(200, "application/json", b'{"ok":true}')
+            return
         if already_pending:
             # clique repetido enquanto já está esperando — idempotente.
             self._relay(200, "application/json", json.dumps(
@@ -2044,7 +2473,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # Chamada de rede FORA do lock (mesmo cuidado de _emergency_suppress/
         # _queue_tick) — não prende QUEUE_LOCK durante uma chamada que pode
         # ser lenta (timeout de rede até 3s, ver TURN_CHECK_TIMEOUT_SECONDS).
-        safe = robot_can_turn_safely()
+        # ANTES do pickup usa o alinhamento de docking (mais confiável, ver
+        # _current_route_cancel_ready acima); DEPOIS, o check-turn de sempre.
+        safe = _current_route_cancel_ready(current, pickup_cleared)
 
         with QUEUE_LOCK:
             state = _read_queue_state()
@@ -2072,14 +2503,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self._relay(502, "application/json", json.dumps({"error": "Erro ao cancelar a rota atual: " + str(err)}, ensure_ascii=False).encode("utf-8"))
                 return
             _write_queue_state(state)
+        # A promoção pode já disparar a próxima na hora, se o giro
+        # estiver seguro (mesma otimização do fim de rota normal).
+        _try_dispatch_current()
         self._relay(200, "application/json", b'{"ok":true}')
 
-    # Cancela uma rota que ainda NÃO está em andamento: ou a pendingRoute (já
-    # disparada pro robô como "próxima" — cancelada por id) ou uma da
-    # routeQueue (nunca foi pro robô — some do estado local). A currentRoute
-    # segue rodando intacta. Se o slot de pending esvaziar e ainda houver
-    # fila, a próxima é pré-disparada pra pending na hora (o robô nunca fica
-    # sem "próxima").
+    # Cancela uma rota que ainda NÃO está em andamento: pendingRoute ou uma da
+    # routeQueue — nenhuma das duas chegou a ser disparada pro robô (ver
+    # "check-turn no início de tarefas" acima), então as duas só somem do
+    # estado local, sem chamada nenhuma ao robô. A currentRoute segue rodando
+    # intacta. Se o slot de pending esvaziar e ainda houver fila, a próxima
+    # sobe pra pending na hora (ainda RESERVADA — o robô nunca fica sem
+    # "próxima" localmente, mesmo que ainda não tenha sido disparada).
     def _queue_remove_queued(self):
         try:
             payload = self._read_json_body()
@@ -2109,27 +2544,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 # seguintes.
                 _drop_group_from_queue(state, group_id)
             elif is_pending:
-                try:
-                    _robot_try_cancel(pending["taskName"])
-                except Exception as err:
-                    self._relay(502, "application/json", json.dumps({"error": "Erro ao cancelar a próxima rota: " + str(err)}, ensure_ascii=False).encode("utf-8"))
-                    return
                 log_route_completed(pending["id"], "cancelled")
                 state["pendingRoute"] = None
             else:
                 state["routeQueue"] = [r for r in queue if r["id"] != route_id]
 
-            # Esvaziou o pending mas ainda tem fila e uma rota em andamento —
-            # pré-dispara a próxima pra pending (o robô continua com a
-            # currentRoute, nunca fica vazio, então sem risco de task de carga).
+            # Esvaziou o pending mas ainda tem fila — a próxima sobe pra
+            # pending (RESERVADA, sem taskName — só dispara quando virar
+            # currentRoute de verdade).
             if not state.get("pendingRoute") and state.get("currentRoute"):
                 q = state.get("routeQueue") or []
                 if q:
-                    try:
-                        state["pendingRoute"] = _fire_route(q[0], as_pending=True)
-                        state["routeQueue"] = q[1:]
-                    except Exception as err:
-                        print("Erro ao pré-disparar a próxima rota após remoção da fila: %s" % err)
+                    state["pendingRoute"] = q[0]
+                    state["routeQueue"] = q[1:]
             _write_queue_state(state)
         self._relay(200, "application/json", b'{"ok":true}')
 
@@ -2179,6 +2606,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 state["pendingRoute"] = None
                 state["routeQueue"] = []
                 state["pickupCleared"] = False
+                state["cancelPending"] = False
+                state["turnBlocked"] = False
                 state["emergency"] = True
                 _write_queue_state(state)
             elif not active and already:

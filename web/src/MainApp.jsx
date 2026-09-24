@@ -67,7 +67,7 @@ export default function MainApp({ user, onLogout }) {
   // pra ele em vez de mudar estado local direto (quem decide/dispara de
   // verdade é sempre o server.py, nunca o navegador).
   const {
-    currentRoute, pendingRoute, routeQueue, occupied, emergency, cancelPending, cancelPendingMessage, robotCharging, robotBattery,
+    currentRoute, pendingRoute, routeQueue, occupied, emergency, cancelPending, cancelPendingMessage, turnBlockedMessage, robotCharging, robotBattery,
     enqueueRoutes, cancelCurrent, removeQueued, setOccupiedMany, toggleOccupied, setEmergency,
   } = useLiveState();
   const [toast, showToast] = useToast();
@@ -755,7 +755,11 @@ export default function MainApp({ user, onLogout }) {
         robotBattery={robotBattery}
       />
       <CloseUpStatusBanner name={activeCloseUpId ? closeUps.find((c) => c.id === activeCloseUpId)?.name : null} />
-      <CancelPendingBanner message={cancelPendingMessage} />
+      {/* cancelPendingMessage (esperando girar pra CANCELAR) e
+          turnBlockedMessage (esperando girar pra COMEÇAR uma rota nova) nunca
+          coexistem — ver server.py, "check-turn no início de tarefas": uma só
+          existe pra currentRoute JÁ disparada, a outra só pra RESERVADA. */}
+      <CancelPendingBanner message={cancelPendingMessage || turnBlockedMessage} />
 
       <div className="app__body">
         {/*

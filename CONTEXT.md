@@ -2482,4 +2482,975 @@ máquina que roda o `server.py`.
   SETEMBRO 2022
   CANCELAMENTO DE ROTAS: CHECK_TURN APROVADO !!!!!
 
+## Check-turn no início de tarefas (IMPLEMENTADO 2026-09-22, AINDA NÃO VALIDADO EM CAMPO)
+
+Pedido do usuário, depois do check-turn no cancelamento já validado
+("Cancelamento adiado até giro seguro" acima): o mesmo risco de
+`ROTATE_ERROR` existe também quando uma rota **começa** — não só quando
+uma é cancelada. Toda vez que o robô vai passar a se mover pra uma rota
+nova (fila estava vazia, rota promovida depois de um término/cancelamento,
+ou rota que estava só na fila local e virou a vez dela), ele pode precisar
+girar pra encarar o novo pickup, e se não tiver espaço, trava do mesmo
+jeito. Pedido explícito: "aceitar" a rota (ela pode continuar chegando na
+fila normalmente, sem checar nada) mas só **disparar** ela de verdade pro
+robô quando o check-turn (`robot_can_turn_safely()`, mesmo bridge do
+cancelamento) disser que é seguro.
+
+**Descoberta de arquitetura que mudou o plano original**: `pendingRoute`
+(a "próxima da fila") sempre foi disparada **antecipadamente** no robô —
+criada e mandada rodar enquanto a `currentRoute` ainda estava em
+andamento, só pra não ter gap nenhum quando a atual terminasse. Isso
+significa que o giro físico pra essa próxima rota acontece **sozinho, no
+robô**, no instante em que a atual termina/é cancelada — sem nenhuma
+chamada nossa naquele momento pra interceptar. Checar giro seguro só na
+hora do disparo antecipado não protegia nada de verdade, porque a posição
+do robô nesse momento não é a mesma que ele vai ter quando o giro
+realmente acontecer. **Decisão (confirmada com o usuário antes de
+implementar)**: trocar o disparo antecipado por disparo tardio — toda
+rota, `pendingRoute` incluída, agora fica **RESERVADA** (guardada local,
+sem `taskName`, nunca tocou o robô) até o exato momento em que precisa
+virar `currentRoute` de verdade. Só currentRoute dispara, e só depois do
+check-turn liberar. Contrapartida aceita: uma pequena pausa entre rotas
+quando o check-turn precisar esperar (em vez do zero-gap de antes) — no
+caminho comum (giro já seguro), a pausa é imperceptível, porque o disparo
+é tentado imediatamente, sem esperar o próximo ciclo da sondagem.
+
+**Implementação (`server.py`)**:
+- `TURN_BLOCKED_START_MESSAGE` — mensagem mostrada ao operador (mesmo
+  padrão de `CANCEL_PENDING_MESSAGE`).
+- `turnBlocked` (bool) — novo campo em `_empty_queue_state()`/
+  `queue_state.json`, análogo ao `cancelPending` mas pro lado de começar.
+- **Invariante nova**: só `currentRoute` pode ter `taskName` preenchido.
+  `pendingRoute` e itens de `routeQueue` NUNCA têm — são só dados locais
+  até a hora de virar `currentRoute`.
+- `_fire_route(route)` — perdeu o parâmetro `as_pending` (não faz mais
+  sentido: só dispara quem já vai virar `currentRoute` de verdade). Único
+  lugar que fala com o robô pra criar uma rota nova.
+- `_advance_queue_locked(state)` — virou reorganização PURAMENTE local
+  (promove `pendingRoute`/`routeQueue` pra `currentRoute`, sem chamar o
+  robô). Antes disparava a nova `pendingRoute` de antemão; agora só
+  reserva.
+- `_try_dispatch_current()` — a peça nova central. Auto-contida (cuida do
+  próprio lock, chamada de rede sempre fora dele) e idempotente: se
+  `currentRoute` existe e ainda não tem `taskName`, pergunta
+  `robot_can_turn_safely()`; `True`/`None` (bridge indisponível, mesmo
+  fail-open do cancelamento) → dispara de verdade; `False` → marca
+  `turnBlocked=True` e não faz nada, tenta de novo depois. Chamada em
+  TODOS os pontos onde uma `currentRoute` reservada pode aparecer:
+  handler de enfileirar (pra manter a resposta rápida no caminho comum),
+  handler de cancelar (depois de promover a próxima), e a cada tick da
+  thread de fundo (inclusive de novo, no mesmo tick, logo depois de
+  detectar FINISHED — pra manter o gap mínimo no caminho comum).
+- `_cancel_reserved_current_locked(state, current)` — cancelar uma
+  `currentRoute` que ainda nem foi disparada (esperando o check-turn) é
+  bem mais simples que cancelar uma de verdade em andamento: nada rodando
+  no robô pra frear, então é só remover do estado local e avançar a fila.
+  `_queue_cancel_current` detecta esse caso (`current["taskName"]` ausente)
+  e usa este caminho em vez do `cancelPending` de sempre (que só faz
+  sentido pra rota DE VERDADE em andamento).
+- Simplificação em cadeia: como `pendingRoute`/`routeQueue` nunca são
+  disparadas antecipadamente, várias chamadas que existiam só pra cancelar
+  a `pendingRoute` NO ROBÔ (em `_drop_group_from_queue`,
+  `_queue_remove_queued`) deixaram de ser necessárias — viraram remoção
+  puramente local, igual já era pra itens da `routeQueue`. A guarda
+  "procura e mata uma carga (AUTO_SYSTEM) que apareceu no meio" em
+  `_execute_cancel_current_locked` também saiu — hoje isso é resolvido
+  pela própria dança de `_fire_route` (achar/cancelar carga ativa ANTES de
+  criar a rota nova), que agora roda no momento certo (o disparo de
+  verdade), não mais logo após o cancelamento.
+- `_get_live_state`: novos campos `turnBlocked`/`turnBlockedMessage`.
+
+**Frontend**: `useLiveState.js` expõe `turnBlocked`/`turnBlockedMessage`;
+`MainApp.jsx` reusa o `CancelPendingBanner` existente, mostrando
+`cancelPendingMessage || turnBlockedMessage` (nunca coexistem — um só
+existe pra rota já disparada, o outro só pra reservada). Não mexi no
+ícone `⏳` do `QueuePanel` (cancelar uma rota bloqueada-pra-começar
+cancela NA HORA, sem espera nenhuma — mostrar o mesmo ícone de "espera"
+ali seria enganoso).
+
+**Testado isolado** (stub completo do robô, sem tocar no robô real nem em
+arquivo de produção — script descartável, não ficou no repo): disparo
+imediato quando seguro; fica reservado sem chamar o robô quando inseguro,
+depois dispara quando libera; término normal (FINISHED) promove e já
+tenta disparar a promovida no mesmo tick; cancelar uma reservada não
+chama `_robot_try_cancel`/`robot_stop_navigation`; cancelar uma já
+disparada mantém o fluxo antigo intacto (chama os dois). `_queue_tick()`
+de ponta a ponta também rodou sem quebrar.
+
+**NÃO validado em campo ainda** — usuário vai testar no robô real (mesmo
+espírito de validação do check-turn no cancelamento: rodar em pontos
+suspeitos de verdade, ver se o comportamento agrada) antes de considerar
+isso pronto.
+
+## Retorno pra carga assumido pelo server.py (IMPLEMENTADO 2026-09-23, AINDA NÃO VALIDADO EM CAMPO)
+
+**Incidente que motivou isso**: usuário cancelou uma rota (check-turn liberou
+certinho, sem reclamar de giro) — 5 segundos depois, com a fila vazia, a
+REEMAN recriou sozinha a `AUTO_SYSTEM` de retorno pra carga (`standbyPointType:
+"charge"` no AGV, comportamento nativo, não é task nossa, cancelamento normal
+não afeta), que bateu em `ROTATE_ERROR` num ponto `virtual_673` (nó de grafo
+interno, não é ponto nosso calibrado) e **travou de verdade** — nada de
+auto-recuperação; confirmado pelo usuário que **a única forma conhecida de
+destravar é modo manual + levar até a base de carga na mão**, aí ele detecta
+carga e volta a aceitar tarefa. Achado no log real do robô
+(`GET /error/records`): 6 `ROTATE_ERROR` em pontos `virtual_*` DIFERENTES
+(673, 674, 642, 663, 324, 328) em ~3h de teste, intercalados com
+`LOCATION_LOST` e `GENERATE_PATH_UNKNOWN_ERROR` — mesma família do incidente
+"AUTO_SYSTEM travado longe de casa" documentado antes, só que agora
+confirmado que também quebra como `ROTATE_ERROR`, não só `GENERATE_PATH_
+UNKNOWN_ERROR`.
+
+**Por que o check-turn não alcança isso**: nosso check-turn (cancelamento E
+início de tarefa) só pergunta "posso girar **na minha posição atual**?",
+sempre ANTES de agir — e só protege disparos que passam pela NOSSA fila
+(`_fire_route`). A `AUTO_SYSTEM` é criada e roteada inteiramente por dentro
+da REEMAN, nunca passa pelo `server.py`, e o travamento acontece num ponto
+NO MEIO do caminho dela (`virtual_673`), que a gente não tem como prever —
+não existe (procurado, não achado) uma forma de perguntar "vou conseguir
+girar no ponto X, mais na frente do meu caminho?" — só "posso girar AQUI,
+AGORA". Por isso a solução não pode ser "checar antes" (não dá) — teve que
+ser "nunca deixar o mecanismo problemático rodar sozinho".
+
+**Por que apostar em task nossa em vez de só reagir ao travamento**: já
+documentado antes (mesmo incidente "AUTO_SYSTEM travado longe de casa") que
+uma rota NORMAL ponto-a-ponto (`FAST`, a mesma que PICKUP/UNLOAD usam) rodou
+**sem erro nenhum** na mesma área onde o retorno automático falhava — sinal
+de que o problema é do MECANISMO de roteamento específico do retorno
+automático (parece grafo/rota fixa com esses pontos `virtual_*`), não do
+espaço físico em si. Apostamos que uma task `CHARGE` nossa, disparada pelo
+MESMO mecanismo de dispatch (`task-template` + `task-fast`) que já
+comprovadamente funciona bem nessa área, usa esse planejamento normal em vez
+do roteamento especial que trava. **Não confirmado em campo ainda** — é uma
+hipótese fundamentada, não uma garantia.
+
+**Implementação (`server.py`)**:
+- `AUTO_CHARGE_POINT = "energy"` (ponto calibrado da base de carga) /
+  `AUTO_CHARGE_TASK_NAME = "LIFTY_AUTO_CHARGE_RETURN"`.
+- `robot_create_and_run_charge_task()` — mesmo padrão de
+  `robot_create_and_run_route` (task-template + task-fast), só que com UMA
+  ação `CHARGE` em vez de PICKUP+UNLOAD. **Forma exata dos params de uma ação
+  CHARGE não veio com exemplo nos PDFs do fabricante** (só confirmamos que
+  `"CHARGE"` existe no dicionário `GET /action-type/list-all`) — `params:
+  None`, mesma aposta já usada pro UNLOAD (que funciona). Se o dispatch
+  rejeitar essa forma, a exceção sobe e quem chama tenta de novo no próximo
+  ciclo, sem travar mais nada.
+- `autoChargeTask` (novo campo em `_empty_queue_state()`/`queue_state.json`)
+  — mesmo padrão RESERVADO/DISPARADO de `currentRoute`: `{"taskName": None}`
+  enquanto espera o check-turn liberar, `{"taskName": "..."}" depois de
+  disparada.
+- `_suppress_native_auto_charge()` — acha (`robot_find_active_charge_task_id`,
+  já existia) e cancela (`robot_cancel_task_record`) a `AUTO_SYSTEM` nativa
+  toda vez que aparece, **EXCETO se `_robot_status_cache["charging"]` já for
+  True** (aí já chegou/já está carregando, não mexe em nada). Só fala com o
+  robô, roda fora do `QUEUE_LOCK`.
+- `_try_dispatch_auto_charge()` — clone de `_try_dispatch_current`, só que
+  pra `autoChargeTask` em vez de `currentRoute`: pergunta `robot_can_turn_
+  safely()` fora do lock, só dispara (`robot_create_and_run_charge_task`) se
+  `True`/`None` (fail-open, mesmo padrão de sempre); se `False`, marca
+  `turnBlocked` (MESMO campo do bloqueio de rota — reusa a sondagem rápida
+  que já existia).
+- `_queue_tick()`: antes de checar status da `currentRoute`, roda em ordem:
+  1. `_suppress_native_auto_charge()` (se não carregando);
+  2. sob lock, decide se reserva `autoChargeTask` (fila **genuinamente
+     ociosa**: sem `currentRoute`/`pendingRoute`/`routeQueue`, e não
+     carregando) ou solta ela (chegou trabalho de verdade antes do disparo);
+  3. `_try_dispatch_auto_charge()`;
+  4. sonda o status da `autoChargeTask` disparada — se terminal (`FINISHED`/
+     `FAILED`/etc.), libera o campo pra um próximo período ocioso poder
+     tentar de novo (não é rota, não tem Caso 2/pickup/ocupação envolvidos).
+- `_try_dispatch_current()` (disparo de rota de verdade): se sobrou uma
+  `autoChargeTask` JÁ DISPARADA no meio do caminho, cancela ela (melhor
+  esforço) ANTES de disparar a rota nova — trabalho de verdade sempre tem
+  prioridade sobre o retorno pra carga.
+- `_queue_emergency` (engatar): zera `autoChargeTask` junto com o resto do
+  estado.
+
+**Testado isolado** (mesmo estilo do check-turn no início — stub completo,
+sem tocar no robô real): fila ociosa + turn seguro dispara a task de carga
+nossa; `AUTO_SYSTEM` nativa aparece e é cancelada; enquanto carregando, nem
+suprime nem dispara nada; rota de verdade chegando antes do disparo solta a
+`autoChargeTask` reservada local; rota de verdade chegando com a
+`autoChargeTask` JÁ disparada cancela ela no robô antes de assumir o lugar;
+`autoChargeTask` termina (FINISHED) e libera o campo pro próximo ciclo.
+
+**NÃO validado em campo ainda, e com um risco real específico**: a forma dos
+params da ação `CHARGE` é uma aposta, não uma certeza confirmada pelo
+fabricante. Se estiver errada, o robô pode navegar até o ponto `energy` sem
+efetivamente conectar/carregar — enquanto isso, estamos suprimindo o
+mecanismo nativo que SABEMOS que conecta direito. **Recomendação: primeiro
+teste supervisionado, olhando o robô, confirmando que ele realmente pluga e
+`robotCharging` vira `true`** — não deixar rodando sem supervisão numa
+primeira sessão.
+
+### Teste de campo 2026-09-23 — resultado misto, dois bugs corrigidos
+
+**Resultado principal confirmado**: o congelamento (`ROTATE_ERROR` sem
+recuperação) **não aconteceu mais** — o robô se recarrega corretamente com a
+nossa task. A hipótese central (task disparada pelo mecanismo normal de
+dispatch evita o roteamento especial que travava) se sustentou no teste.
+
+**Bug 1 — "anda um pouco, para, anda de novo" em loop**: a `autoChargeTask`
+terminava (`FINISHED`) e o campo era liberado NA HORA, sem esperar nada. No
+tick seguinte (só ~4s depois), com a fila ainda ociosa e `robotCharging`
+ainda sem confirmar (o sensor demora um pouco a mais que o status da task pra
+atualizar — mesmo atraso de canal já documentado), a gente **redisparava
+outra task de carga imediatamente**, interrompendo o encaixe que
+provavelmente já estava em andamento de verdade. Sintoma bateu exatamente:
+"anda um pouco, para, anda de novo" repetidas vezes.
+**Corrigido**: `AUTO_CHARGE_RETRY_COOLDOWN_SECONDS = 30` — depois que a
+autoChargeTask termina SEM `chargeFlag` confirmado, `autoChargeRetryAfter`
+(novo campo, timestamp) bloqueia uma nova tentativa por 30s. Se `charging`
+virar `true` antes disso, o cooldown é limpo na hora (não tem motivo pra
+esperar).
+
+**Bug 2 — giro parcial da AUTO_SYSTEM nativa, mesmo com supressão ativa**:
+usuário viu o robô "julgar que deveria virar, girar um pouquinho, e parar" —
+sintoma de `ROTATE_ERROR` de novo, mesmo com `_suppress_native_auto_charge`
+ativo. Causa: a supressão só rodava na cadência normal do tick
+(`QUEUE_POLL_INTERVAL_SECONDS`, 4s) — e no incidente de campo que motivou
+tudo isso, só levou **5 segundos** entre a `AUTO_SYSTEM` ser criada e travar.
+Ou seja, tinha uma janela real onde ela conseguia agir (e girar) antes da
+nossa supressão alcançar. **Não é conflito entre duas tasks disputando
+controle ao mesmo tempo** (como o usuário suspeitou) — é a nativa tendo
+tempo de sobra pra agir sozinha antes da gente notar.
+**Corrigido, parcialmente**: `_queue_tick` agora sonda na cadência RÁPIDA
+(`CANCEL_PENDING_POLL_INTERVAL_SECONDS`, 2s) sempre que o robô está ocioso e
+não carregando (`managing_auto_charge`), reduzindo a janela pela metade.
+**Isso não elimina a corrida, só encolhe ela** — não tem como eliminar de
+verdade sem um jeito de ser avisado NO INSTANTE que a `AUTO_SYSTEM` nasce
+(não existe esse webhook/push na API que temos). Se o giro problemático
+acontecer em menos de ~2s da criação, ainda pode escapar.
+
+**Ambos corrigidos no código, testados isolado (stub), AINDA NÃO revalidados
+em campo** — próximo teste do usuário deve confirmar se o loop parou e se a
+janela de 2s é suficiente na prática.
+
+### Check-turn ignorado em cima do ponto de carga (IMPLEMENTADO 2026-09-23)
+
+Usuário relatou: check-turn parecia estar impedindo tasks NOVAS de começar.
+**Confirmado ao vivo** — com o robô fisicamente em cima do `energy`
+(pose `25.79, 58.90` vs. calibração do ponto `25.83, 58.89`, mesmo lugar),
+chamei `GET :8091/check-turn?angle=180` direto e a resposta foi
+`{"safe": false}`. Ou seja: o nicho de encaixe elétrico do ponto de carga é
+apertado demais pra um giro completo de 200° — mas a calibração do próprio
+ponto (`GET /map/point/list/{map}`) mostra `"mustTurn": false` pra ele,
+confirmando que **sair dali não exige girar no lugar**, só andar pra
+frente/curva normal. `_try_dispatch_current` estava perguntando a coisa
+ERRADA especificamente ali (200° no lugar, quando a saída real nem precisa
+disso) — resultado: qualquer task nova enquanto o robô carregava ficava
+`turnBlocked` pra sempre, sem nunca liberar sozinha.
+
+**Correção**: em `_try_dispatch_current`, se `_robot_status_cache["charging"]`
+for `True` (proxy simples e confiável de "estou em cima do ponto de energia
+agora" — só fica `True` carregando de verdade, encostado no ponto), o
+check-turn é pulado inteiramente (`safe = True` direto, sem chamar o
+bridge). Escopo deliberadamente restrito só a `_try_dispatch_current` — não
+mexe no cancelamento nem no `_try_dispatch_auto_charge` (esse já nunca roda
+enquanto carregando, por construção).
+
+**Risco aceito conscientemente**: isso confia que TODA saída do ponto
+`energy` é segura sem checar — baseado no `mustTurn: false` calibrado e na
+observação de que o check-turn ali dava `false` mesmo sem colisão nenhuma
+(mesmo padrão de falso-positivo do sensor em espaço apertado já visto no
+"Problema 1" — giro barrado por sensor de segurança configurado
+conservador, não por falta de espaço de verdade). Se algum dia mudar a
+calibração desse ponto especificamente pra exigir giro na saída, esse bypass
+precisa ser revisto.
+
+## Caso peculiar relatado (2026-09-23) — robô "ajustando ângulo constantemente" em modo manual, AINDA NÃO REPRODUZIDO com dados
+
+Usuário relatou: em algum momento durante a execução de uma task, colocou o
+robô em modo manual, e ele ficou **ajustando o próprio ângulo
+constantemente** (sozinho, não por comando do operador) — sem travar de
+vez, mas sem progredir normalmente. No fim, o usuário assumiu o controle
+manual e mandou ele pra base na mão. **Causa desconhecida** — usuário não
+sabe o que pode ter disparado isso.
+
+**Monitor ao vivo montado pra investigar** (script descartável, não ficou no
+repo): sonda a cada 1s `reeman/pose` (x,y,theta), `check-turn?angle=180`,
+`task-record/page` (task mais recente) e o `queue_state.json` local,
+grava tudo em JSONL com timestamp — pensado pra capturar o exato instante
+de um episódio desses e correlacionar com o que o `server.py` estava
+decidindo ao mesmo tempo.
+
+**Primeira captura (16:26:46–16:30:54, 2026-09-23) NÃO reproduziu o
+sintoma descrito** — mas registrou dois achados à parte, guardados aqui
+pra referência futura:
+1. **`check-turn` oscila `true`/`false` ao longo do tempo MESMO com o robô
+   100% parado na mesma posição** (visto às 16:27:02 `true` → 16:27:18
+   `false`, zero movimento entre as duas leituras). Confirma que a
+   resposta do bridge não é uma função pura da pose — é uma leitura viva
+   de sensor, sujeita a variar (obstáculo temporário passando perto,
+   ruído do sensor, etc.), mesmo parado.
+2. **A `LIFTY_AUTO_CHARGE_RETURN` ficou em `RUNNING`, imóvel (x/y/theta
+   idênticos), por mais de 80 segundos seguidos** até o fim da captura,
+   sem nunca chegar em `FINISHED` nem se mexer — não chegou a virar o
+   sintoma relatado (nenhuma oscilação de `theta` observada), mas pode ser
+   o início dele, capturado incompleto (a captura foi interrompida antes
+   de eventualmente resolver ou virar o problema descrito).
+
+**Próximo passo**: nova captura em andamento, pedido explícito do usuário
+pra tentar pegar o episódio completo dessa vez.
+
+**Atualização, ainda 2026-09-23 — usuário interrompeu a 2ª captura**: robô
+começou a fazer um **barulho estranho ("gargarejando") enquanto andava**.
+Usuário com medo de ter bugado o robô por causa da mudança no NUC (o
+bridge `lifty_turn_check_bridge.py`). Investigação imediata:
+
+- Reli o bridge inteiro — é um cliente ROS **passivo**: publica um
+  `Float32` num tópico de CONSULTA (`/robot_api/turn_check_angle`) e
+  espera a resposta booleana (`/robot_api/turn_check_ok`). Nunca toca em
+  tópico de motor, nunca manda comando de movimento. Fisicamente não tem
+  como emitir som — não fala com o driver do motor. Confirmado ainda
+  respondendo normal (`curl` único, sem martelar).
+- **Suspeito mais plausível, não confirmado**: desde o retorno pra carga
+  assumido (seção acima), a frequência de chamadas HTTP/ROS pro
+  computador de bordo subiu de ~1x/4s pra até 3-4x/2s sempre que o robô
+  está ocioso — tudo rodando no MESMO computador que controla os motores
+  em tempo real. Sem SSH pra medir CPU/carga real, não dá pra confirmar
+  nem descartar contenção de recurso como causa.
+- **Ação por precaução**: revertida a sondagem rápida (2s) que tinha sido
+  adicionada pra reagir mais rápido à `AUTO_SYSTEM` nativa (ver bug 2 do
+  teste de campo acima) — voltou pro intervalo normal (`QUEUE_POLL_
+  INTERVAL_SECONDS`, 4s) enquanto gerencia o retorno pra carga. Custo:
+  a janela de reação à `AUTO_SYSTEM` nativa volta a ser maior (~4s em vez
+  de ~2s) — aceito temporariamente até isolar a causa do barulho.
+- **Teste definitivo ainda pendente, recomendado ao usuário**: parar o
+  `server.py` inteiro (zera TODO tráfego nosso pro robô, bridge incluído)
+  e ver se o barulho acontece mesmo assim dirigindo o robô por fora do
+  nosso sistema (app da REEMAN, modo manual) — só assim dá pra confirmar
+  ou descartar de vez se é coisa nossa.
+
+**AINDA NÃO EXPLICADO** — pode não ter relação nenhuma com o software
+(desgaste mecânico, motor, algo físico) — usuário avisado que o bridge em
+si não tem como causar isso diretamente, só a hipótese de carga/contenção
+de recurso é plausível e foi mitigada por precaução.
+
+**Resolução do barulho**: usuário reiniciou o robô e o barulho sumiu — causa
+raiz não identificada, não necessariamente relacionada ao software (pode
+ter sido qualquer coisa física/mecânica que um reboot também "resolveria").
+Combinado deixar de lado até acontecer de novo, sem investigar mais por
+enquanto.
+
+## Bridge morre se a sessão SSH cair (descoberto 2026-09-23) — usar `nohup`
+
+Depois de reiniciar o robô (pro barulho estranho acima), o usuário subiu o
+bridge de novo via SSH (`python3 lifty_turn_check_bridge.py`, do jeito
+documentado) e, em seguida, **desconectou o cabo do SSH**. Resultado:
+`check-turn` parou de responder — `curl` na porta 8091 dava **"Connection
+refused"** (não timeout — porta fechada de vez), enquanto o dispatch
+service do robô (porta 80) continuava respondendo normal. Ou seja: só o
+bridge morreu, o robô em si estava saudável.
+
+**Causa**: o bridge roda em **primeiro plano** na sessão SSH, sem
+`nohup`/`screen`/`tmux` (assim de propósito, documentado como "manual, sob
+demanda"). Fechar a sessão SSH — inclusive só desconectando o cabo, sem
+`Ctrl+C` nenhum — manda um `SIGHUP` pro processo em primeiro plano, que
+morre junto com a sessão. Isso é comportamento padrão de shell, não bug do
+script.
+
+**Correção**: documentado no próprio `robot-bridge/lifty_turn_check_bridge.py`
+— se for deixar a sessão sem supervisionar (ou desconectar de propósito),
+subir com `nohup`:
+```
+nohup python3 lifty_turn_check_bridge.py > bridge.log 2>&1 &
+```
+Isso sobrevive à queda da sessão SSH, mas **continua sendo "manual, sob
+demanda"** — não virou systemd, não inicia sozinho no boot, e ainda precisa
+ser morto na mão (`pkill -f lifty_turn_check_bridge`) quando quiser parar
+de verdade. Só resolve a morte ACIDENTAL por desconexão.
+
+**Diagnóstico rápido pra próxima vez que "check-turn parou de funcionar"**:
+`curl http://192.168.5.195:8091/check-turn?angle=180` — se der "connection
+refused", o processo morreu (precisa subir de novo via SSH); se der
+timeout, é problema de rede/rota; se responder normal mas com valores que
+não fazem sentido, aí sim investigar a lógica. `server.py` não precisa
+reiniciar nesses casos — ele não guarda cache de disponibilidade do
+bridge, chama `robot_can_turn_safely()` do zero a cada vez.
+
+## Sondagem rápida (2s) RE-ATIVADA (2026-09-24) — travamento real de campo confirmou o risco da reversão
+
+Depois de subir o bridge de novo (via `nohup`, ver seção acima), usuário
+reproduziu o MESMO travamento do incidente original — dessa vez no
+`virtual_676`. Diagnóstico com dados reais do robô (`error/records` +
+`task-record/page`), timeline exata:
+
+```
+07:42:52  usuário cancela a rota EXFtoEXF2MT7 (check-turn aprovou certo)
+07:42:57  AUTO_SYSTEM nativa (energy_...) nasce sozinha, fila vazia
+07:43:02  ROTATE_ERROR no virtual_676 -- 5s depois de nascer
+07:43:04  nossa supressão só alcança agora -- 7s depois, 2s TARDE DEMAIS
+```
+
+Confirma exatamente o "Bug 2" já diagnosticado no teste de campo de
+2026-09-23 (ver seção acima) — a sondagem normal de 4s (revertida naquele
+dia por precaução com o barulho estranho no robô) deixa uma janela real
+onde a `AUTO_SYSTEM` nativa nasce, tenta girar e trava ANTES da nossa
+supressão conseguir reagir.
+
+**Decisão do usuário, explícita, depois de pesar o trade-off**: o barulho
+estranho sumiu só com um reboot do robô — causa raiz nunca confirmada,
+pode não ter relação nenhuma com a frequência de sondagem. O risco de
+congelamento (o problema central que todo esse projeto existe pra evitar)
+é concreto, recorrente, e mais grave. **Re-ativada a sondagem rápida
+(`CANCEL_PENDING_POLL_INTERVAL_SECONDS`, 2s) enquanto o robô está ocioso e
+não carregando** — mesmo código que tinha sido revertido em 2026-09-23,
+restaurado.
+
+**Continua sendo mitigação, não eliminação**: não existe (procurado, não
+achado) uma forma de ser avisado no INSTANTE que a `AUTO_SYSTEM` nasce —
+só sondagem periódica. 2s encolhe a janela pela metade, mas se o giro
+travar em menos de ~2s da criação, ainda escapa. Se acontecer de novo
+mesmo com a sondagem rápida, o próximo passo é reconsiderar se vale a pena
+manter esse método (retorno pra carga assumido) ou reverter pro
+`f244ca9` (só o cancelamento adiado, sem esse jogo de corrida com a
+AUTO_SYSTEM) — combinado com o usuário como alternativa em aberto.
+
+## obs_3d ligado/desligado durante o giro inicial pra energia (IMPLEMENTADO 2026-09-24, AINDA NÃO VALIDADO EM CAMPO)
+
+**Novo sintoma relatado**: com o check-turn dando aval e a task de ir pra
+`energia` disparando, o robô às vezes gira poucos graus, para, tenta de
+novo, e fica **em loop de ajuste de ângulo sem nunca completar o giro nem
+travar de vez** (variante do congelamento original — antes ele travava
+seco, agora fica reiniciando a tentativa). Hipótese do usuário: o sensor de
+obstáculo 3D (câmera de profundidade) está configurado sensível demais
+naquele ponto específico — o `check:turn_angle` confirma que o MAPA
+ESTÁTICO tem espaço, mas o sensor AO VIVO trava o giro mesmo sem colisão
+real (mesmo padrão de falso-positivo já discutido no "Problema 1" bem
+antes nessa conversa).
+
+**Descoberta ao vivo** (`rostopic list -v | grep -iE "obs|avoid|3d"`, via
+SSH): `/robot_api/set_obs3d_switch [std_msgs/Bool]` — mesmo namespace
+oficial `/robot_api/*` do `turn_check_angle` já validado, tipo de mensagem
+padrão, publisher único (sem par de confirmação como o turn_check tem —
+é só um "liga/desliga", não precisa esperar resposta). Batia exatamente com
+o `obs_3d[on/off]` documentado no `SLAM+3.0+API-en.pdf` ("Unique to
+Forklift" — bate com nosso robô). Também apareceram `/robot_api/
+set_avoid_switch` [Float32] e `/robot_api/set_obs3d_param` [Int32]
+(candidatos a `avoid_obstacle`/`avoid:distance`, não usados por enquanto)
+e `/avoid_distance` [`yoyo_msgs/AvoidDistance`] — esse último é tipo de
+mensagem CUSTOMIZADO da REEMAN, então descartado de propósito (viola a
+regra de só usar tipos padrão do ROS no bridge).
+
+**Duas condições inegociáveis, pedidas explicitamente pelo usuário
+2026-09-24**:
+1. Nunca desligar de forma permanente — sempre religar sozinho.
+2. Nunca alterar arquivo nenhum do robô da REEMAN.
+3. (Adicionada durante a implementação, também exigida pelo usuário) — o
+   check-turn só vale pra posição EXATA onde foi perguntado; se o robô se
+   mexeu entre a pergunta e o disparo de verdade, a resposta não pode ser
+   usada — precisa perguntar de novo.
+
+**Implementação**:
+- `robot-bridge/lifty_turn_check_bridge.py` — novo endpoint `GET
+  /obstacle-3d?on=1|0`, publica `Bool` em `/robot_api/set_obs3d_switch`,
+  sem lock (publish simples, sem corrida possível). Commitado e pushado
+  isolado (`b8d6188`) pra continuar baixável via `curl` do raw GitHub, sem
+  tocar no resto do trabalho em andamento (`server.py` continua sem
+  commit, mantendo a opção de reverter tudo pro `f244ca9`).
+- `server.py`:
+  - `_set_obs3d_switch(on)` — chama o endpoint novo, fail-open (melhor
+    esforço, só loga se falhar).
+  - `robot_pose()` — `{x,y,theta}` via `/reeman/pose` (SLAM WEB API, já
+    alcançável sem bridge).
+  - `_poses_match(a, b)` — confirma posição igual dentro de uma tolerância
+    (`OBS3D_POSITION_MATCH_TOLERANCE_METERS`=0.15m,
+    `OBS3D_POSITION_MATCH_TOLERANCE_DEGREES`=5°).
+  - `_dispatch_charge_task_with_obs3d_bracket()` — desliga o sensor,
+    dispara a task, sonda `robot_pose()` a cada 0.5s até `theta` ficar
+    estável por 2 leituras seguidas (giro terminou) OU até
+    `OBS3D_DISABLE_MAX_SECONDS` (teto de segurança, 15s) — religa no
+    `finally`, SEMPRE, mesmo se o disparo falhar ou a leitura de pose
+    falhar no meio do caminho.
+  - `_try_dispatch_auto_charge()`: captura `robot_pose()` ANTES do
+    check-turn e de novo bem antes do disparo de verdade; se as duas
+    leituras não baterem (`_poses_match`), descarta a resposta do
+    check-turn e devolve `False` — o próximo ciclo pergunta tudo de novo do
+    zero. Só chama o bracket acima quando a posição foi confirmada igual.
+    Como o bracket pode levar até 15s de verdade, o disparo agora acontece
+    FORA do `QUEUE_LOCK` (antes era uma chamada rápida, dentro do lock) —
+    se chegar trabalho de verdade nesse meio-tempo, a `autoChargeTask`
+    (já criada no robô) é cancelada em vez de rastreada (trabalho real tem
+    prioridade).
+
+**Escopo deliberadamente restrito**: só a rota de retorno pra `energia`
+(`_try_dispatch_auto_charge`) passa por esse bracket — rotas normais
+(`_try_dispatch_current`) NÃO desligam sensor nenhum, porque esse sintoma
+nunca foi visto nelas.
+
+**Testado isolado** (stub completo): posição igual → dispara normal, obs3d
+desliga antes e religa depois do disparo; posição mudou → aborta sem tocar
+no sensor nem criar task nenhuma; falha no disparo → sensor religa mesmo
+assim (garantia do `finally`); rota real chega durante o bracket → a
+charge task órfã (já criada no robô) é cancelada em vez de ficar
+rastreada.
+
+**AINDA NÃO VALIDADO EM CAMPO** — bridge commitado/pushado, falta o
+usuário baixar a versão nova no robô (`pkill` + `curl` + `nohup`, ver
+instruções de redeploy) e testar no ponto exato onde o sintoma apareceu.
+
+## Dois bugs de campo (2026-09-24) — aviso preso no tablet + AUTO_SYSTEM oscilando
+
+Usuário reproduziu o congelamento de novo, num ponto diferente. Dados reais
+(`error/records` + `task-record/page`) mostraram 10 tasks `AUTO_SYSTEM`
+nativas criadas e canceladas em ~30 segundos (08:26:47–08:27:14) — **zero**
+`LIFTY_AUTO_CHARGE_RETURN` no período. `queue_state.json` preso com
+`turnBlocked: true`, `autoChargeTask: {"taskName": null}`.
+
+**Bug 1 (corrigido) — aviso "aguarde" preso no tablet mesmo depois do robô
+chegar na carga**: se `autoChargeTask` fica RESERVADA (sem taskName,
+esperando o check-turn) e `charging_now` vira `True` nesse meio-tempo
+(usuário levou o robô na mão), o código antigo não tinha nenhum ramo que
+tratasse esse caso — nem o "idle sem carregar" nem o "chegou trabalho real"
+disparavam. Resultado: `autoChargeTask` continuava reservada pra sempre,
+`_try_dispatch_auto_charge` continuava tentando check-turn bem em cima do
+nicho apertado da base de carga (onde ele SEMPRE dá `false` — mesmo motivo
+do bypass em `_try_dispatch_current`), e `turnBlocked` nunca saía de `true`.
+**Corrigido**: bloco de gerência do retorno pra carga em `_queue_tick`
+reestruturado — sempre que `charging_now` é `True`, solta a reserva, limpa
+o cooldown, e limpa `turnBlocked` (só se `idle` também for `True`, pra
+nunca mexer no bloqueio de uma rota de verdade por engano).
+
+**Bug 2 (identificado, NÃO corrigido — decisão em aberto) — AUTO_SYSTEM
+"oscilando" enquanto nossa task espera**: enquanto `autoChargeTask` fica
+travada esperando check-turn (`turnBlocked=true`), a `AUTO_SYSTEM` nativa
+continua nascendo (a fila está genuinamente vazia) e
+`_suppress_native_auto_charge` cancela ela incondicionalmente, sem olhar
+se é seguro ou não. Cada ciclo nasce → começa a girar um pouco → é
+cancelada → nasce de novo — visualmente é exatamente o "ajustando ângulo e
+inicializando task em loop" que o usuário descreveu. Diferente do
+congelamento original (que travava e ficava parado pra sempre), esse é um
+looping ativo — mecanicamente diferente, mas igualmente exige intervenção
+manual.
+
+**Por que não é simples de corrigir**: o check-turn está dizendo a verdade
+— não tem espaço pra girar ali, nem pra AUTO_SYSTEM nem pra nossa task.
+Parar de suprimir a AUTO_SYSTEM quando `turnBlocked` está ativo volta a
+arriscar o congelamento ORIGINAL (ela pode travar de vez, sem
+autorrecuperação, como no primeiro incidente). Continuar suprimindo
+incondicionalmente é o que causa a oscilação. Nenhuma das duas é
+claramente melhor — é uma escolha de qual comportamento incomoda menos,
+em aberto com o usuário.
+
+**Ideia ainda não avaliada**: `check:turn_angle` sempre pergunta por
+180° (`TURN_CHECK_ANGLE_DEGREES`, fixo) — o pior caso, mesmo que o giro
+necessário de verdade pra virar rumo à energia seja bem menor. Calcular o
+ângulo REAL necessário (bearing até o ponto `energy` calibrado, a partir
+da pose atual) e checar esse ângulo específico em vez de sempre 180° podia
+desbloquear pontos onde um giro parcial seria seguro mesmo quando o giro
+completo não é. Não implementado ainda — precisa validar se isso faz
+sentido com o usuário antes.
+
+**IMPLEMENTADO 2026-09-24** — usuário escolheu essa opção pro Bug 2 (em vez
+de parar de suprimir a AUTO_SYSTEM, ou manter suprimindo sempre):
+- `robot_find_point_position(name, target_map)` — busca a posição
+  calibrada `{x,y}` de um ponto via `GET /map/point/list/{map}` (dispatch
+  service). `None` se não encontrar/der erro — quem chama cai pro
+  comportamento conservador.
+- `_required_turn_angle_degrees(pose, target_x, target_y)` — calcula o
+  ângulo de giro (graus, mesma convenção do `check:turn_angle`: positivo
+  esquerda, negativo direita) a partir da pose atual até um ponto, via
+  bearing (`atan2`) menos o heading atual, normalizado pra (-180, 180].
+- `_try_dispatch_auto_charge()`: em vez de sempre checar
+  `TURN_CHECK_ANGLE_DEGREES` (180°, pior caso fixo), calcula o ângulo real
+  necessário pra virar rumo ao `energy` a partir da pose capturada no
+  início da função, e checa ESSE ângulo. Se não conseguir calcular (ponto
+  não encontrado, erro de rede, pose indisponível), cai pro 180° de
+  sempre — nunca assume um ângulo menor sem confirmar de verdade.
+
+**Testado isolado**: matemática do ângulo (ponto à frente/atrás/esquerda/
+direita, sempre normalizado em (-180,180]) e integração (usa o ângulo
+calculado quando consegue achar o ponto; cai pro 180° quando não consegue).
+
+**AINDA NÃO VALIDADO EM CAMPO** — precisa reproduzir o Bug 2 de novo (ou
+achar um ponto parecido) e confirmar se o ângulo real de fato costuma ser
+menor que 180° nesses casos, e se isso realmente evita a oscilação da
+AUTO_SYSTEM.
+
+## Retorno pra carga assumido pelo server.py — REMOVIDO (2026-09-24)
+
+**Motivo**: usuário reproduziu o Bug 2 de novo mesmo com o ângulo real
+implementado — dados reais confirmaram 15 tasks `AUTO_SYSTEM` nativas
+criadas/canceladas em 80 segundos (08:45:53–08:47:13) antes da nossa
+`LIFTY_AUTO_CHARGE_RETURN` finalmente conseguir disparar (08:47:13). Ou
+seja: o cálculo do ângulo real ajudou a eventualmente destravar, mas não
+evitou os 80 segundos de robô "gaguejando" (girando um pouco, parando,
+tentando de novo) antes disso — a oscilação em si continuou sendo o
+problema visível/disruptivo. Usuário: "eu me lembro dele estar funcionando
+melhor sem essa mudança" — decisão de **remover a feature inteira** e
+voltar a deixar a `AUTO_SYSTEM` nativa em paz (comportamento de antes de
+2026-09-23), aceitando o risco original de congelamento seco em vez do
+risco de oscilação contínua introduzido por tentar suprimir/substituir ela.
+
+**O que foi removido de `server.py`** (tudo o que existia desde "Retorno
+pra carga assumido pelo server.py" até "obs_3d ligado/desligado" e
+"ângulo real" acima, seções inteiras deste documento hoje ficam só como
+histórico do que foi tentado e por que não funcionou):
+- Constantes: `AUTO_CHARGE_POINT`, `AUTO_CHARGE_TASK_NAME`,
+  `AUTO_CHARGE_RETRY_COOLDOWN_SECONDS`, todas as `OBS3D_*`.
+- Funções: `_set_obs3d_switch`, `_obs3d_switch_url`, `robot_pose`,
+  `_poses_match`, `robot_find_point_position`,
+  `_required_turn_angle_degrees`, `_dispatch_charge_task_with_obs3d_bracket`,
+  `robot_create_and_run_charge_task`, `_suppress_native_auto_charge`,
+  `_try_dispatch_auto_charge`.
+- Campo `autoChargeTask`/`autoChargeRetryAfter` em `_empty_queue_state()`/
+  `queue_state.json`.
+- O bloco inteiro de gerência do retorno pra carga dentro de `_queue_tick`
+  (supressão + reserva/disparo + sondagem de status + cooldown +
+  `managing_auto_charge` no cálculo do intervalo rápido).
+- O cancelamento da `autoChargeTask` órfã dentro de `_try_dispatch_current`.
+- A limpeza de `autoChargeTask` no `_queue_emergency`.
+
+**O que foi MANTIDO, de propósito**:
+- `robot-bridge/lifty_turn_check_bridge.py` continua com o endpoint
+  `/obstacle-3d` (commit `b8d6188`, já pushado) — não faz mal nenhum ficar
+  ali disponível e sem uso; economiza a descoberta via `rostopic list -v`
+  se algum dia isso for retomado.
+- A instrução de usar `nohup` pra subir o bridge (sobrevive à queda da
+  sessão SSH) — problema real, independente dessa feature.
+- Check-turn no cancelamento (`f244ca9`, a base original).
+- Check-turn no início de rotas reais (`_try_dispatch_current`/
+  `_cancel_reserved_current_locked`), incluindo o bypass durante
+  `_robot_status_cache["charging"]` (ainda relevante: uma rota real pode
+  ser despachada com o robô em cima do `energy`, carregado pela
+  `AUTO_SYSTEM` nativa de novo).
+
+**Testado isolado**: suite completa re-executada confirmando que o que
+ficou (disparo de rota nova, `turnBlocked`, bypass durante carga,
+cancelamento de rota em andamento, tick com fila vazia) continua
+funcionando sem nenhum resquício do campo `autoChargeTask` no estado.
+
+**Estado da fila no robô agora**: idêntico ao que era antes de
+2026-09-23 — `AUTO_SYSTEM` nativa nasce e morre sozinha, sem nossa
+interferência nenhuma, com o risco de congelamento seco (`ROTATE_ERROR`
+sem autorrecuperação) que motivou tudo isso desde o início. **Não
+resolvido** — só decidido que, entre os dois males conhecidos
+(congelamento seco vs. oscilação), o primeiro incomoda menos por enquanto.
+
+## Varredura ao vivo: check-turn e ROTATE_ERROR são cálculos INDEPENDENTES (2026-09-24)
+
+Usuário pediu uma varredura via SSH enquanto o robô estava travado de novo
+no MESMO ponto do primeiro incidente (`virtual_673`). `rosnode info
+main_forklift_node` revelou:
+- Esse nó SUBSCREVE `/robot_api/turn_check_angle` e PUBLICA `/robot_api/
+  turn_check_ok` — ele é quem calcula a resposta do nosso check-turn.
+- Também subscreve `/robot_api/set_obs3d_switch` e `/avoid_distance`.
+- Mas é um nó **separado** do `/move_base` (o motor de navegação de
+  verdade, com o `TebLocalPlannerROS` já mapeado em sessão anterior).
+
+**Testado ao vivo, com o robô parado no ponto**: `check-turn` respondeu
+`safe: true` em TODOS os ângulos testados (180°, 90°, -90°, 45°, -45°,
+20°, -20°) — e mesmo assim a task trava com `ROTATE_ERROR` nesse ponto.
+Desligar o `obs3d` de propósito (com a task ainda ativa) **não teve efeito
+nenhum** — task continuou `ASSIGNED`/`start:None`, pose não mudou,
+nenhuma nova tentativa registrada.
+
+**Conclusão**: `check-turn` (calculado pelo `main_forklift_node`, usando
+scans/`avoid_distance`/`check_scan1_obstacles`) e o `ROTATE_ERROR` de
+verdade (quase certamente do `/move_base`/`TebLocalPlannerROS`, usando o
+costmap local alimentado pelos lidars `/scan`/`/scan2`) são **cálculos
+genuinamente independentes**, de nós diferentes. Isso explica de vez por
+que o check-turn pode dizer "seguro" com confiança e a navegação discordar
+na hora de executar — nunca estavam calculando a mesma coisa. `obs3d` só
+afeta o cálculo do `main_forklift_node`; não tem influência nenhuma no que
+o `move_base` realmente usa pra decidir se o giro cabe.
+
+**Pergunta de acompanhamento do usuário** ("obs3d é uma câmera? pode ter
+zoado a calibração de pallet?"): não — `lx_camera_pallet_node` (câmera de
+reconhecimento de pallet) é um nó ROS **totalmente separado**, nunca
+recebeu comando nenhum nosso. `set_obs3d_switch` é um Bool ligado/desligado
+num processo já rodando — não reinicia câmera, não mexe em calibração
+salva em disco, não persiste nada. Sensor já foi religado antes de
+qualquer teste posterior.
+
+**Alavanca mais funda, cogitada e descartada**: `/move_base/local_costmap/
+obstacle_layer/enabled` via `dynamic_reconfigure` afetaria de verdade o
+`ROTATE_ERROR` (é a fonte real), mas desligar isso cega o robô pra
+QUALQUER obstáculo, em QUALQUER movimento — não só durante o giro, e não
+só uma câmera secundária como o `obs3d`, é a proteção principal (lidar)
+inteira. Descartado por risco desproporcional; usuário optou por corrigir
+via calibração/rota física em vez disso (mesmo caminho que já resolveu o
+`GENERATE_PATH_UNKNOWN_ERROR` antes).
+
+## Destravamento manual do ROTATE_ERROR via `cmd/turn` (IMPLEMENTADO 2026-09-24, baseado em validação de campo do usuário)
+
+**Achado de campo do usuário, decisivo**: girar o robô manualmente (modo
+manual, ~180°) nesses pontos travados **sempre destrava a navegação**,
+mesmo com o check-turn já tendo validado o giro antes de travar — combina
+com a descoberta acima (o travamento é do `/move_base`, não falta de
+espaço real). Usuário pediu pra automatizar exatamente essa correção
+manual, incluindo um refinamento importante: **alinhar com o ÚLTIMO NÓ
+CALIBRADO que o robô percorreu, não com o destino final**. Exemplo do
+usuário: "robô parou entre HCD -> P15, sentido P15, ele deve se alinhar
+com o HCD" — a orientação da ARESTA do grafo fixo (refletida no `theta`
+calibrado dos nós) é o que importa pra estar "alinhado com a rota", não um
+rumo em linha reta até um destino distante (que pode apontar pra qualquer
+direção, sem relação com a aresta local).
+
+**Aproximação prática adotada**: como o `ROTATE_ERROR` não informa quais
+dois nós formam a aresta onde o `virtual_NNN` travou (diferente do
+`GENERATE_PATH_UNKNOWN_ERROR`, que menciona os dois, ex: "P16 -> HCD"), a
+solução foi achar o **ponto calibrado MAIS PRÓXIMO** da posição atual do
+robô (`GET /map/point/list/{map}`, já alcançável sem bridge) — como as
+arestas do grafo fixo costumam ser curtas, o ponto mais próximo tende a
+ser uma das duas pontas da aresta onde o robô travou — e usar o `theta`
+**próprio** desse ponto (já calibrado com a orientação da aresta) como
+ângulo alvo, em vez de calcular um rumo até ele.
+
+**Implementação (`server.py`)**:
+- `robot_fetch_recent_error_records(size)` — `GET /error/records`.
+- `robot_pose()` — `{x,y,theta}` via `/reeman/pose` (sem bridge).
+- `robot_find_nearest_point(pose, target_map)` — `{name,x,y,theta}` do
+  ponto calibrado mais próximo, via `/map/point/list/{map}` (sem bridge).
+- `_normalize_angle_degrees(delta_radianos)` — normaliza uma diferença de
+  ângulo pra graus em (-180, 180].
+- `_last_handled_rotate_error_id` (dict em memória, não persistido —
+  reinício do servidor só reseta essa otimização) — evita reagir à MESMA
+  ocorrência de erro duas vezes.
+- `_recover_from_rotate_error_if_stuck()`: detecta um `ROTATE_ERROR` novo
+  → cancela a task travada (`robot_find_active_charge_task_id` +
+  `robot_cancel_task_record`) → freia navegação (`robot_stop_navigation`)
+  → lê pose → acha o nó calibrado mais próximo → calcula o ângulo até o
+  `theta` dele → confirma com `robot_can_turn_safely(angle)` **exigindo
+  `True` explícito** (diferente do resto do sistema — aqui estamos
+  comandando movimento ativamente, "não sei" não é suficiente pra agir) →
+  manda `POST /cmd/turn` (SLAM WEB API, já alcançável sem bridge) com
+  `direction`/`angle`/`speed=0.3 rad/s` (moderado, começa devagar).
+- Chamada em `_queue_tick`, logo após o tratamento de emergência, só
+  quando a fila está genuinamente ociosa e o robô não está carregando
+  (todo `ROTATE_ERROR` observado até agora foi da `AUTO_SYSTEM` nativa
+  indo pra carga).
+
+**Testado isolado** (8 cenários, stub completo): dispara giro quando
+seguro; não repete pro mesmo erro; NÃO gira se `check-turn` disser `False`
+OU `None` (exige `True` explícito); ignora erros que não são
+`ROTATE_ERROR`; direção correta (esquerda/direita) conforme o `theta` do
+nó mais próximo; desiste sem chamar `cmd/turn` se não achar nenhum ponto
+calibrado por perto.
+
+**Incidente de isolamento de teste, 2026-09-24 (corrigido)**: um teste
+mais antigo (`test_after_revert.py`, sobre outra coisa) chamava
+`_queue_tick()` sem mockar `robot_fetch_recent_error_records` — como essa
+função nova roda incondicionalmente dentro do tick, o teste **acabou
+chamando o robô real por engano** (achou um `ROTATE_ERROR` de verdade que
+tinha acabado de acontecer, tentou cancelar/frear/girar). Por sorte sem
+consequência: a task já tinha `FINISHED` sozinha antes, `robot_stop_
+navigation` estava mockado nesse teste (não chamou de verdade), e o
+`cmd/turn` foi rejeitado pelo robô (`HTTP 400`) antes de qualquer
+movimento real. **Corrigido**: todo teste que chama `_queue_tick()`
+precisa mockar `robot_fetch_recent_error_records` (lista vazia) pra nunca
+ativar esse destravamento sem querer.
+
+**AINDA NÃO VALIDADO EM CAMPO** — próximo `ROTATE_ERROR` real vai testar
+isso de ponta a ponta.
+
+## `cmd/turn` confirmado QUEBRADO; trocado por "empurrãozinho" via `cmd/speed` (2026-09-24)
+
+**3 tentativas reais registradas** (`id=3078,3082,3089`) confirmaram o
+destravamento funcionando como desenhado nos dois primeiros casos (check-
+turn recusou ângulos específicos, sistema corretamente não forçou nada) —
+mas no terceiro (`3089`, -73.6°, check-turn liberou), o `cmd/turn` foi
+**rejeitado pelo próprio robô**: `HTTP 400 {"error":"Request body is not
+correct.","error_code":"001"}`.
+
+**Investigação exaustiva do 400** — testado ao vivo, todas as variações
+falharam com o MESMO erro genérico:
+- Ângulo inteiro vs decimal, valores em string, corpo vazio,
+  `application/x-www-form-urlencoded` em vez de JSON, sem `Content-Type`.
+- **De dentro do próprio robô, via SSH em `localhost`** (descartando a
+  hipótese de que o endpoint só aceitaria chamada local, sugerida pela doc
+  escrever "http://loca**host**" só pra esse grupo de comandos) — mesmo
+  erro idêntico.
+- `cmd/move` (mesma família, mesmo padrão de doc) falha igual.
+- **Controle**: `cmd/cancel_goal` e `cmd/speed` funcionam normalmente,
+  exatamente como documentado — confirma que não é rede nem autenticação,
+  é esse comando específico (e `cmd/move`) que está quebrado/mal
+  documentado nesse firmware.
+
+**`cmd/speed` funciona, mas de um jeito imprevisível**: testado ao vivo
+com `vth=0.1` e depois `vth=0.15` por ~1-3s (reenviando a cada 250ms, como
+a doc pede pra movimento contínuo) — a pose **não mudou durante os
+comandos**, só um pouco **depois** de mandar o comando de parar (~1°,
+~4mm) — bem menos que a conta simples `velocidade × tempo` previa. Usuário
+confirmou **fisicamente** (ouviu a roda mexer, viu o robô girar um
+pouco) — o comando tem efeito real, só que atrasado/amortecido de um jeito
+que não dá pra modelar com precisão a partir desses testes.
+
+**Decisão do usuário, importante**: não precisa ser um ângulo exato — um
+giro pequeno e impreciso já é suficiente pra quebrar o travamento (mesmo
+espírito do giro manual de 180° que já funcionava: o que importa é sair do
+estado travado, não acertar um ângulo específico). Isso elimina a
+necessidade de calcular tempo pra um ângulo preciso — só a DIREÇÃO
+(esquerda/direita) importa.
+
+**Implementação nova** (substitui o `cmd/turn`):
+- `_send_rotate_nudge(direction_sign)` — manda `cmd/speed` com `vx:0,
+  vth:±0.15` repetido a cada 0.25s por 3s fixos (mesmos valores do teste
+  que girou de verdade), sempre com um `finally` que garante um comando
+  final `vth:0` (parar), mesmo se algo falhar no meio.
+- `_recover_from_rotate_error_if_stuck()`: continua achando o nó calibrado
+  mais próximo e calculando o ângulo até o `theta` dele, mas agora só usa
+  o **sinal** (direção) — pergunta pro check-turn um ângulo CONSERVADOR
+  fixo (`ROTATE_ERROR_NUDGE_CHECK_ANGLE_DEGREES = 20°`) nessa direção (não
+  o ângulo real, que pode ser bem maior) antes de empurrar.
+
+**Testado isolado** (7 cenários): direção correta (esquerda/direita)
+conforme o nó mais próximo; sempre termina com `vth:0`; nunca empurra se
+check-turn disser `False` ou `None`; ignora erros que não são
+`ROTATE_ERROR`; não repete pro mesmo erro; **mesmo com falha de rede no
+meio do envio, o comando de parar ainda é tentado** (garantia do
+`finally`).
+
+**AINDA NÃO VALIDADO EM CAMPO** — próximo `ROTATE_ERROR` real testa essa
+versão de ponta a ponta.
+
+## Cancelamento antes do pickup via alinhamento de docking (2026-09-24)
+
+**Motivação**: o cancelamento adiado até giro seguro (ver acima) usa o
+check-turn (`main_forklift_node`) como referência de "posso cancelar aqui
+sem travar o robô?" — mas já vimos (ver "Varredura ao vivo" acima) que o
+check-turn e a navegação de verdade (`/move_base`/TEB) são cálculos
+INDEPENDENTES que podem divergir. O usuário descreveu um processo físico
+que é **inerentemente mais confiável** pra decidir quando é seguro cancelar
+uma rota ANTES do pickup (rota ainda indo pegar o pallet, `pickupCleared`
+ainda `False`):
+
+1. O robô roda a rota até chegar em cima do **docking point** — nomenclatura
+   fixa `"H" + nome do ponto de pallet` (ex: pickup `"CD"` → docking
+   `"HCD"`; explica referências antigas tipo "P16 -> HCD" em erros de
+   `GENERATE_PATH_UNKNOWN_ERROR`).
+2. Em cima do docking point, o robô **gira pra alinhar os garfos** com o
+   ponto de pallet (não é um alinhamento perfeito). Esse giro é parte da
+   sequência normal e confiável do robô — bem diferente de forçar um giro
+   ad-hoc (ver seção acima), não tem risco de `ROTATE_ERROR`.
+3. Assim que alinha, o **reconhecimento de câmera começa quase
+   instantaneamente** — a partir daí não dá mais pra cancelar o pickup.
+
+Ideia do usuário: em vez de perguntar "posso girar?" pro check-turn,
+pergunta "o robô já chegou nessa fase específica (alinhamento no docking)
+e ainda não passou do ponto de não-retorno?" — usando só pose + posições
+calibradas dos pontos, sem nenhuma dependência de sensor novo.
+
+**`dock_state` (ROS, `driver_msgs/ForkliftStatus`) descartado como opção**
+— existe de verdade no robô (`main_forklift_node` assina), mas exige um
+tipo de mensagem CUSTOM da REEMAN, violando o princípio do bridge de só
+usar tipos `std_msgs` padrão. Usuário: "melhor não usar ele" — decidiu
+descrever o processo físico pra eu montar a detecção com as ferramentas que
+já temos (pose, `/map/point/list`).
+
+**Detecção implementada** (`server.py`):
+- `robot_find_point_position(name, target_map)` — busca um ponto calibrado
+  por NOME EXATO (diferente de `robot_find_nearest_point`, que busca por
+  proximidade — aqui já sabemos exatamente quais pontos queremos: `"H" +
+  pickup` e o próprio `pickup`).
+- `_pre_pickup_cancel_ready(current)` — lê a pose atual, acha o docking
+  point e o ponto de pallet da rota, calcula o rumo esperado de alinhamento
+  (`atan2` do docking até o pallet) e devolve:
+  - `False` se o robô ainda está longe do docking point (>
+    `PRE_PICKUP_CANCEL_PROXIMITY_METERS = 1.5m` — evita falso-positivo de
+    "por acaso apontando pro rumo certo" enquanto ainda está em trânsito
+    normal, longe do docking);
+  - `True` se está perto E a diferença angular pro rumo esperado já é ≤
+    `PRE_PICKUP_CANCEL_ALIGNMENT_MARGIN_DEGREES = 30°` — margem pedida pelo
+    usuário ("faltando uns 30"), dá tempo de cancelar antes da câmera
+    travar o pickup;
+  - `None` se não deu pra calcular (pose indisponível, ou os pontos
+    "H<pickup>"/pickup não existem no mapa).
+- `_current_route_cancel_ready(current, pickup_cleared)` — unifica as DUAS
+  estratégias como a lógica GERAL de cancelamento (pedido explícito do
+  usuário: "Vamos no momento implementar isso como lógica geral de
+  cancelamento"):
+  - **ANTES** do pickup (`pickup_cleared=False`): usa
+    `_pre_pickup_cancel_ready`; se vier `None` (pontos/pose indisponíveis),
+    cai pro check-turn como rede de segurança, em vez de travar o
+    cancelamento pra sempre.
+  - **DEPOIS** do pickup (carregando o pallet): continua com o check-turn
+    de sempre — não existe um "docking point" equivalente nesse trecho, e
+    o usuário não decidiu ainda se vai permitir cancelamento automático
+    aqui além do que já existia ("nem sei se tem como fazer uma task só de
+    descarregar — a estrutura exige pickup+dropoff").
+- Os dois pontos de chamada do check-turn no fluxo de cancelamento
+  (`_queue_cancel_current`, o handler HTTP, e o bloco `cancelPending` de
+  `_queue_tick`) agora chamam `_current_route_cancel_ready` no lugar de
+  `robot_can_turn_safely()` direto.
+- `_cancel_poll_interval(cancel_pending, pickup_cleared)` — enquanto
+  `cancelPending` está esperando a janela ANTES do pickup, sonda bem mais
+  rápido (`PRE_PICKUP_CANCEL_POLL_INTERVAL_SECONDS = 0.5s`, contra os 2s do
+  `CANCEL_PENDING_POLL_INTERVAL_SECONDS` comum) — é uma corrida contra o
+  reconhecimento de câmera, que o usuário descreveu como "quase
+  instantâneo" depois do alinhamento; um intervalo de 2s podia perder a
+  janela de 30° inteira.
+
+**Testado isolado** (17 cenários, `robot_find_point_position`,
+`_pre_pickup_cancel_ready`, `_current_route_cancel_ready`,
+`_cancel_poll_interval`): nome exato encontrado/não encontrado/rede falha;
+`None` em cada motivo (pose, docking ausente, pallet ausente); `False`
+longe do docking; `True`/`False` dentro/fora da margem angular perto do
+docking; pós-pickup nunca chama o cálculo de alinhamento; pré-pickup
+`None` cai pro check-turn; intervalo de sondagem rápido só quando pendente
+E antes do pickup.
+
+**AINDA NÃO VALIDADO EM CAMPO** — decisão do usuário: "vamos começar
+testando isso... se for validado, eu penso numa alternativa" (implica que
+o `dock_state`/outra abordagem pode voltar à mesa se isso não funcionar na
+prática).
+
+### 1ª tentativa de campo (2026-09-25) — FALHOU, câmera reconheceu antes
+
+Usuário reportou que o robô entrou no modo de reconhecimento de câmera
+antes do cancelamento disparar (tarefa `EXFtoEXF2MT7`, id `67475`, PICKUP
+em `EXF` de 07:19:30 a 07:19:48 — o dispatch aceitou o cancelamento nesse
+intervalo, mas isso não garante que a câmera ainda não tivesse começado o
+reconhecimento fisicamente).
+
+**Lição sobre observabilidade**: o código novo não tinha NENHUM `print` —
+diferente do resto do projeto (ex. `_recover_from_rotate_error_if_stuck`),
+não deixou rastro nenhum no console. Sem log, a única evidência disponível
+depois do fato foi reconstruída por fora, direto da dispatch API
+(`task-record/page`, `action-record/list/{id}`) — dá o resultado final
+(CANCELLED), mas não a geometria (distância/ângulo) no momento da decisão.
+**Corrigido**: `_pre_pickup_cancel_ready` agora imprime a cada chamada
+`dist ao docking` e `diff angular` calculados, e `_current_route_cancel_
+ready` imprime quando decide cancelar de verdade — a próxima tentativa
+real vai ter esse rastro completo no console do server.py.
+
+**Bug real encontrado ao investigar** (mesmo sem log da tentativa em si):
+o alvo de alinhamento usado (`expected_theta`) era o **rumo geométrico
+calculado por `atan2` entre o docking point e o pallet point** — não o
+`theta` PRÓPRIO calibrado do ponto de pallet. Conferido ao vivo no par
+EXF/HEXF (a rota que falhou): `theta` calibrado de ambos os pontos é
+**-179.8°**, enquanto o rumo geométrico HEXF→EXF (`atan2`) dava **0.2°** —
+**180° de diferença**. É exatamente o mesmo erro (e a mesma correção) que
+o usuário já tinha apontado antes pra `_recover_from_rotate_error_if_stuck`
+("alinhar com o theta PRÓPRIO do ponto calibrado, não um rumo calculado
+até ele" — ver seção acima). Com o alvo invertido, a checagem de margem de
+30° só batia (se batesse) bem depois do robô já ter girado quase todo o
+caminho de verdade — plausível causa da câmera ganhar a corrida.
+
+**Corrigido**: `_pre_pickup_cancel_ready` agora usa `pallet["theta"]`
+diretamente como alvo, sem nenhum cálculo de rumo geométrico (o `atan2`
+foi removido). Suíte de testes isolados atualizada pro mesmo contrato
+(alvo = theta do próprio ponto).
+
+**AINDA NÃO REVALIDADO EM CAMPO** — próxima tentativa real testa a correção
+E gera o log que faltou na primeira vez.
+
+### 2ª tentativa de campo (2026-09-25, mesmo dia) — VALIDADO, funciona muito bem
+
+Usuário confirmou ao vivo, depois de restart do server.py com a correção
+acima: "ficou simplesmente sensacional. Funciona MUITO bem."
+
+**Cenário extra observado e importante**: quando o robô entra NUM LOTE
+VERTICALMENTE, ele já entra alinhado com o pallet (nunca precisa girar
+nesses casos — segundo o usuário, "ele sempre entra alinhado no lote"). O
+cancelamento pré-pickup funcionou nesse cenário SEM giro nenhum (a checagem
+de margem já bate de cara, `dist`/`diff` dentro do limite assim que chega).
+Isso é um sinal de segurança a mais, não só uma confirmação de
+funcionamento: elimina o risco de o robô girar durante o cancelamento e
+bater em pallets que possam estar em **lotes laterais adjacentes** — o giro
+só acontece quando o alinhamento de verdade exige (entrada não-vertical),
+nunca à toa.
+
+Feature considerada **estável e validada** a partir daqui.
+
 

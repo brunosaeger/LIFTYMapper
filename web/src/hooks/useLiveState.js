@@ -24,7 +24,7 @@ async function jsonRequest(path, options) {
 // dispositivos nunca "decidem" a mesma coisa duas vezes (ver server.py,
 // QUEUE_LOCK).
 export function useLiveState() {
-  const [state, setState] = useState({ currentRoute: null, pendingRoute: null, routeQueue: [], occupied: [], emergency: false, cancelPending: false, cancelPendingMessage: null, robotCharging: null, robotBattery: null });
+  const [state, setState] = useState({ currentRoute: null, pendingRoute: null, routeQueue: [], occupied: [], emergency: false, cancelPending: false, cancelPendingMessage: null, turnBlocked: false, turnBlockedMessage: null, robotCharging: null, robotBattery: null });
   const [status, setStatus] = useState('loading'); // loading | idle | error
 
   const refresh = useCallback(() => {
@@ -144,6 +144,12 @@ export function useLiveState() {
     // espera uma janela segura pra girar antes de cancelar de verdade.
     cancelPending: state.cancelPending,
     cancelPendingMessage: state.cancelPendingMessage,
+    // Check-turn no INÍCIO de uma tarefa (ver server.py, "check-turn no
+    // início de tarefas") — true enquanto a currentRoute está RESERVADA
+    // (ainda não foi disparada pro robô) esperando uma janela segura pra
+    // girar antes de começar a se mover.
+    turnBlocked: state.turnBlocked,
+    turnBlockedMessage: state.turnBlockedMessage,
     // null = ainda não sabemos (servidor não conseguiu falar com o robô
     // ainda); true/false = carregando ou não, ver server.py _refresh_robot_status.
     robotCharging: state.robotCharging,
