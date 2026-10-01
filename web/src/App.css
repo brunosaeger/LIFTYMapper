@@ -2,7 +2,11 @@
   position: relative; /* âncora do .closeup-status-banner (centro-inferior do mapa) */
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  /* --app-vh (ver main.jsx, setRealViewportHeight): altura medida de
+     verdade via window.innerHeight, não o 100vh da CSS (que em alguns
+     WebViews Android inclui área coberta pela barra de navegação do
+     sistema). 100vh fica só como fallback antes do JS rodar. */
+  height: var(--app-vh, 100vh);
   width: 100vw;
 }
 
@@ -102,6 +106,35 @@
   height: 16px;
 }
 
+/* Tela cheia (ver Toolbar.jsx) — mesmo visual do botão de tema ao lado. */
+.toolbar__fullscreen {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--panel-line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.toolbar__fullscreen:hover {
+  color: var(--text-primary);
+  background: var(--panel-raised-hi);
+}
+
+.toolbar__fullscreen[aria-pressed="true"] {
+  color: var(--accent-cyan);
+  border-color: var(--accent-cyan-dim);
+}
+
+.toolbar__fullscreen svg {
+  width: 16px;
+  height: 16px;
+}
+
 .toolbar__save {
   font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
   font-size: 12px;
@@ -128,6 +161,45 @@
 .toolbar__dev.is-active {
   border-color: var(--accent-cyan);
   color: var(--accent-cyan);
+}
+
+/* "Limit breaker" (modo desenvolvedor): cara do Doomguy, sorri quando ligado.
+   Ligado ganha borda/brilho vermelho pulsando — é um estado perigoso que não
+   pode passar despercebido. */
+.toolbar__limit {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  padding: 2px;
+  border: 1px solid var(--panel-line);
+  border-radius: 6px;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.toolbar__limit img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated; /* pixel art nítido, sem borrar */
+  pointer-events: none;
+}
+
+.toolbar__limit.is-active {
+  border-color: var(--state-error);
+  background: rgba(220, 38, 38, 0.18);
+  animation: limit-breaker-glow 1.1s ease-in-out infinite;
+}
+
+@keyframes limit-breaker-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.0); }
+  50% { box-shadow: 0 0 10px 2px rgba(239, 68, 68, 0.75); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toolbar__limit.is-active { animation: none; box-shadow: 0 0 0 2px var(--state-error); }
 }
 
 .toolbar__user {
@@ -253,7 +325,7 @@
    inteira — enquanto não há sessão, MainApp não chega a montar (ver
    App.jsx), então não existe "atrás" pra mostrar. */
 .login-screen {
-  height: 100vh;
+  height: var(--app-vh, 100vh); /* ver .app acima e main.jsx, setRealViewportHeight */
   width: 100vw;
   display: flex;
   align-items: center;
@@ -389,6 +461,17 @@
   background: var(--accent-amber);
 }
 
+/* "Voltando à Energia" (3º estado, ver RobotStatusBanner.jsx) — cor própria
+   (laranja, mesma família do Close Up) pra não confundir com "Recarregando"
+   (âmbar, já chegou e carregando de verdade) nem com "Em Operação" (mint). */
+.robot-status-banner.is-returning .robot-status-banner__status {
+  color: var(--accent-orange);
+}
+
+.robot-status-banner.is-returning .robot-status-banner__dot {
+  background: var(--accent-orange);
+}
+
 /* Ícone de pilha + % (ver BatteryIcon/RobotStatusBanner.jsx) — cor do
    ícone e do número mudam com o nível (vermelho/âmbar/mint), calculado
    inline via style (não dá pra fazer isso só com classe fixa, o nível é
@@ -436,6 +519,73 @@
 
 .closeup-status-banner__prefix {
   color: var(--accent-cyan); /* "azul mint vibrante" */
+}
+
+/* Sidebar larga (Ponto a Ponto/Fila, 448px): centraliza no mapa de verdade. */
+.closeup-status-banner--wide {
+  left: calc(50% - 224px);
+}
+
+/* "Visualizar tarefa": ganha a linha ORIGEM → DESTINO clicável — então
+   precisa receber toque (o banner normal é só informativo). */
+.closeup-status-banner--task {
+  pointer-events: auto;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.closeup-status-banner__task {
+  display: flex;
+  align-items: center;
+}
+
+.closeup-status-banner__task-part {
+  display: flex;
+  align-items: center;
+}
+
+.closeup-status-banner__arrow {
+  margin: 0 10px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+/* Cada ponta é "delimitada e clicável": pílula com borda na cor do papel
+   (origem ciano, destino âmbar — as mesmas cores do destaque no mapa); a
+   que está sendo vista agora fica preenchida. */
+.closeup-status-banner__endpoint {
+  min-height: 36px;
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 2px solid currentColor;
+  background: rgba(0, 0, 0, 0.25);
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 14px;
+  font-weight: 700;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.closeup-status-banner__endpoint--pickup { color: var(--accent-cyan); }
+.closeup-status-banner__endpoint--dropoff { color: var(--accent-amber); }
+
+.closeup-status-banner__endpoint.is-active {
+  background: currentColor;
+}
+
+.closeup-status-banner__endpoint--pickup.is-active,
+.closeup-status-banner__endpoint--dropoff.is-active {
+  color: var(--panel-base);
+}
+
+.closeup-status-banner__endpoint--pickup.is-active { background: var(--accent-cyan); border-color: var(--accent-cyan); }
+.closeup-status-banner__endpoint--dropoff.is-active { background: var(--accent-amber); border-color: var(--accent-amber); }
+
+.closeup-status-banner__endpoint:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* --- banner "aguardando giro seguro" (cancelamento adiado) ---------------
@@ -645,6 +795,7 @@
      a isso (a maioria dos navegadores Android já entende essa env var). */
   padding-bottom: calc(16px + env(safe-area-inset-bottom, 32px));
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch; /* rolagem por toque mais confiável em WebViews Android mais simples/antigos (ex. Lenovo ZUI) */
   display: flex;
   flex-direction: column;
   gap: 24px;
@@ -656,7 +807,9 @@
    (barra de progresso, nomes em destaque) sem apertar. O conteúdo interno
    é flex/bloco normal, então acompanha a largura suavemente junto com a
    transition acima — sem precisar de transition por filho. */
-.sidebar--queue {
+.sidebar--queue,
+.sidebar--wide, /* Ponto a Ponto: mesma largura da Fila, pra caber a lista de "Tarefas aguardando envio" */
+.sidebar--history { /* pedido do usuário 2026-10-01: mesma largura de Fila/Ponto a Ponto, pra caber os filtros */
   width: 448px;
 }
 
@@ -880,6 +1033,156 @@
   background: var(--panel-raised-hi);
 }
 
+/* --- filtros do histórico de rotas (conta/data/horário) -------------------
+   Os 3 ícones ficam numa linha só, cada um dono do seu popover/busca
+   próprio (ver .history-panel__user-filter/.history-panel__clock abaixo) —
+   todos combinam entre si (ver HistoryPanel.jsx, visibleRoutes: AND entre
+   os filtros ativos, não substituem um ao outro). */
+.history-panel__filters {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.history-panel__icon-btn {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  padding: 0;
+}
+
+.history-panel__icon-btn.is-active {
+  color: var(--accent-cyan);
+  background: var(--accent-cyan-dim);
+}
+
+.history-panel__user-filter,
+.history-panel__clock {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+}
+
+/* Busca por conta (busto) — popover simples ancorado no ícone, flutua por
+   cima do resto do painel (não empurra o layout) pra não fazer a lista de
+   rotas "saltar" ao abrir/fechar a busca. */
+.history-panel__user-search {
+  position: absolute;
+  top: 32px;
+  left: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--panel-raised-hi);
+  border: 1px solid var(--panel-line);
+  border-radius: 8px;
+  padding: 8px;
+  width: 220px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.history-panel__user-input {
+  width: 100%;
+  background: var(--panel-base);
+  border: 1px solid var(--panel-line);
+  border-radius: 6px;
+  color: var(--text-primary);
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
+.history-panel__user-suggestions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 160px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.history-panel__user-suggestions button {
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.history-panel__user-suggestions button:hover {
+  background: var(--panel-raised);
+  color: var(--accent-cyan);
+}
+
+/* Horário (relógio) — mesmo espírito do popover de conta, mas com dois
+   <input type="time"> nativos (de/até) e um botão de fechar explícito (os
+   inputs nativos não têm "clicar fora fecha" óbvio no tablet, melhor dar
+   um jeito claro de confirmar e sair). */
+/* De/Até um embaixo do outro (pedido do usuário, 2026-10-01: "pra caber
+   melhor na tela" — lado a lado estourava a largura da sidebar com o
+   teclado/picker nativo de horário do Android). */
+.history-panel__time-popover {
+  position: absolute;
+  top: 32px;
+  left: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  background: var(--panel-raised-hi);
+  border: 1px solid var(--panel-line);
+  border-radius: 8px;
+  padding: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  white-space: nowrap;
+}
+
+.history-panel__time-popover label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.history-panel__time-popover input[type="time"] {
+  background: var(--panel-base);
+  border: 1px solid var(--panel-line);
+  border-radius: 6px;
+  color: var(--text-primary);
+  padding: 4px 6px;
+  font-size: 13px;
+  width: 100%;
+}
+
+.history-panel__time-popover-close {
+  align-self: flex-end;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent-cyan-dim);
+  color: var(--accent-cyan);
+}
+
 /* --- filtro por data (ícone de calendário, "Histórico de rotas") ---------
    O <input type="date"> real fica por baixo, invisível (opacity:0) mas
    ocupando o MESMO espaço do ícone — é ele quem recebe o toque/clique
@@ -893,7 +1196,6 @@
   align-items: center;
   gap: 8px;
   height: 28px;
-  margin-bottom: 10px;
 }
 
 .history-panel__date-input {
@@ -946,18 +1248,63 @@
   padding-right: 2px; /* respiro pra barra de scroll não colar no texto */
 }
 
+/* Virou <button> (clicar destaca origem/destino no mapa, ver
+   MainApp.jsx/HistoryPanel.jsx) — reset do visual padrão de botão, mesma
+   aparência de antes (era um <div>), só com cursor/hover/is-selected
+   novos. */
 .history-route {
+  display: block;
+  width: 100%;
+  text-align: left;
   border: 1px solid var(--panel-line);
   border-radius: 8px;
   padding: 8px 10px;
   background: var(--panel-base);
+  cursor: pointer;
+  font: inherit;
+}
+
+.history-route:hover {
+  border-color: var(--accent-cyan-dim);
+}
+
+.history-route.is-selected {
+  border-color: var(--accent-cyan);
+  background: var(--panel-raised-hi);
+}
+
+.history-route__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
 }
 
 .history-route__path {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
-  margin-bottom: 4px;
+}
+
+.history-route__tag {
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.history-route__tag--cancelled {
+  color: var(--state-error);
+  background: rgba(244, 91, 105, 0.15);
+}
+
+.history-route__tag--failed {
+  color: var(--accent-amber);
+  background: var(--accent-amber-dim);
 }
 
 .history-route__time {
@@ -1013,6 +1360,57 @@
   gap: 16px;
 }
 
+.users-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.users-panel__head .points-panel__title {
+  margin: 0;
+  flex: none;
+}
+
+/* Busca por nome (pedido do usuário, 2026-10-01) — mesmo visual geral dos
+   outros campos com ícone + input (ver .history-panel__calendar), mas
+   aqui o input fica visível (não é um <input type="date"> disfarçado). */
+.users-panel__search {
+  position: relative;
+  flex: 1;
+  max-width: 200px;
+  display: flex;
+  align-items: center;
+}
+
+.users-panel__search svg {
+  position: absolute;
+  left: 8px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.users-panel__search-input {
+  width: 100%;
+  background: var(--panel-base);
+  border: 1px solid var(--panel-line);
+  border-radius: 6px;
+  color: var(--text-primary);
+  padding: 6px 26px 6px 30px;
+  font-size: 13px;
+}
+
+.users-panel__search-clear {
+  position: absolute;
+  right: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px;
+}
+
 .users-panel__list {
   gap: 10px;
 }
@@ -1063,6 +1461,137 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.users-panel__role-toggles {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* --- KANBANS (restrição de usuário por grupo de lotes, pedido do usuário
+   2026-10-01, ver CONTEXT.md "Delimitação de usuários por grupo de lotes")
+   --------------------------------------------------------------------- */
+.users-panel__kanbans-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--panel-line);
+}
+
+.users-panel__kanbans-label {
+  font-family: 'Arial Black', 'Helvetica Neue', Arial, sans-serif;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.users-panel__kanbans-hint {
+  font-size: 11px;
+  color: var(--accent-amber);
+  margin: 0;
+}
+
+.users-panel__kanbans {
+  position: relative;
+}
+
+.users-panel__kanban-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.users-panel__kanban-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent-cyan-dim);
+  color: var(--accent-cyan);
+  font-size: 12px;
+  padding: 4px 6px 4px 10px;
+}
+
+.users-panel__kanban-chip-remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  font-size: 10px;
+}
+
+.users-panel__kanban-chip-remove:hover {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.users-panel__kanban-add {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--panel-line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 1;
+}
+
+.users-panel__kanban-add:hover {
+  color: var(--accent-cyan);
+  border-color: var(--accent-cyan-dim);
+}
+
+.users-panel__kanban-dropdown {
+  position: absolute;
+  top: 32px;
+  left: 0;
+  z-index: 5;
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+  width: 220px;
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--panel-raised-hi);
+  border: 1px solid var(--panel-line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.users-panel__kanban-dropdown button {
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.users-panel__kanban-dropdown button:hover {
+  background: var(--panel-raised);
+  color: var(--accent-cyan);
+}
+
+.users-panel__kanban-empty {
+  padding: 6px 8px;
   font-size: 12px;
   color: var(--text-muted);
 }
@@ -1177,6 +1706,16 @@
   color: var(--text-muted);
   margin-bottom: 10px;
   cursor: pointer;
+}
+
+/* Editando uma tarefa preparada: avulsa não vira grupo e vice-versa. */
+.ptp-bar__sequence.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ptp-bar__hint--editing {
+  color: var(--accent-cyan);
 }
 
 .ptp-bar__sequence-warn {
@@ -1431,6 +1970,15 @@
   color: var(--accent-amber);
 }
 
+/* "Enviado por: X" (pedido do usuário, 2026-10-01) — discreto de propósito,
+   não compete com o nome da rota (que já tem cor própria por variant). */
+.queue-route__user {
+  display: block;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
 /* Barra de "em andamento": não é uma % real (o robô nunca expõe progresso
    fino, ver CONTEXT.md) — é um indicador indeterminado, pulsando sem parar,
    só pra confirmar visualmente "a rota está rodando agora". */
@@ -1500,6 +2048,285 @@
 .queue-route__cancel--pending:hover {
   background: var(--accent-amber);
   color: var(--text-primary);
+}
+
+/* --- "Tarefas aguardando envio" (StagedTasksPanel.jsx) --------------------
+   Lista local do Ponto a Ponto: tarefas montadas ficam aqui até "Iniciar
+   tarefas". Barrinhas no mesmo espírito das do painel Fila; grupos de "Lotes
+   em sequência" num tracejado laranja que só se move inteiro. */
+.staged-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 16px;
+  border-top: 1px solid var(--panel-line);
+}
+
+.staged-panel__hint {
+  margin: 0;
+}
+
+.staged-list {
+  list-style: none;
+  margin: 0;
+  padding: 10px 8px 4px 0; /* topo: espaço pro rótulo do tracejado do 1º grupo */
+  display: flex;
+  flex-direction: column;
+  gap: 8px; /* usado no cálculo do arrasto (StagedTasksPanel, activateDrag) */
+  /* Sem rolagem própria de propósito: quem rola é o menu inteiro
+     (.sidebar), nativo, igual ao painel de marcações X. Uma rolagem dentro
+     da outra brigava com o dedo. */
+}
+
+/* Unidade arrastável (tarefa avulsa ou grupo). pan-y: deslizar o dedo na
+   vertical rola o menu normalmente (nativo). Só depois de SEGURAR parado
+   (~0,3s) é que vira arrasto — aí o componente trava a rolagem nativa até
+   soltar. */
+.staged-unit {
+  position: relative;
+  touch-action: pan-y;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  transition: transform 0.18s ease;
+}
+
+/* Logo depois de soltar numa posição nova: sem transição nesse frame, senão
+   as vizinhas "voltariam" do deslocamento temporário em vez de já estarem no
+   lugar novo. */
+.staged-list.is-settling .staged-unit {
+  transition: none;
+}
+
+/* Lugar de origem da que está sendo arrastada — ocupa espaço, invisível (a
+   "fantasma" segue o dedo, ver .staged-ghost). */
+.staged-unit.is-placeholder {
+  visibility: hidden;
+}
+
+.staged-task__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.staged-task {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 8px 8px 10px;
+  border-radius: 6px;
+  background: var(--panel-base);
+  border: 1px solid var(--panel-line);
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  /* Chegada: desliza da esquerda pra direita. `backwards` (não `both`) de
+     propósito — `both` deixaria o transform final "grudado" e brigaria
+     com qualquer transform depois. */
+  animation: staged-in 0.38s cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+  animation-delay: var(--staged-delay, 0ms);
+}
+
+@keyframes staged-in {
+  from { transform: translateX(-48px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .staged-task { animation: none; }
+  .staged-unit { transition: none; }
+}
+
+.staged-unit.is-selected .staged-task {
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 0 1px var(--accent-cyan) inset;
+}
+
+/* Primeira tarefa que obstrui um lote na ordem atual (validação igual à do
+   servidor, ver MainApp.jsx validateChain). */
+.staged-task.is-invalid {
+  border-color: var(--state-error);
+  box-shadow: 0 0 0 1px var(--state-error) inset;
+}
+
+.staged-task__order {
+  flex: none;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 5px;
+  border-radius: 11px;
+  background: var(--panel-raised-hi);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.staged-task__name {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 13px;
+  color: var(--accent-amber);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.staged-task__pallet {
+  flex: none;
+  position: relative;
+  width: 42px;
+  height: 28px;
+  padding: 0;
+  border-radius: 5px;
+  border: 1px solid var(--panel-line);
+  background-size: cover;
+  background-position: center;
+  cursor: pointer;
+}
+
+.staged-task__pallet:active {
+  transform: scale(0.94);
+}
+
+/* "Pallet de cima" (2º andar do azul). */
+.staged-task__pallet-top {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  padding: 1px 3px;
+  border-radius: 6px;
+  background: var(--accent-cyan);
+  color: var(--panel-base);
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.staged-task__remove {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--state-error);
+  font-weight: 700;
+}
+
+.staged-task__remove:hover,
+.staged-task__remove:active {
+  background: var(--state-error);
+  color: var(--text-primary);
+}
+
+/* Grupo de "Lotes em sequência": tracejado laranja, move inteiro. */
+.staged-group {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 6px 6px;
+  border: 2px dashed var(--accent-orange);
+  border-radius: 10px;
+  transition: box-shadow 0.15s ease;
+}
+
+.staged-unit.is-selected .staged-group {
+  box-shadow: 0 0 0 2px var(--accent-cyan-dim);
+}
+
+.staged-group__label {
+  position: absolute;
+  top: -8px;
+  left: 10px;
+  padding: 0 6px;
+  background: var(--panel-raised);
+  color: var(--accent-orange);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  line-height: 14px;
+}
+
+/* Prévia que segue o dedo. Levanta (cresce) ao completar o "segurar" e fica
+   semitransparente assim que começa a mover. */
+.staged-ghost {
+  position: fixed;
+  z-index: 950;
+  pointer-events: none;
+  list-style: none;
+  animation: staged-lift 0.14s ease-out forwards;
+  filter: drop-shadow(0 10px 18px rgba(0, 0, 0, 0.45));
+  transition: opacity 0.12s ease;
+}
+
+.staged-ghost.is-moving {
+  opacity: 0.7;
+}
+
+@keyframes staged-lift {
+  from { transform: scale(1); }
+  to { transform: scale(1.05); }
+}
+
+.staged-ghost .staged-task {
+  animation: none;
+  border-color: var(--accent-cyan);
+}
+
+.staged-panel__warn {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--state-error);
+}
+
+.staged-panel__warn--info {
+  color: var(--accent-amber);
+}
+
+.staged-panel__start {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid #15803d;
+  background: #16a34a;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.staged-panel__start:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Janelinha de troca de pallet (tocar no ícone da textura). */
+.staged-popover__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 960;
+}
+
+.staged-popover {
+  position: fixed;
+  padding: 12px;
+  border-radius: 10px;
+  background: var(--panel-raised);
+  border: 1px solid var(--panel-line);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
 }
 
 /* --- toast ------------------------------------------------------------ */

@@ -1,4 +1,6 @@
 import RobotStatusBanner from './RobotStatusBanner';
+import doomguyNormal from '../assets/doomguy-normal.png';
+import doomguyLimit from '../assets/doomguy-limit.png';
 
 const SAVE_LABEL = {
   loading: 'Carregando…',
@@ -7,7 +9,7 @@ const SAVE_LABEL = {
   error: 'Erro ao salvar',
 };
 
-export default function Toolbar({ mode, onModeChange, addTool, onStartAddPoint, onStartAddLot, onCancelAdd, saveStatus, theme, onToggleTheme, devMode, onDevButtonClick, user, onLogout, robotCharging, robotBattery }) {
+export default function Toolbar({ mode, onModeChange, addTool, onStartAddPoint, onStartAddLot, onCancelAdd, saveStatus, theme, onToggleTheme, isFullscreen, onToggleFullscreen, devMode, onDevButtonClick, limitBreaker, onToggleLimitBreaker, user, onLogout, robotCharging, robotBattery, robotReturningToCharge }) {
   return (
     <header className="toolbar">
       <div className="toolbar__brand">
@@ -19,7 +21,7 @@ export default function Toolbar({ mode, onModeChange, addTool, onStartAddPoint, 
           flutuando sobre o mapa) — posicionamento absoluto (ver App.css),
           então não se importa com a largura variável de .toolbar__modes/
           .toolbar__actions ao redor. */}
-      <RobotStatusBanner charging={robotCharging} battery={robotBattery} />
+      <RobotStatusBanner charging={robotCharging} battery={robotBattery} returningToCharge={robotReturningToCharge} />
 
       {/* "Editar pontos" é só modo desenvolvedor (ver MainApp.jsx:
           DEV_PASSWORD, botão "{ }" no fim da toolbar) — sem ele, mode nunca
@@ -115,7 +117,45 @@ export default function Toolbar({ mode, onModeChange, addTool, onStartAddPoint, 
             </svg>
           )}
         </button>
+        {/* Tela cheia (pedido do usuário, 2026-10-01) — preferência por
+            CONTA, igual ao tema (ver MainApp.jsx, wantsFullscreen/
+            saveFullscreen): fica vinculada à conta até desativar, não ao
+            tablet. `isFullscreen` é o estado DE FATO do navegador agora
+            (pode discordar brevemente da preferência — ver comentário em
+            MainApp.jsx sobre a exigência de gesto do usuário). */}
+        <button
+          type="button"
+          className="toolbar__fullscreen"
+          onClick={onToggleFullscreen}
+          title={isFullscreen ? 'Tela cheia — clique pra sair' : 'Entrar em tela cheia'}
+          aria-label={isFullscreen ? 'Sair da tela cheia' : 'Entrar em tela cheia'}
+          aria-pressed={!!isFullscreen}
+        >
+          {isFullscreen ? (
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9 3v4a1 1 0 0 1-1 1H4M15 3v4a1 1 0 0 0 1 1h4M9 21v-4a1 1 0 0 0-1-1H4M15 21v-4a1 1 0 0 1 1-1h4" />
+            </svg>
+          ) : (
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3" />
+            </svg>
+          )}
+        </button>
         <span className={'toolbar__save toolbar__save--' + saveStatus}>{SAVE_LABEL[saveStatus]}</span>
+        {/* "Limit breaker" (ver MainApp.jsx): só em modo desenvolvedor. Ligado,
+            cancelar a rota em andamento pula a espera de giro seguro. */}
+        {devMode && (
+          <button
+            type="button"
+            className={'toolbar__limit' + (limitBreaker ? ' is-active' : '')}
+            onClick={onToggleLimitBreaker}
+            aria-pressed={!!limitBreaker}
+            title={limitBreaker ? 'LIMIT BREAKER ligado — tocar pra desligar' : 'Limit breaker: cancelar sem espera de giro seguro'}
+            aria-label={limitBreaker ? 'Desligar limit breaker' : 'Ligar limit breaker'}
+          >
+            <img src={limitBreaker ? doomguyLimit : doomguyNormal} alt="" draggable="false" />
+          </button>
+        )}
         <button
           type="button"
           className={'toolbar__dev' + (devMode ? ' is-active' : '')}

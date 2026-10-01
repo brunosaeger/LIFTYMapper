@@ -7,8 +7,12 @@ import { displayCellName } from '../hooks/useCalibration';
 // altura no ponto de PICKUP pra alinhar o garfo corretamente; o de madeira
 // fica rente ao chão (altura 0, o comportamento que já existia antes dessa
 // feature). Azul vem selecionado por padrão porque é o mais comum na planta.
+// `editing`: null (montando uma tarefa nova), 'single' ou 'group' — tocou
+// numa barrinha de "Tarefas aguardando envio" (ver StagedTasksPanel) e está
+// alterando ela. Enviar vira Salvar, Limpar vira Cancelar edição, e o
+// checkbox de sequência trava (avulsa não vira grupo e vice-versa).
 export default function PointToPointBar({
-  pickupNames, dropoffNames, lots, points, onClear, onSend, sending, willQueue,
+  pickupNames, dropoffNames, lots, points, onClear, onSend, editing,
   palletType, onPalletTypeChange, palletTop, onPalletTopChange,
   sequenceMode, onToggleSequenceMode, activeSlot, onActiveSlotChange,
 }) {
@@ -18,10 +22,9 @@ export default function PointToPointBar({
   // pego tem pra onde ir (ver CONTEXT.md, "Lotes em sequência") — decisão
   // do usuário: bloquear o envio até bater, em vez de mandar pela metade.
   const canSend = pickupNames.length > 0 && dropoffNames.length > 0 && countsMatch;
-  const sendLabel = sending ? 'Enviando…'
-    : willQueue ? 'Adicionar à fila'
-    : pickupNames.length > 1 ? 'Enviar ' + pickupNames.length + ' tasks'
-    : 'Enviar task';
+  const sendLabel = editing ? 'Salvar alterações'
+    : pickupNames.length > 1 ? 'Enviar ' + pickupNames.length + ' tarefas'
+    : 'Enviar tarefa';
 
   // Em modo sequência os slots viram BOTÕES (clicar troca qual está
   // recebendo as seleções do mapa); no modo normal continuam sendo só
@@ -54,18 +57,22 @@ export default function PointToPointBar({
 
   return (
     <div className="ptp-bar">
-      <h2 className="points-panel__title">Ponto a Ponto</h2>
-      <p className="ptp-bar__hint">
-        {sequenceMode
-          ? 'Selecione as origens em ordem, clique em DESTINO e selecione os destinos na mesma quantidade.'
-          : 'Clique num ponto pra origem (coleta), depois noutro pra destino (entrega).'}
+      <h2 className="points-panel__title">
+        {editing === 'group' ? 'Editando sequência' : editing ? 'Editando tarefa' : 'Ponto a Ponto'}
+      </h2>
+      <p className={'ptp-bar__hint' + (editing ? ' ptp-bar__hint--editing' : '')}>
+        {editing
+          ? 'Clique no mapa pra trocar origem/destino (clicar na origem atual limpa a rota), troque o pallet se quiser, e salve.'
+          : sequenceMode
+            ? 'Selecione as origens em ordem, clique em DESTINO e selecione os destinos na mesma quantidade.'
+            : 'Clique num ponto pra origem (coleta), depois noutro pra destino (entrega).'}
       </p>
 
       {renderSlot('pickup', 'Origem (PICKUP)', pickupNames)}
       {renderSlot('dropoff', 'Destino (UNLOAD)', dropoffNames)}
 
-      <label className="ptp-bar__sequence">
-        <input type="checkbox" checked={sequenceMode} onChange={onToggleSequenceMode} />
+      <label className={'ptp-bar__sequence' + (editing ? ' is-disabled' : '')}>
+        <input type="checkbox" checked={sequenceMode} onChange={onToggleSequenceMode} disabled={!!editing} />
         Lotes em sequência
       </label>
       {sequenceMode && hasSelection && !countsMatch && (
@@ -109,14 +116,14 @@ export default function PointToPointBar({
       </div>
 
       <div className="ptp-bar__actions">
-        <button type="button" className="ptp-bar__clear" onClick={onClear} disabled={!hasSelection}>
-          Limpar seleção
+        <button type="button" className="ptp-bar__clear" onClick={onClear} disabled={!editing && !hasSelection}>
+          {editing ? 'Cancelar edição' : 'Limpar seleção'}
         </button>
         <button
           type="button"
           className="ptp-bar__send"
           onClick={onSend}
-          disabled={!canSend || sending}
+          disabled={!canSend}
         >
           {sendLabel}
         </button>

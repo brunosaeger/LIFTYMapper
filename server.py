@@ -227,6 +227,7 @@ def _note_possible_ip_change(err):
         _last_discovery_attempt = now
     threading.Thread(target=discover_robot_host, daemon=True).start()
 CALIBRATION_PATH = "/api/calibration"
+KANBANS_PATH = "/api/kanbans"  # lista de Close Ups elegíveis pra restringir usuário (ver _get_kanbans) — exclui os "livres pra todos" (FREE_KANBAN_IDS)
 # Sempre absoluto, nunca relativo ao diretório de trabalho do processo —
 # SimpleHTTPRequestHandler resolve `directory=` relativo ao CWD em tempo de
 # requisição, não ao arquivo deste script. Rodar `python3 server.py` de um
@@ -349,11 +350,37 @@ CANCEL_PENDING_MESSAGE = "Aguarde até o robô chegar a uma posição válida pa
 # pode estar vendo isso na tela).
 TURN_BLOCKED_START_MESSAGE = "Aguardando o robô chegar a uma posição válida para giro seguro antes de iniciar esta rota..."
 
+# Trava: não iniciar task nova durante o retorno nativo pra energia (pedido
+# do usuário, 2026-09-25 — ver CONTEXT.md "Trava: não iniciar task durante
+# retorno pra energia"). Cenário: fila vazia, o robô já está voltando
+# sozinho pra carga (AUTO_SYSTEM nativa) quando o operador manda uma rota
+# nova. Diferente do "check-turn no início de tarefas" acima (que confia no
+# check-turn pra decidir se dá pra girar ONDE o robô estiver), aqui o robô
+# pode estar em QUALQUER heading, no meio do caminho de volta — sem docking
+# point, sem ponto calibrado de referência, sem a garantia de alinhamento
+# que já vimos em pontos de pallet/lote. Em vez de confiar no check-turn
+# (que já provamos divergir da navegação real — ver "Varredura ao vivo"),
+# espera um sinal simples e já validado: o robô chegou e está carregando de
+# verdade (`_robot_status_cache["charging"]`, mesmo sinal do bypass de
+# check-turn no ponto de energia acima). Só entra em jogo quando há mesmo
+# uma AUTO_SYSTEM ativa (robot_find_active_charge_task_id) — rota promovida
+# normalmente (fila não estava vazia) nunca aciona isso, porque nesse caso
+# a AUTO_SYSTEM nem chega a existir.
+AWAITING_CHARGE_MESSAGE = "Aguardando o robô chegar à energia e iniciar a carga antes de começar esta rota — ele está retornando sozinho pra carga, sem posição segura garantida pra girar no meio do caminho."
+
+# Cancelamento pós-pickup (ver CONTEXT.md, "Cancelamento pós-pickup" —
+# pedido do usuário, 2026-09-30): mostrado enquanto `pendingPostPickupUnload`
+# está sendo resolvido (janela curta, entre cancelar e disparar o UNLOAD
+# isolado) E enquanto a currentRoute é esse UNLOAD isolado em si — cobre o
+# processo inteiro, do cancelamento até o robô soltar o pallet de vez.
+POST_PICKUP_UNLOAD_MESSAGE = "O robô estava com um pallet no garfo — cancelamento concluído no alinhamento de docagem, devolvendo o pallet ao ponto de origem antes de seguir com a fila."
+
 LIVE_STATE_PATH = "/api/live-state"
 QUEUE_ENQUEUE_BATCH_PATH = "/api/queue/enqueue-batch"
 QUEUE_CANCEL_CURRENT_PATH = "/api/queue/cancel-current"
 QUEUE_REMOVE_QUEUED_PATH = "/api/queue/remove-queued"
 QUEUE_EMERGENCY_PATH = "/api/queue/emergency"
+DEV_LIMIT_BREAKER_PATH = "/api/dev/limit-breaker"
 OCCUPIED_SET_PATH = "/api/occupied/set"
 OCCUPIED_SET_MANY_PATH = "/api/occupied/set-many"
 PALLET_HEIGHTS_PATH = "/api/pallet-heights"
@@ -671,36 +698,41 @@ def _recover_from_rotate_error_if_stuck():
     _send_rotate_nudge(direction_sign)
 
 
-# --- cancelamento pré-pickup via alinhamento do docking point (ver
-# CONTEXT.md, "Cancelamento antes do pickup via alinhamento de docking" —
-# pedido do usuário, 2026-09-24) --------------------------------------------
-# Descoberta de campo: ANTES do pickup, o robô sempre passa por uma sequência
-# fixa e confiável ao chegar no ponto de pallet: para sobre o docking point
-# (nomenclatura "H" + nome do ponto de pallet, ex. pickup "CD" -> docking
-# "HCD") e gira PARA ALINHAR os garfos com o pallet (não é um alinhamento
-# perfeito). É um giro que o robô já faz de qualquer jeito, de forma
-# confiável — diferente de forçar um giro ad-hoc (ver "Destravamento manual
-# do ROTATE_ERROR" acima), não corre risco de ROTATE_ERROR. Por isso é uma
-# referência de segurança MELHOR que o check-turn pra esse trecho específico
-# (que depende do main_forklift_node, já visto divergindo do que o
-# /move_base realmente executa — ver "Varredura ao vivo" no CONTEXT.md).
+# --- cancelamento via alinhamento do docking point (ver CONTEXT.md,
+# "Cancelamento antes do pickup via alinhamento de docking" e "Cancelamento
+# pós-pickup", pedido do usuário 2026-09-24/2026-09-30) ---------------------
+# Descoberta de campo: ao chegar em QUALQUER ponto de pallet (seja o pickup
+# ANTES de pegar, seja o dropoff DEPOIS, já carregando), o robô sempre passa
+# por uma sequência fixa e confiável: para sobre o docking point
+# (nomenclatura "H" + nome do ponto, ex. pallet "CD" -> docking "HCD") e gira
+# PARA ALINHAR os garfos com o ponto (não é um alinhamento perfeito). É um
+# giro que o robô já faz de qualquer jeito, de forma confiável — diferente de
+# forçar um giro ad-hoc (ver "Destravamento manual do ROTATE_ERROR" acima),
+# não corre risco de ROTATE_ERROR. Por isso é uma referência de segurança
+# MELHOR que o check-turn pra esse trecho específico (que depende do
+# main_forklift_node, já visto divergindo do que o /move_base realmente
+# executa — ver "Varredura ao vivo" no CONTEXT.md).
 #
 # Logo depois desse giro o reconhecimento de câmera começa (quase instantâneo
-# segundo o usuário) e a partir daí não dá mais pra cancelar o pickup. Por
-# isso cancela um pouco ANTES do giro completar (margem de
-# PRE_PICKUP_CANCEL_ALIGNMENT_MARGIN_DEGREES) em vez de esperar o
-# alinhamento perfeito — dá tempo de executar o cancelamento antes da câmera
-# travar o pickup.
+# segundo o usuário) e a partir daí não dá mais pra cancelar aquela ação
+# (pickup OU dropoff). Por isso cancela um pouco ANTES do giro completar
+# (margem de DOCKING_ALIGNMENT_CANCEL_MARGIN_DEGREES) em vez de esperar o
+# alinhamento perfeito.
 #
-# DEPOIS do pickup (carregando o pallet) não tem um docking point equivalente
-# nesse trecho — continua usando o check-turn normal (ver
-# _current_route_cancel_ready abaixo). Decisão do usuário: por enquanto só
-# testa isso ANTES do pickup ("somente antes do pickup por enquanto"; cancelar
-# DEPOIS de já estar com a carga pode nem fazer sentido, já que a estrutura
-# de task exige pickup+dropoff — sem alternativa decidida ainda).
-PRE_PICKUP_CANCEL_ALIGNMENT_MARGIN_DEGREES = 30.0  # "faltando uns 30" -- pedido explícito do usuário
-PRE_PICKUP_CANCEL_PROXIMITY_METERS = 1.5  # raio pra considerar "já chegou no docking point" -- evita falso-positivo de alinhamento por coincidência longe do docking, ainda em rota normal
-PRE_PICKUP_CANCEL_POLL_INTERVAL_SECONDS = 0.5  # bem mais rápido que o cancelPending comum (2s) -- a janela entre "dentro da margem de 30°" e a câmera travar o pickup é curta
+# Até 2026-09-29, isso só valia ANTES do pickup — depois (carregando o
+# pallet) caía no check-turn tradicional, porque não tínhamos como criar uma
+# task só com UNLOAD (a estrutura do dispatch exige pickup+dropoff). Em
+# 2026-09-30 descobrimos que `POST /task-template/generic/chain` aceita uma
+# ação isolada (confirmado ao vivo, o site do fabricante recusa mas a API
+# aceita — ver CONTEXT.md, "Cancelamento pós-pickup") — então o MESMO
+# mecanismo de alinhamento agora vale pros dois lados: antes do pickup, usa
+# o ponto de ORIGEM; depois (pickup_cleared), usa o ponto de DESTINO (é lá
+# que o robô vai alinhar de qualquer jeito a caminho de largar o pallet). Ver
+# `_execute_cancel_current_locked`/`robot_create_and_run_unload_chain` pra o
+# que acontece DEPOIS de cancelar nesse segundo caso.
+DOCKING_ALIGNMENT_CANCEL_MARGIN_DEGREES = 30.0  # "faltando uns 30" -- pedido explícito do usuário
+DOCKING_ALIGNMENT_CANCEL_PROXIMITY_METERS = 1.5  # raio pra considerar "já chegou no docking point" -- evita falso-positivo de alinhamento por coincidência longe do docking, ainda em rota normal
+DOCKING_ALIGNMENT_CANCEL_POLL_INTERVAL_SECONDS = 0.5  # bem mais rápido que o cancelPending comum (2s) -- a janela entre "dentro da margem de 30°" e a câmera travar é curta, dos dois lados
 
 
 def robot_find_point_position(name, target_map=ROBOT_TARGET_MAP):
@@ -723,13 +755,14 @@ def robot_find_point_position(name, target_map=ROBOT_TARGET_MAP):
     return None
 
 
-def _pre_pickup_cancel_ready(current):
-    """True = o robô já está sobre o docking point ("H" + pickup) e alinhado
-    (dentro da margem) rumo ao pallet -- seguro cancelar agora, é o giro
-    final que o robô já faz de qualquer jeito. False = ainda não chegou lá
+def _docking_alignment_cancel_ready(pallet_point):
+    """True = o robô já está sobre o docking point ("H" + pallet_point) e
+    alinhado (dentro da margem) rumo a ele -- seguro cancelar agora, é o
+    giro final que o robô já faz de qualquer jeito (na coleta OU na
+    entrega, mesmo mecanismo dos dois lados). False = ainda não chegou lá
     ou ainda não alinhou o suficiente -- espera mais. None = não deu pra
-    determinar (pose indisponível, ou os pontos "H<pickup>"/pickup não
-    existem no mapa) -- quem chama decide o fallback.
+    determinar (pose indisponível, ou os pontos "H<pallet_point>"/
+    pallet_point não existem no mapa) -- quem chama decide o fallback.
 
     CORRIGIDO 2026-09-25 (1ª tentativa de campo falhou -- câmera reconheceu
     antes do cancelamento disparar): o alvo de alinhamento NÃO é o rumo
@@ -744,49 +777,47 @@ def _pre_pickup_cancel_ready(current):
     try:
         pose = robot_pose()
     except Exception as err:
-        print("pré-pickup cancel: pose indisponível (%s) -- cai pro check-turn." % err)
+        print("alinhamento de docking: pose indisponível (%s) -- cai pro check-turn." % err)
         return None
-    docking = robot_find_point_position("H" + current["pickup"])
-    pallet = robot_find_point_position(current["pickup"])
+    docking = robot_find_point_position("H" + pallet_point)
+    pallet = robot_find_point_position(pallet_point)
     if docking is None or pallet is None:
-        print("pré-pickup cancel: docking 'H%s' ou pallet '%s' não encontrado no mapa -- cai pro check-turn." % (
-            current["pickup"], current["pickup"]))
+        print("alinhamento de docking: docking 'H%s' ou pallet '%s' não encontrado no mapa -- cai pro check-turn." % (
+            pallet_point, pallet_point))
         return None
     dist = math.hypot(pose["x"] - docking["x"], pose["y"] - docking["y"])
     diff = abs(_normalize_angle_degrees(pallet["theta"] - pose["theta"]))
-    print("pré-pickup cancel: dist ao docking=%.2fm (limite %.2fm), diff angular=%.1f (margem %.0f)" % (
-        dist, PRE_PICKUP_CANCEL_PROXIMITY_METERS, diff, PRE_PICKUP_CANCEL_ALIGNMENT_MARGIN_DEGREES))
-    if dist > PRE_PICKUP_CANCEL_PROXIMITY_METERS:
+    print("alinhamento de docking (%s): dist=%.2fm (limite %.2fm), diff angular=%.1f (margem %.0f)" % (
+        pallet_point, dist, DOCKING_ALIGNMENT_CANCEL_PROXIMITY_METERS, diff, DOCKING_ALIGNMENT_CANCEL_MARGIN_DEGREES))
+    if dist > DOCKING_ALIGNMENT_CANCEL_PROXIMITY_METERS:
         return False  # ainda a caminho do docking point
-    return diff <= PRE_PICKUP_CANCEL_ALIGNMENT_MARGIN_DEGREES
+    return diff <= DOCKING_ALIGNMENT_CANCEL_MARGIN_DEGREES
 
 
-def _cancel_poll_interval(cancel_pending, pickup_cleared):
-    """Intervalo de sondagem enquanto cancelPending está ativo -- mais
-    rápido ainda (PRE_PICKUP_CANCEL_POLL_INTERVAL_SECONDS) se for a espera
-    pré-pickup (corrida contra a câmera, ver acima), senão o cancelPending
-    comum (CANCEL_PENDING_POLL_INTERVAL_SECONDS)."""
-    if cancel_pending and not pickup_cleared:
-        return PRE_PICKUP_CANCEL_POLL_INTERVAL_SECONDS
-    return CANCEL_PENDING_POLL_INTERVAL_SECONDS
+def _cancel_poll_interval(cancel_pending):
+    """Intervalo de sondagem enquanto cancelPending está ativo -- sempre o
+    rápido (DOCKING_ALIGNMENT_CANCEL_POLL_INTERVAL_SECONDS): antes ou depois
+    do pickup, os dois lados agora correm contra o mesmo reconhecimento de
+    câmera na docagem (ver acima)."""
+    return DOCKING_ALIGNMENT_CANCEL_POLL_INTERVAL_SECONDS if cancel_pending else CANCEL_PENDING_POLL_INTERVAL_SECONDS
 
 
 def _current_route_cancel_ready(current, pickup_cleared):
     """Decide se é seguro cancelar a currentRoute JÁ DISPARADA agora --
-    unifica as duas estratégias (ver comentário acima do arquivo):
-    alinhamento de docking ANTES do pickup, check-turn tradicional DEPOIS
-    (carregando o pallet, sem docking point equivalente nesse trecho).
-    Mesmo contrato de robot_can_turn_safely: True/False = resposta de
-    verdade, None nunca é devolvido (cai pro check-turn como rede de
-    segurança em vez de travar o cancelamento pra sempre)."""
-    if not pickup_cleared:
-        ready = _pre_pickup_cancel_ready(current)
-        if ready is True:
-            print("pré-pickup cancel: dentro da margem -- cancelando agora.")
-        if ready is not None:
-            return ready
-        # não achou os pontos calibrados ("H"+pickup / pickup) ou pose
-        # indisponível agora -- cai pro check-turn abaixo em vez de travar.
+    alinhamento de docking dos dois lados (ver comentário acima do arquivo):
+    ANTES do pickup usa o ponto de ORIGEM, DEPOIS (pickup_cleared) usa o de
+    DESTINO -- é lá que o robô vai alinhar de qualquer jeito. Mesmo contrato
+    de robot_can_turn_safely: True/False = resposta de verdade, None nunca é
+    devolvido (cai pro check-turn como rede de segurança em vez de travar o
+    cancelamento pra sempre)."""
+    target_point = current["dropoff"] if pickup_cleared else current["pickup"]
+    ready = _docking_alignment_cancel_ready(target_point)
+    if ready is True:
+        print("alinhamento de docking: dentro da margem -- cancelando agora.")
+    if ready is not None:
+        return ready
+    # não achou os pontos calibrados ("H"+alvo / alvo) ou pose indisponível
+    # agora -- cai pro check-turn abaixo em vez de travar.
     return robot_can_turn_safely()
 
 
@@ -801,7 +832,7 @@ def _current_route_cancel_ready(current, pickup_cleared):
 # só a THREAD DE FUNDO escreve (um GET por tick, mesmo padrão de
 # _emergency_suppress), os handlers HTTP só leem — assim nenhum poll de
 # tablet bate no robô direto, e não têm N tablets multiplicando chamada.
-_robot_status_cache = {"charging": None, "battery": None}  # None = ainda não sabemos (1ª leitura não chegou ainda)
+_robot_status_cache = {"charging": None, "battery": None, "returningToCharge": False}  # None = ainda não sabemos (1ª leitura não chegou ainda)
 
 
 # `battery` em `/reeman/base_encode` (documentado, nunca lido até agora —
@@ -825,6 +856,16 @@ def _refresh_robot_status():
         _robot_status_cache["battery"] = _normalize_battery(data.get("battery"))
     except Exception:
         pass  # robô/rede indisponível agora — mantém o último valor conhecido, tenta de novo no próximo tick
+    # 3º estado do banner (ver RobotStatusBanner.jsx): "voltando à energia"
+    # sozinho (AUTO_SYSTEM nativa), ainda não chegou/começou a carregar de
+    # verdade -- reusa _robot_returning_to_charge_now (já cuida de devolver
+    # False se `charging` já é True) no MESMO ciclo da thread de fundo, não
+    # por requisição HTTP (senão cada tablet multiplicaria a chamada extra
+    # ao robô, mesma preocupação de charging/battery acima).
+    try:
+        _robot_status_cache["returningToCharge"] = _robot_returning_to_charge_now()
+    except Exception:
+        pass
 
 
 # O nome do template CODIFICA o "recipe" da rota (ver CONTEXT.md): rotas com
@@ -913,6 +954,21 @@ def robot_find_active_charge_task_id():
     return None
 
 
+# Variante pra pegar retardatária (ver CONTEXT.md, incidente 2026-09-25,
+# "AUTO_SYSTEM na fresta entre checar e disparar"): olha os últimos `size`
+# registros, não só o topo — usada DEPOIS de disparar uma rota nova (nesse
+# momento o registro MAIS RECENTE já é o nosso, não uma AUTO_SYSTEM que
+# tenha nascido bem no instante entre a checagem de _fire_route e o
+# disparo de verdade; só escaneando um pouco mais fundo dá pra achar ela).
+def robot_find_any_active_charge_task_id(size=3):
+    params = urllib.parse.urlencode({"projectId": ROBOT_PROJECT_ID, "page": 1, "size": size, "status": "", "name": ""})
+    data = _robot_call("GET", "/task-record/page?" + params) or {}
+    for record in data.get("records") or []:
+        if record.get("taskType") == "AUTO_SYSTEM" and not _is_terminal_status(record.get("status")):
+            return record["id"]
+    return None
+
+
 def robot_fetch_latest_task_record(name):
     params = urllib.parse.urlencode({"projectId": ROBOT_PROJECT_ID, "page": 1, "size": 1, "status": "", "name": name})
     data = _robot_call("GET", "/task-record/page?" + params) or {}
@@ -926,8 +982,106 @@ def robot_fetch_recent_task_records(size=5):
     return data.get("records") or []
 
 
+# Acha um task-record específico pelo id, dentre os `size` mais recentes —
+# não existe um GET por id direto documentado. Usada pra sondar o status da
+# tarefa de UNLOAD isolado (ver robot_create_and_run_unload_chain): ela não
+# tem um nome NOSSO pra buscar como as rotas normais (robot_fetch_latest_
+# task_record busca por `name`) — o dispatch dá um nome aleatório
+# ("76f46_2026-09-30 10:40:05", confirmado ao vivo), então guardamos o ID
+# devolvido na criação e procuramos por ele aqui.
+def robot_fetch_task_record_by_id(task_record_id, size=5):
+    for record in robot_fetch_recent_task_records(size=size):
+        if record.get("id") == task_record_id:
+            return record
+    return None
+
+
+# --- cancelamento pós-pickup: UNLOAD isolado (ver CONTEXT.md, "Cancelamento
+# pós-pickup" — pedido do usuário, 2026-09-30) -------------------------------
+# Descoberto ao vivo 2026-09-30: o SITE do fabricante recusa criar uma task
+# só com UNLOAD (exige pickup+dropoff), mas a API `POST /task-template/
+# generic/chain` aceita — não depende de template salvo, e devolve
+# `code: 0` pra uma `taskChain` com uma ÚNICA ação. Testado com o garfo
+# vazio (aceitou e virou um task-record de verdade, `taskType:
+# TEMP_TASK_CHAIN`) — AINDA NÃO validado com pallet de verdade em cima.
+#
+# `taskChainId` na resposta é o MESMO id do task-record criado (confirmado
+# ao vivo: pedimos o chain, devolveu `taskChainId: 67688`, e `GET
+# /task-record/page` logo depois mostrou um registro `id: 67688` novo) — por
+# isso não precisamos de um nome nosso pra sondar depois, só o id.
+def robot_create_and_run_unload_chain(dropoff):
+    data = _robot_call("POST", "/task-template/generic/chain", {
+        "projectId": int(ROBOT_PROJECT_ID),
+        "agvId": None,
+        "agvTypes": ROBOT_SUPPORT_TYPES,
+        "taskChain": [
+            {
+                "targetMap": ROBOT_TARGET_MAP,
+                "targetPoint": dropoff,
+                "targetArea": "",
+                "action": "UNLOAD",
+                "params": {},
+            },
+        ],
+    })
+    task_record_id = data.get("taskChainId") if data else None
+    if not task_record_id:
+        raise RobotError("resposta sem taskChainId")
+    return task_record_id
+
+
 def robot_fetch_action_records(task_record_id):
     return _robot_call("GET", "/action-record/list/" + str(task_record_id)) or []
+
+
+# Checagem de segurança ADICIONAL à flag `pickupCleared` (ver CONTEXT.md,
+# incidente de campo 2026-09-30) — não confia só nela na hora de decidir um
+# CANCELAMENTO. `pickupCleared` é setada pela sondagem periódica de Caso 2
+# (uma vez por tick, ~4s ou mais rápido durante cancelPending) — se o
+# PICKUP terminar de verdade e o cancelamento (nosso ou externo) acontecer
+# DENTRO do mesmo intervalo de sondagem, a ação de PICKUP nunca chega a ser
+# vista com `status: FINISHED`: no próximo poll, a task inteira já está
+# `CANCELLED`, e essa mesma ação de PICKUP também aparece `CANCELLED` — o
+# `finishTime` dela vira só o carimbo do cancelamento, não prova nada (ver
+# comentário de Caso 2 em _queue_tick). Ou seja: um pickup que REALMENTE
+# aconteceu pode nunca deixar rastro de "FINISHED" se o cancelamento for
+# rápido o suficiente — exatamente o caso confirmado ao vivo (task 67689,
+# PICKUP rodou 85s, mais que o dobro do tempo típico de ~64s de um pickup
+# de verdade, UNLOAD chegou a "iniciar" 5s antes do cancelamento — fortes
+# indícios de que o pallet já tinha sido pego).
+#
+# Por isso: ANTES de mandar qualquer comando de cancelamento nosso (que
+# contaminaria o status retroativamente), confere o estado VERDADEIRO
+# agora, direto na API — nesse instante, se o pickup já tiver terminado de
+# verdade, a ação ainda mostra `status: FINISHED` genuíno, porque a gente
+# ainda não mandou cancelar nada. Só usada quando `pickupCleared` ainda é
+# False (se já é True, não precisa checar de novo — nunca REGRIDE).
+def _pickup_actually_completed(current):
+    try:
+        record = robot_fetch_latest_task_record(current["taskName"])
+        if not record:
+            return None
+        actions = robot_fetch_action_records(record["id"])
+        pickup_action = next((a for a in actions if a.get("serialNumber") == 1), None)
+        if not pickup_action:
+            return None
+        return bool(pickup_action.get("finishTime")) and pickup_action.get("status") != "CANCELLED"
+    except Exception:
+        return None
+
+
+def _resolve_pickup_cleared_for_cancel(current, pickup_cleared):
+    """`pickup_cleared`: valor já salvo (da sondagem periódica). Se ainda
+    for False, faz a checagem fresca acima antes de decidir qualquer coisa
+    sobre o cancelamento (qual lado alinhar, se vai virar UNLOAD isolado
+    depois) — ver _pickup_actually_completed."""
+    if pickup_cleared:
+        return True
+    fresh = _pickup_actually_completed(current)
+    if fresh:
+        print("Pickup em %s já tinha terminado de verdade (checagem fresca antes de cancelar) -- tratando como pós-pickup." % current["pickup"])
+        return True
+    return pickup_cleared
 
 
 # Estados TERMINAIS de um task-record no robô. Confirmados em campo:
@@ -984,7 +1138,7 @@ def _empty_queue_state():
     # constante no módulo teria a lista routeQueue=[] COMPARTILHADA entre
     # todo mundo que pedisse "o estado vazio", e um .append() em qualquer
     # chamador corromperia esse "vazio" pra sempre (mutable default clássico).
-    return {"currentRoute": None, "pendingRoute": None, "routeQueue": [], "pickupCleared": False, "emergency": False, "cancelPending": False, "turnBlocked": False}
+    return {"currentRoute": None, "pendingRoute": None, "routeQueue": [], "pickupCleared": False, "emergency": False, "cancelPending": False, "turnBlocked": False, "awaitingCharge": False, "currentRouteFresh": False, "pendingPostPickupUnload": None}
 
 
 def _read_queue_state():
@@ -1025,6 +1179,109 @@ def _read_calibration():
 
 def _write_calibration(data):
     CALIBRATION_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+# --- Kanbans (grupos de lotes delimitados por um Close Up) — restrição de
+# usuário por kanban (pedido do usuário, 2026-10-01) -------------------------
+# Mesma matemática de "qual Close Up contém esta posição" que o
+# FloorPlanCanvas.jsx usa pro zoom/destaque (closeUpContaining/
+# contentPositionOf) — portada pra Python porque a RESTRIÇÃO precisa ser
+# aplicada no servidor (quem decide de verdade), não só escondida na UI. Os
+# números abaixo (dimensão da imagem, tamanho padrão de célula) são os
+# mesmos valores fixos do floorplan.jpg e de FloorPlanCanvas.jsx
+# (DEFAULT_CELL_SIZE) — não há uma fonte única compartilhada entre
+# front/back pra esses dois números, então se o floorplan.jpg for trocado
+# por uma imagem de outro tamanho, ou DEFAULT_CELL_SIZE mudar lá, isto
+# precisa acompanhar.
+FLOORPLAN_IMAGE_WIDTH = 1411
+FLOORPLAN_IMAGE_HEIGHT = 759
+DEFAULT_LOT_CELL_SIZE = 11.97
+
+# Kanbans "livres pra todos" (pedido do usuário): saídas compartilhadas,
+# nunca aparecem na lista de kanbans pra restringir um usuário, e qualquer
+# usuário restrito pode pegar pallet ali mesmo sem ter esse kanban
+# atribuído. Fixo pelo ID (não pelo NOME — nome pode ser renomeado, pedido
+# explícito do usuário) dos Close Ups "SAÍDAS 69/71" e "SAÍDAS
+# 47,40,61,52,35" na vista 'top' de hoje.
+FREE_KANBAN_IDS = {
+    "ff61748b-be50-4d7e-9f19-315f63c382d0",  # SAÍDAS 69/71
+    "32027cb0-6cf4-491c-b78b-1bd6537afd8a",  # SAÍDAS 47,40,61,52,35
+}
+
+
+def _lot_cell_name(prefix, index):
+    return prefix if index == 0 else prefix + str(index + 1)
+
+
+def _lot_cell_position(lot, index):
+    cell_size = lot.get("cellSize") or DEFAULT_LOT_CELL_SIZE
+    lx = index * cell_size * (lot.get("scaleX") or 1)
+    rad = math.radians(lot.get("rotation") or 0)
+    return (
+        lot["x"] * FLOORPLAN_IMAGE_WIDTH + lx * math.cos(rad),
+        lot["y"] * FLOORPLAN_IMAGE_HEIGHT + lx * math.sin(rad),
+    )
+
+
+def _point_position(point):
+    return (point["x"] * FLOORPLAN_IMAGE_WIDTH, point["y"] * FLOORPLAN_IMAGE_HEIGHT)
+
+
+def _closeup_bounds(closeup):
+    x = closeup["x"] * FLOORPLAN_IMAGE_WIDTH
+    y = closeup["y"] * FLOORPLAN_IMAGE_HEIGHT
+    w = closeup["width"] * (closeup.get("scaleX") or 1)
+    h = closeup["height"] * (closeup.get("scaleY") or 1)
+    return (min(x, x + w), max(x, x + w), min(y, y + h), max(y, y + h))
+
+
+# Posição de um nome técnico (célula de lote OU ponto avulso) na vista
+# 'top' — mesmo espírito de contentPositionOf (FloorPlanCanvas.jsx).
+def _top_position_for_name(name, cal):
+    for lot in cal["top"]["lots"]:
+        for i in range(lot.get("count", 0)):
+            if _lot_cell_name(lot["prefix"], i) == name:
+                return _lot_cell_position(lot, i)
+    for point in cal["top"]["points"]:
+        if point.get("name") == name:
+            return _point_position(point)
+    return None
+
+
+# Id do Close Up (o menor, se houver sobreposição) que contém esse nome
+# técnico — mesmo espírito de closeUpContaining (FloorPlanCanvas.jsx). None
+# se a posição não existe ou não está dentro de nenhum Close Up.
+def _closeup_id_for_name(name, cal):
+    pos = _top_position_for_name(name, cal)
+    if pos is None:
+        return None
+    best_id, best_area = None, None
+    for c in cal["top"]["closeUps"]:
+        x0, x1, y0, y1 = _closeup_bounds(c)
+        if x0 <= pos[0] <= x1 and y0 <= pos[1] <= y1:
+            area = abs((x1 - x0) * (y1 - y0))
+            if best_area is None or area < best_area:
+                best_id, best_area = c["id"], area
+    return best_id
+
+
+def _user_kanban_ids(user):
+    return user.get("kanbanIds") or []
+
+
+# Pode PEGAR (origem) nesse ponto? Admin/Mestre sempre podem (ver pedido do
+# usuário: Mestre usa qualquer kanban sem restrição). Usuário comum sem
+# kanban nenhum atribuído (conta antiga, de antes desta feature) também não
+# tem restrição — só passa a valer quando o admin atribui pelo menos um
+# kanban. Destino nunca é restrito (só a ORIGEM importa, ver CONTEXT.md).
+def _user_can_pick_up_from(user, pickup_name, cal):
+    if user.get("isAdmin") or user.get("isMaster"):
+        return True
+    kanban_ids = _user_kanban_ids(user)
+    if not kanban_ids:
+        return True
+    closeup_id = _closeup_id_for_name(pickup_name, cal)
+    return closeup_id in FREE_KANBAN_IDS or closeup_id in kanban_ids
 
 
 def _seed_file():
@@ -1264,10 +1521,64 @@ def _fire_route(route):
             robot_cancel_task_record(charge_task_id)
         except Exception:
             pass  # melhor esforço — a rota nova já foi disparada de qualquer jeito
+
+    # Retardatária (ver CONTEXT.md, incidente 2026-09-25): a checagem acima
+    # roda ANTES de criar a rota nova, então uma AUTO_SYSTEM que nasça bem
+    # na fresta entre essa checagem e o robô de fato começar a mover pra
+    # rota nova passa batido — visto ao vivo (task 67547/67548): as duas
+    # foram criadas no MESMO SEGUNDO, mas a rota nova só começou a se mover
+    # depois da AUTO_SYSTEM terminar sozinha (quase 90s de desvio). Segunda
+    # passada, agora DEPOIS de disparar, escaneando os últimos registros
+    # (não só o topo — o topo já é a nossa rota recém-criada) — melhor
+    # esforço, não desfaz nem re-tenta o disparo que já aconteceu.
+    try:
+        straggler_id = robot_find_any_active_charge_task_id()
+        if straggler_id and straggler_id != charge_task_id:
+            print("Retardatária pega na 2ª checagem (id=%s, rota %s->%s) -- cancelando." % (
+                straggler_id, route["pickup"], route["dropoff"]))
+            robot_cancel_task_record(straggler_id)
+    except Exception as err:
+        print("Aviso: 2ª checagem de AUTO_SYSTEM retardatária falhou (%s) -- melhor esforço, segue sem cancelar." % err)
+
     fired = dict(route)
     fired["taskName"] = task_name
     log_route_requested(route["id"], route["pickup"], route["dropoff"], task_name, route["user"])
+    _route_fired_at["t"] = time.monotonic()
     return fired
+
+
+# AUTO_SYSTEM "sequestrando" a rota da fila (ver CONTEXT.md, incidente
+# 2026-09-29 (2)): a dispatch leva alguns segundos pra ATRIBUIR a nossa rota
+# ao robô depois de criada, e nesse meio-tempo acha o robô ocioso, cria a
+# AUTO_SYSTEM de volta pra carga e atribui ELA primeiro — visto ao vivo: a
+# nossa rota foi criada 08:40:00, a AUTO_SYSTEM 08:40:01, e o robô foi até a
+# energia (4 min) antes de começar a nossa. As checagens de _fire_route
+# rodam cedo demais pra isso. Então, a cada tick, enquanto houver uma rota
+# NOSSA disparada e não terminada, qualquer AUTO_SYSTEM ativa é cancelada.
+# Isso é diferente da supressão removida em 2026-09-24 (que brigava com a
+# AUTO_SYSTEM com a fila VAZIA e fazia o robô oscilar): aqui só age quando
+# existe trabalho de verdade esperando pra rodar no lugar dela.
+def _cancel_charge_task_hijacking_route(task_name):
+    try:
+        charge_id = robot_find_any_active_charge_task_id()
+    except Exception:
+        return  # falha pontual de rede — tenta de novo no próximo tick
+    if not charge_id:
+        return
+    print("AUTO_SYSTEM #%s ativa enquanto a rota %s espera/roda — cancelando (trabalho real tem prioridade)." % (charge_id, task_name))
+    try:
+        robot_cancel_task_record(charge_id)
+    except Exception as err:
+        print("Aviso: falha ao cancelar a AUTO_SYSTEM #%s: %s" % (charge_id, err))
+
+
+# Janela logo depois de disparar uma rota em que o tick roda mais rápido —
+# é quando a AUTO_SYSTEM costuma aparecer (+1s no incidente) e ela leva
+# alguns segundos pra começar a andar (+5s): pegar ela ANTES de sair
+# andando evita até o robô esboçar o movimento pra energia.
+ROUTE_FIRED_WATCH_SECONDS = 20
+ROUTE_FIRED_WATCH_INTERVAL_SECONDS = 1.5
+_route_fired_at = {"t": None}  # só memória: reiniciar zera, não há o que guardar
 
 
 # Promove pendingRoute/routeQueue pra currentRoute — chamado com QUEUE_LOCK
@@ -1278,10 +1589,21 @@ def _fire_route(route):
 # routeQueue sempre estiveram — ver "check-turn no início de tarefas" acima.
 # Quem chama é responsável por tentar _try_dispatch_current() logo depois,
 # fora do QUEUE_LOCK.
+#
+# `currentRouteFresh = False` aqui de propósito (ver AWAITING_CHARGE_MESSAGE
+# e "Trava: não iniciar task durante retorno pra energia" no CONTEXT.md):
+# uma rota promovida já estava na fila ANTES da anterior terminar — ela
+# nunca precisa esperar retorno pra energia nenhum, porque enquanto a rota
+# anterior rodava não havia janela nenhuma pra uma AUTO_SYSTEM nativa
+# aparecer (só nasce quando não há task nossa ativa). Qualquer AUTO_SYSTEM
+# vista bem aqui é sempre um blip novinho deste exato instante — já
+# resolvido por `_fire_route` (acha e cancela ela antes/depois de disparar
+# a rota promovida), sem precisar de trava nenhuma.
 def _advance_queue_locked(state):
     pending = state.get("pendingRoute")
     if pending:
         state["currentRoute"] = pending
+        state["currentRouteFresh"] = False
         state["pendingRoute"] = None
         state["pickupCleared"] = False
         queue = state.get("routeQueue") or []
@@ -1293,10 +1615,72 @@ def _advance_queue_locked(state):
     queue = state.get("routeQueue") or []
     if not queue:
         state["currentRoute"] = None
+        state["currentRouteFresh"] = False
         return
     state["currentRoute"] = queue[0]
+    state["currentRouteFresh"] = False
     state["pickupCleared"] = False
     state["routeQueue"] = queue[1:]
+
+
+# BUG DE CAMPO 2026-09-25, DUAS RODADAS (corrigido):
+#
+# 1ª versão: considerava QUALQUER AUTO_SYSTEM ativa como "retorno de
+# verdade" — mas cancelar/terminar uma rota com OUTRA já esperando na fila
+# TAMBÉM dispara uma AUTO_SYSTEM nativa (a dispatch service vê "sem task"
+# por uma fração de segundo, entre uma rota terminar e a próxima ser
+# disparada). Confirmado com o log real: `CD6toCD5MT6` cancelada 09:32:38,
+# AUTO_SYSTEM aparece NO MESMO SEGUNDO, fica ativa por quase 90s até
+# conectar — a rota seguinte da fila ficou presa em `awaitingCharge` esse
+# tempo todo, mesmo já tendo trabalho de verdade pra fazer.
+#
+# 2ª tentativa (margem de tempo — TAMBÉM abandonada): esperar a mesma
+# AUTO_SYSTEM continuar aparecendo por alguns segundos antes de contar como
+# "de verdade". Não resolve o caso real que o usuário testou: robô termina
+# a única rota (fila fica REALMENTE vazia), operador manda uma rota nova
+# rápido (dentro da margem, cenário normal com vários tablets simultâneos)
+# — a AUTO_SYSTEM genuína também é nova nesse instante, e uma margem de
+# tempo não consegue diferenciar isso de um blip de transição de fila.
+#
+# Solução de verdade (ideia do usuário): a diferença não está em QUANTO
+# TEMPO a AUTO_SYSTEM está ativa, está em DE ONDE a rota reservada veio.
+# Uma rota PROMOVIDA (já estava em pendingRoute/routeQueue antes da
+# anterior terminar — ver `_advance_queue_locked`, `currentRouteFresh =
+# False`) nunca pode enfrentar uma AUTO_SYSTEM genuína, porque enquanto a
+# rota anterior rodava não existia a janela "sem task" pra ela nascer — só
+# pode ser um blip novo deste exato instante, e `_fire_route` já sabe
+# limpar isso sozinho. Só uma rota FRESCA (fila estava REALMENTE vazia
+# antes dela chegar — `_queue_enqueue_batch`, `currentRouteFresh = True`)
+# pode enfrentar uma AUTO_SYSTEM que já vinha rodando há qualquer tempo.
+# `_try_dispatch_current` só chama esta função quando `currentRouteFresh`
+# é `True` — nesse caso, QUALQUER AUTO_SYSTEM ativa já é motivo suficiente
+# pra esperar, sem precisar medir nada.
+def _robot_returning_to_charge_now():
+    if _robot_status_cache.get("charging"):
+        return False  # já chegou e está carregando -- não é mais "voltando"
+    try:
+        return bool(robot_find_active_charge_task_id())
+    except Exception:
+        return False
+
+
+# "Limit breaker" (modo desenvolvedor, ver CONTEXT.md): enquanto ativo,
+# NENHUMA trava de segurança de cancelamento ou de início de rota vale —
+# cancelamento sem espera de giro/docking, disparo sem check-turn e sem
+# esperar carga. É uma LICENÇA que expira sozinha: o tablet com o Doomguy
+# ligado renova a cada poucos segundos (POST /api/dev/limit-breaker); se
+# parar de renovar (desligou, recarregou, fechou, reiniciou o app), cai em
+# LIMIT_BREAKER_LEASE_SECONDS. Só em memória — reiniciar o servidor zera na
+# hora. Precisa ser licença (e não um `force` por requisição) porque o
+# disparo da próxima rota também acontece em segundo plano, na thread da
+# fila, sem requisição nenhuma do tablet pra carregar o pedido. Pedido do
+# usuário: não pode ter como ficar ligado esquecido.
+LIMIT_BREAKER_LEASE_SECONDS = 12
+_limit_breaker = {"until": 0.0, "by": None}
+
+
+def _limit_breaker_active():
+    return time.monotonic() < _limit_breaker["until"]
 
 
 # Tenta disparar de verdade a currentRoute RESERVADA (sem taskName ainda) —
@@ -1312,6 +1696,30 @@ def _try_dispatch_current():
         current = state.get("currentRoute")
         if not current or current.get("taskName"):
             return False  # nada reservado, ou já disparada
+        current_route_fresh = bool(state.get("currentRouteFresh"))
+
+    # Limit breaker: dispara direto, sem trava de energia nem check-turn.
+    free = _limit_breaker_active()
+
+    # Trava de retorno pra energia (ver AWAITING_CHARGE_MESSAGE acima) — vem
+    # ANTES do check-turn de propósito: se o robô está voltando sozinho pra
+    # carga, nem pergunta pro check-turn (que não temos garantia nenhuma de
+    # que responde certo nesse trecho, sem docking point de referência) — só
+    # espera o sinal simples (chegou e carregando). Só faz sentido pra uma
+    # rota FRESCA (fila estava REALMENTE vazia antes dela — ver
+    # `_robot_returning_to_charge_now` acima); uma rota promovida da fila
+    # nunca passa por aqui, dispara direto pro check-turn de sempre.
+    if not free and current_route_fresh and _robot_returning_to_charge_now():
+        with QUEUE_LOCK:
+            state = _read_queue_state()
+            current = state.get("currentRoute")
+            if not current or current.get("taskName"):
+                return False  # mudou enquanto perguntávamos
+            if not state.get("awaitingCharge"):
+                state["awaitingCharge"] = True
+                _write_queue_state(state)
+                _poke_queue_thread()  # sonda rápido já, sem esperar o sono atual (ver "Latência de até 4s")
+        return False
 
     # Check-turn não se aplica em cima do ponto de carga (pedido do usuário,
     # 2026-09-23, confirmado ao vivo): o nicho de encaixe elétrico do
@@ -1324,7 +1732,7 @@ def _try_dispatch_current():
     # `_robot_status_cache["charging"]` é o proxy mais simples e confiável
     # de "estou em cima do ponto de energia agora" (só fica True carregando
     # de verdade, ou seja, encostado no ponto).
-    if _robot_status_cache.get("charging"):
+    if free or _robot_status_cache.get("charging"):
         safe = True
     else:
         # Chamada de rede FORA do lock (mesma cautela de robot_can_turn_safely
@@ -1342,6 +1750,7 @@ def _try_dispatch_current():
             if not state.get("turnBlocked"):
                 state["turnBlocked"] = True
                 _write_queue_state(state)
+                _poke_queue_thread()  # sonda rápido já, sem esperar o sono atual (ver "Latência de até 4s")
             return False
         # Seguro (True) ou bridge indisponível (None, tratado como "não sei"
         # — mesmo comportamento fail-open do cancelamento, pra essa checagem
@@ -1353,6 +1762,7 @@ def _try_dispatch_current():
             print("Erro ao disparar rota reservada assim que girar ficou seguro: %s" % err)
             return False  # tenta de novo no próximo tick
         state["turnBlocked"] = False
+        state["awaitingCharge"] = False
         _write_queue_state(state)
         return True
 
@@ -1381,15 +1791,42 @@ def _execute_cancel_current_locked(state, current):
         print("cancel-current: cancel_goal falhou: %s" % err)
 
     log_route_completed(current["id"], "cancelled")
-    state["currentRoute"] = None
-    state["pickupCleared"] = False
     state["cancelPending"] = False
 
     # Sequência ("Lotes em sequência"): o resto do grupo assumia que esta
     # rota rodaria antes (ocupação projetada), então cai junto — inclusive
     # cancelando no robô a pendingRoute do grupo. Rotas INDEPENDENTES na
-    # fila não são tocadas.
+    # fila não são tocadas. Sempre acontece na hora, pickup limpo ou não —
+    # o resto da sequência perde a validade assim que ESTA rota é cancelada,
+    # independente de quando (ou se) o descarregar isolado abaixo terminar.
     _drop_group_from_queue(state, current.get("groupId"))
+
+    if state.get("pickupCleared"):
+        # Pós-pickup (ver CONTEXT.md, "Cancelamento pós-pickup"): o robô
+        # está com o pallet no garfo, e acabou de cancelar bem no giro de
+        # alinhamento com o DESTINO (mesmo mecanismo do pré-pickup, ver
+        # _current_route_cancel_ready) — usa o destino só como ponto de
+        # docagem pra cancelar com segurança, mas NÃO entrega ali: cancelar
+        # significa abortar a entrega, então o pallet volta pro ponto de
+        # ORIGEM de onde foi pego (correção 2026-09-30 — a 1ª versão desta
+        # feature entregava no destino por engano; ver CONTEXT.md). Isso
+        # vira uma tarefa de prioridade MÁXIMA (`pendingPostPickupUnload`,
+        # resolvida por _try_dispatch_post_pickup_unload em TODO tick,
+        # começando já no mesmo tick que chamou esta função) — a fila normal
+        # (pending/queue) fica esperando atrás dela, sem avançar ainda.
+        state["currentRoute"] = None
+        state["pendingPostPickupUnload"] = {
+            "dropoff": current["pickup"],
+            "user": current["user"],
+            "palletType": current.get("palletType", "wood"),
+            "palletTop": current.get("palletTop", False),
+            "palletHeights": current.get("palletHeights"),
+        }
+        print("Pós-pickup: rota cancelada com o pallet no garfo -- devolvendo o pallet à origem (%s) via UNLOAD isolado (prioridade máxima)." % current["pickup"])
+        return
+
+    state["currentRoute"] = None
+    state["pickupCleared"] = False
 
     # Promove pendingRoute/routeQueue -> currentRoute (fica RESERVADA, sem
     # taskName ainda — ver _advance_queue_locked) — mesmo caminho do término
@@ -1398,6 +1835,62 @@ def _execute_cancel_current_locked(state, current):
     # _fire_route, no momento em que a rota promovida for de fato disparada
     # (ver _try_dispatch_current) — não precisa de guarda extra aqui.
     _advance_queue_locked(state)
+
+
+# Resolve `pendingPostPickupUnload` (ver _execute_cancel_current_locked
+# acima): tenta disparar a tarefa isolada de UNLOAD, e só quando conseguir
+# vira a currentRoute de verdade (com taskName/taskRecordId já preenchidos —
+# prioridade máxima, não passa pelo check-turn/espera de carga normal, o
+# robô já está posicionado). Auto-contida (cuida do próprio QUEUE_LOCK,
+# chamada de rede SEMPRE fora dele) e idempotente, mesmo espírito de
+# _try_dispatch_current — se `robot_create_and_run_unload_chain` falhar
+# (rede momentânea), NÃO desiste: o pedido continua em
+# `pendingPostPickupUnload`, e o próprio _queue_tick chama isso nos
+# próximos ciclos (rápido, ver DOCKING_ALIGNMENT_CANCEL_POLL_INTERVAL_
+# SECONDS) até conseguir -- o pallet continua no garfo enquanto isso não
+# resolve, então desistir não é opção. `pending["dropoff"]` aqui é o ponto
+# de ORIGEM da rota cancelada (ver _execute_cancel_current_locked) -- o
+# nome do campo ficou "dropoff" porque é o destino desta tarefa NOVA e
+# isolada, não da rota original.
+def _try_dispatch_post_pickup_unload():
+    with QUEUE_LOCK:
+        state = _read_queue_state()
+        pending = state.get("pendingPostPickupUnload")
+        if not pending or state.get("currentRoute"):
+            return False  # nada pendente, ou já foi resolvido (outra chamada venceu a corrida)
+
+    try:
+        task_record_id = robot_create_and_run_unload_chain(pending["dropoff"])
+    except Exception as err:
+        print("Aviso: falha ao disparar UNLOAD isolado em %s (%s) -- pallet continua no garfo, tentando de novo." % (pending["dropoff"], err))
+        return False
+
+    route = {
+        "id": secrets.token_hex(8),
+        "pickup": None,  # já foi feito na rota original, cancelada -- essa é só o descarregar
+        "dropoff": pending["dropoff"],
+        "palletType": pending.get("palletType", "wood"),
+        "palletTop": pending.get("palletTop", False),
+        "palletHeights": pending.get("palletHeights"),
+        "user": pending["user"],
+        "groupId": None,  # nunca faz parte de sequência nenhuma
+        "taskName": "UNLOAD@" + pending["dropoff"],
+        "taskRecordId": task_record_id,
+        "unloadOnly": True,  # pro front (QueuePanel) renderizar "DESCARREGANDO EM: X", e pro _queue_tick sondar por id em vez de nome
+    }
+    log_route_requested(route["id"], None, pending["dropoff"], route["taskName"], pending["user"])
+    print("Descarregando em %s (tarefa isolada, id=%s, prioridade máxima)." % (pending["dropoff"], task_record_id))
+
+    with QUEUE_LOCK:
+        state = _read_queue_state()
+        if state.get("currentRoute"):
+            return False  # correu por fora nesse meio-tempo -- não sobrescreve
+        state["currentRoute"] = route
+        state["pickupCleared"] = True  # sem fase de pickup nesta rota -- já está "limpo" por construção
+        state["currentRouteFresh"] = False  # o robô já estava ativo um instante atrás, não é uma chegada "do nada"
+        state["pendingPostPickupUnload"] = None
+        _write_queue_state(state)
+    return True
 
 
 # Cancela a currentRoute enquanto ela ainda está RESERVADA (sem taskName —
@@ -1410,6 +1903,7 @@ def _cancel_reserved_current_locked(state, current):
     log_route_completed(current["id"], "cancelled")
     state["currentRoute"] = None
     state["turnBlocked"] = False
+    state["awaitingCharge"] = False
     _drop_group_from_queue(state, current.get("groupId"))
     _advance_queue_locked(state)
 
@@ -1434,16 +1928,35 @@ def _apply_record_status(state, current, record):
         # robô sem concluir. Limpa a currentRoute pra fila não ficar travada
         # nela pra sempre (era o caso do FAILED: o código só olhava
         # FINISHED/CANCELLED, então FAILED ficava "em andamento" eterno).
-        #
+        log_route_completed(current["id"], "cancelled" if status == "CANCELLED" else "failed")
+        state["cancelPending"] = False  # já morreu por fora — nada mais a cancelar
+
+        if current.get("unloadOnly"):
+            # Cancelamento pós-pickup (ver CONTEXT.md): o UNLOAD isolado que
+            # deveria terminar de descarregar o pallet morreu SEM concluir —
+            # o pallet pode continuar no garfo. NÃO desiste: volta pro
+            # mesmo `pendingPostPickupUnload` de antes, pra tentar de novo
+            # sozinho (ver _try_dispatch_post_pickup_unload) em vez de
+            # deixar a fila (e o pallet) parados sem aviso nenhum.
+            print("ATENÇÃO: UNLOAD isolado em %s terminou sem concluir (%s) -- tentando de novo, pallet pode continuar no garfo." % (
+                current["dropoff"], status))
+            state["currentRoute"] = None
+            state["pendingPostPickupUnload"] = {
+                "dropoff": current["dropoff"],
+                "user": current["user"],
+                "palletType": current.get("palletType", "wood"),
+                "palletTop": current.get("palletTop", False),
+                "palletHeights": current.get("palletHeights"),
+            }
+            return True
+
         # NÃO promove pendingRoute/routeQueue: não sabemos o que o dispatch
         # faz com elas quando a task ativa morre por fora (pode ter derrubado
         # junto), e presumir que dá pra seguir já causou o bug "robô para e
         # volta pra energia" (ver CONTEXT.md). pendingRoute órfã volta a
         # fazer sentido no próximo disparo pelo Ponto a Ponto.
-        log_route_completed(current["id"], "cancelled" if status == "CANCELLED" else "failed")
         state["currentRoute"] = None
         state["pickupCleared"] = False
-        state["cancelPending"] = False  # já morreu por fora — nada mais a cancelar
         # Se fazia parte de uma sequência, o resto do grupo perdeu a validade
         # junto (decisão do usuário: cancelar o resto).
         _drop_group_from_queue(state, current.get("groupId"))
@@ -1523,14 +2036,18 @@ def _queue_tick():
         cancel_pending_now = bool(state.get("cancelPending"))
         cancel_pending_current = state.get("currentRoute") if cancel_pending_now else None
         cancel_pending_pickup_cleared = bool(state.get("pickupCleared"))
-    cancel_poll_interval = _cancel_poll_interval(
-        cancel_pending_now and bool(cancel_pending_current), cancel_pending_pickup_cleared)
+    cancel_poll_interval = _cancel_poll_interval(cancel_pending_now and bool(cancel_pending_current))
     if cancel_pending_now and cancel_pending_current:
-        if _current_route_cancel_ready(cancel_pending_current, cancel_pending_pickup_cleared):
+        # Checagem fresca ANTES de decidir (ver CONTEXT.md, incidente
+        # 2026-09-30 — mesmo cuidado do handler HTTP em _queue_cancel_current).
+        cancel_pending_pickup_cleared = _resolve_pickup_cleared_for_cancel(cancel_pending_current, cancel_pending_pickup_cleared)
+        if _limit_breaker_active() or _current_route_cancel_ready(cancel_pending_current, cancel_pending_pickup_cleared):
             with QUEUE_LOCK:
                 state = _read_queue_state()
                 current = state.get("currentRoute")
                 if current and state.get("cancelPending"):
+                    if cancel_pending_pickup_cleared:
+                        state["pickupCleared"] = True
                     try:
                         _execute_cancel_current_locked(state, current)
                     except Exception as err:
@@ -1540,7 +2057,14 @@ def _queue_tick():
                         # "adiado" que queremos).
                         print("cancelPending: erro ao executar cancelamento após janela segura: %s" % err)
                 _write_queue_state(state)
-            return QUEUE_POLL_INTERVAL_SECONDS
+            # Pós-pickup (ver CONTEXT.md, "Cancelamento pós-pickup"): resolve
+            # já, no mesmo tick, em vez de esperar o ciclo normal (4s) — o
+            # pallet está no garfo, quanto antes melhor. Idempotente/no-op
+            # se não havia nada pendente (caminho comum, sem pallet).
+            _try_dispatch_post_pickup_unload()
+            with QUEUE_LOCK:
+                still_pending_unload = bool(_read_queue_state().get("pendingPostPickupUnload"))
+            return DOCKING_ALIGNMENT_CANCEL_POLL_INTERVAL_SECONDS if still_pending_unload else QUEUE_POLL_INTERVAL_SECONDS
         # ainda sem espaço pra girar / ainda não alinhou no docking point --
         # a rota ATUAL continua rodando normalmente (nada abaixo trata isso
         # diferente), só sondamos de novo mais rápido no final desta função.
@@ -1553,18 +2077,35 @@ def _queue_tick():
     # nada reservado pra disparar.
     _try_dispatch_current()
 
+    # Pós-pickup (ver CONTEXT.md, "Cancelamento pós-pickup"): se sobrou um
+    # UNLOAD isolado pendente (1ª tentativa falhou por rede, ver
+    # _try_dispatch_post_pickup_unload), tenta de novo aqui — roda em TODO
+    # tick, não só no instante do cancelamento, porque o pallet continua no
+    # garfo enquanto isso não resolve. Idempotente/no-op se não há nada
+    # pendente (a checagem de leitura evita a chamada de rede à toa).
+    with QUEUE_LOCK:
+        has_pending_unload = bool(_read_queue_state().get("pendingPostPickupUnload"))
+    if has_pending_unload:
+        _try_dispatch_post_pickup_unload()
+
     with QUEUE_LOCK:
         state = _read_queue_state()
         current = state.get("currentRoute")
         if not current or not current.get("taskName"):
-            # Ou não há currentRoute nenhuma, ou ela ainda está RESERVADA
-            # esperando giro seguro pra começar (turnBlocked) — nada rodando
-            # de verdade no robô ainda pra sondar status.
+            # Ou não há currentRoute nenhuma, ela ainda está RESERVADA
+            # esperando giro seguro (turnBlocked) ou o robô chegar na energia
+            # (awaitingCharge) pra começar, ou tem um UNLOAD isolado ainda
+            # pendente (pendingPostPickupUnload) — nada rodando de verdade
+            # no robô ainda pra sondar status.
             turn_blocked_now = bool(state.get("turnBlocked"))
-            fast = cancel_pending_now or turn_blocked_now
-            return cancel_poll_interval if fast else QUEUE_POLL_INTERVAL_SECONDS
+            awaiting_charge_now = bool(state.get("awaitingCharge"))
+            pending_unload_now = bool(state.get("pendingPostPickupUnload"))
+            fast = cancel_pending_now or turn_blocked_now or awaiting_charge_now or pending_unload_now
+            interval = DOCKING_ALIGNMENT_CANCEL_POLL_INTERVAL_SECONDS if pending_unload_now else cancel_poll_interval
+            return interval if fast else QUEUE_POLL_INTERVAL_SECONDS
         try:
-            record = robot_fetch_latest_task_record(current["taskName"])
+            record = (robot_fetch_task_record_by_id(current["taskRecordId"]) if current.get("unloadOnly")
+                      else robot_fetch_latest_task_record(current["taskName"]))
         except Exception:
             return cancel_poll_interval if cancel_pending_now else QUEUE_POLL_INTERVAL_SECONDS  # falha de rede pontual — tenta de novo no próximo tick
         if not record:
@@ -1597,7 +2138,7 @@ def _queue_tick():
             _write_queue_state(state)
         cancel_pending_now = bool(state.get("cancelPending"))
         turn_blocked_now = bool(state.get("turnBlocked"))
-        pickup_cleared_now = bool(state.get("pickupCleared"))
+        awaiting_charge_now = bool(state.get("awaitingCharge"))
 
     if advanced:
         # A rota que acabou de terminar/morrer promoveu a próxima (RESERVADA,
@@ -1610,10 +2151,15 @@ def _queue_tick():
             state = _read_queue_state()
             cancel_pending_now = bool(state.get("cancelPending"))
             turn_blocked_now = bool(state.get("turnBlocked"))
-            pickup_cleared_now = bool(state.get("pickupCleared"))
+            awaiting_charge_now = bool(state.get("awaitingCharge"))
+    else:
+        # Nossa rota continua disparada e não terminou — nenhuma AUTO_SYSTEM
+        # pode estar ativa agora (ver _cancel_charge_task_hijacking_route).
+        # Fora do QUEUE_LOCK: são chamadas de rede.
+        _cancel_charge_task_hijacking_route(current["taskName"])
 
-    fast = cancel_pending_now or turn_blocked_now
-    return _cancel_poll_interval(cancel_pending_now, pickup_cleared_now) if fast else QUEUE_POLL_INTERVAL_SECONDS
+    fast = cancel_pending_now or turn_blocked_now or awaiting_charge_now
+    return _cancel_poll_interval(cancel_pending_now) if fast else QUEUE_POLL_INTERVAL_SECONDS
 
 
 def _reconcile_queue_state_on_startup():
@@ -1637,7 +2183,8 @@ def _reconcile_queue_state_on_startup():
             # subir, tenta disparar normalmente.
             return
         try:
-            record = robot_fetch_latest_task_record(current["taskName"])
+            record = (robot_fetch_task_record_by_id(current["taskRecordId"]) if current.get("unloadOnly")
+                      else robot_fetch_latest_task_record(current["taskName"]))
         except Exception:
             print("Aviso: não deu pra confirmar com o robô o status da rota salva (rede/robô indisponível agora) — mantendo o estado salvo, a sondagem de fundo tenta de novo em breve.")
             return
@@ -1650,11 +2197,34 @@ def _reconcile_queue_state_on_startup():
 
 # Thread de fundo da fila — parável, pro botão de power da GUI do .exe:
 # desligar o servidor precisa MATAR essa thread também, senão religar
-# deixaria duas rodando (sondagem/promoção duplicada). `_queue_stop` é um
-# Event; `wait(interval)` acorda cedo quando ele é setado, em vez de
-# `time.sleep` que ignoraria o pedido de parada por até QUEUE_POLL segundos.
+# deixaria duas rodando (sondagem/promoção duplicada).
+#
+# `_queue_wake` (ver CONTEXT.md, "Latência de até 4s no cancelamento
+# adiado" — incidente de campo 2026-09-30): incidente de campo mostrou o
+# UNLOAD já rodando 44s antes do cancelamento pós-pickup sair — uma
+# hipótese real é essa aqui, não específica de pickup/dropoff: em operação
+# normal a thread dorme QUEUE_POLL_INTERVAL_SECONDS (4s) inteiros entre
+# ticks; se o clique de cancelar chegar bem no início desse sono e o robô
+# ainda não estiver alinhado, `cancelPending` fica True mas NINGUÉM sonda o
+# alinhamento até a thread acordar sozinha — até 4s de janela morta,
+# comível o bastante pra engolir a margem de 30° inteira. `_poke_queue_
+# thread()` acorda a thread NA HORA sempre que algo passa a exigir atenção
+# rápida (por enquanto: `cancelPending`/`turnBlocked`/`awaitingCharge`
+# virando True), em vez de esperar o sono atual terminar. Idempotente — se
+# a thread já está acordada processando um tick, o poke não faz nada
+# (ela vai reler o estado atualizado de qualquer jeito no próximo `wait`).
+#
+# Reaproveita o MESMO Event pra "acordar por parada" e "acordar por poke":
+# um `wait()` só, sem precisar escolher entre dois Events — quem acorda
+# confere `_queue_stop.is_set()` pra saber se é hora de sair ou só de rodar
+# mais um tick.
 _queue_thread = None
 _queue_stop = threading.Event()
+_queue_wake = threading.Event()
+
+
+def _poke_queue_thread():
+    _queue_wake.set()
 
 
 def _start_queue_thread():
@@ -1662,12 +2232,20 @@ def _start_queue_thread():
     if _queue_thread is not None and _queue_thread.is_alive():
         return  # já rodando — idempotente
     _queue_stop.clear()
+    _queue_wake.clear()
 
     def _loop():
         interval = QUEUE_POLL_INTERVAL_SECONDS
-        while not _queue_stop.wait(interval):
+        while True:
+            _queue_wake.wait(interval)  # acorda no timeout OU num _poke_queue_thread()
+            if _queue_stop.is_set():
+                return
+            _queue_wake.clear()
             try:
                 interval = _queue_tick() or QUEUE_POLL_INTERVAL_SECONDS
+                fired_at = _route_fired_at["t"]
+                if fired_at is not None and time.monotonic() - fired_at < ROUTE_FIRED_WATCH_SECONDS:
+                    interval = min(interval, ROUTE_FIRED_WATCH_INTERVAL_SECONDS)
             except Exception as err:
                 print("Erro inesperado na sondagem da fila: %s" % err)
                 interval = QUEUE_POLL_INTERVAL_SECONDS
@@ -1679,6 +2257,7 @@ def _start_queue_thread():
 def _stop_queue_thread():
     global _queue_thread
     _queue_stop.set()
+    _queue_wake.set()  # acorda a thread AGORA pra ela conferir _queue_stop e sair, em vez de esperar o timeout atual
     if _queue_thread is not None:
         # join generoso: um tick pode estar no meio de uma chamada ao robô
         # (timeout 10s) segurando o QUEUE_LOCK.
@@ -1751,6 +2330,7 @@ LOGIN_PATH = "/api/login"
 LOGOUT_PATH = "/api/logout"
 SESSION_PATH = "/api/session"
 SESSION_THEME_PATH = "/api/session/theme"  # preferência de tema do PRÓPRIO usuário logado (self-service, não é coisa de admin)
+SESSION_FULLSCREEN_PATH = "/api/session/fullscreen"  # idem, ver _user_fullscreen
 USERS_PATH = "/api/users"
 
 
@@ -1832,6 +2412,18 @@ def _user_theme(user):
     return theme if theme in VALID_THEMES else DEFAULT_THEME
 
 
+# Preferência de tela cheia por CONTA (pedido do usuário, 2026-10-01) —
+# mesmo espírito do tema acima: fica vinculada à conta, não ao tablet.
+# Diferença importante: a API de Fullscreen do navegador só entra em tela
+# cheia dentro de um gesto do usuário (toque/clique) — nenhum navegador
+# deixa um `requestFullscreen()` disparar sozinho ao carregar a página, por
+# segurança. Então esta flag não "força" nada por si só: o front (ver
+# MainApp.jsx) usa ela pra decidir se deve entrar em tela cheia no PRÓXIMO
+# toque do operador no app, já que ele vai tocar em algo de qualquer jeito.
+def _user_fullscreen(user):
+    return bool(user.get("fullscreen"))
+
+
 def _bootstrap_users_if_missing():
     """Primeiro boot sem users.json: cria um admin inicial com senha
     aleatória impressa no console uma única vez. Evita cravar uma senha
@@ -1900,6 +2492,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not self._require_admin():
                 return
             self._get_users()
+        elif self.path == KANBANS_PATH:
+            if not self._require_auth():
+                return
+            self._get_kanbans()
         else:
             super().do_GET()
 
@@ -1918,17 +2514,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
             self._queue_enqueue_batch(user)
         elif self.path == QUEUE_CANCEL_CURRENT_PATH:
-            if not self._require_auth():
+            user = self._require_auth()
+            if not user:
                 return
-            self._queue_cancel_current()
+            self._queue_cancel_current(user)
         elif self.path == QUEUE_REMOVE_QUEUED_PATH:
-            if not self._require_auth():
+            user = self._require_auth()
+            if not user:
                 return
-            self._queue_remove_queued()
+            self._queue_remove_queued(user)
         elif self.path == QUEUE_EMERGENCY_PATH:
             if not self._require_auth():
                 return
             self._queue_emergency()
+        elif self.path == DEV_LIMIT_BREAKER_PATH:
+            user = self._require_auth()
+            if not user:
+                return
+            self._set_limit_breaker(user)
         elif self.path == OCCUPIED_SET_PATH:
             if not self._require_auth():
                 return
@@ -1950,6 +2553,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not user:
                 return
             self._set_own_theme(user)
+        elif self.path == SESSION_FULLSCREEN_PATH:
+            user = self._require_auth()
+            if not user:
+                return
+            self._set_own_fullscreen(user)
         elif self.path == USERS_PATH:
             if not self._require_admin():
                 return
@@ -2001,9 +2609,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         user = next((u for u in users if u["username"] == username), None)
         if not user:
             return None
-        # theme viaja junto da sessão pro app já montar no tema certo do
-        # usuário, sem piscar no tema errado antes de buscar em outro lugar.
-        return {"username": user["username"], "isAdmin": bool(user.get("isAdmin")), "theme": _user_theme(user)}
+        # theme/fullscreen viajam junto da sessão pro app já montar certo pro
+        # usuário, sem piscar errado antes de buscar em outro lugar.
+        return {"username": user["username"], "isAdmin": bool(user.get("isAdmin")), "isMaster": bool(user.get("isMaster")), "kanbanIds": _user_kanban_ids(user), "theme": _user_theme(user), "fullscreen": _user_fullscreen(user)}
 
     def _require_auth(self):
         user = self._get_authenticated_user()
@@ -2070,7 +2678,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 user["failedAttempts"] = 0
                 _write_users(users)
         token = make_session_token(username)
-        body = json.dumps({"ok": True, "username": username, "isAdmin": bool(user.get("isAdmin")), "theme": _user_theme(user)}).encode("utf-8")
+        body = json.dumps({"ok": True, "username": username, "isAdmin": bool(user.get("isAdmin")), "isMaster": bool(user.get("isMaster")), "kanbanIds": _user_kanban_ids(user), "theme": _user_theme(user), "fullscreen": _user_fullscreen(user)}).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self._set_session_cookie_header(token, SESSION_MAX_AGE_SECONDS)
@@ -2116,12 +2724,37 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             _write_users(users)
         self._relay(200, "application/json", b'{"ok":true}')
 
+    def _set_own_fullscreen(self, requester):
+        """Mesma ideia de _set_own_theme acima — cada um só muda a própria
+        preferência de tela cheia, pela sessão."""
+        try:
+            payload = self._read_json_body()
+            fullscreen = bool(payload["fullscreen"])
+        except (json.JSONDecodeError, KeyError) as err:
+            self._relay(400, "application/json", json.dumps({"error": str(err)}, ensure_ascii=False).encode("utf-8"))
+            return
+        with USERS_LOCK:
+            users = _read_users()
+            user = next((u for u in users if u["username"] == requester["username"]), None)
+            if not user:
+                self._relay(404, "application/json", b'{"error":"usu\xc3\xa1rio n\xc3\xa3o encontrado"}')
+                return
+            user["fullscreen"] = fullscreen
+            _write_users(users)
+        self._relay(200, "application/json", b'{"ok":true}')
+
     # --- administração de usuários (admin only) -------------------------------
     def _get_users(self):
         with USERS_LOCK:
             users = _read_users()
         body = json.dumps(
-            [{"username": u["username"], "isAdmin": bool(u.get("isAdmin")), "locked": bool(u.get("locked"))} for u in users],
+            [{
+                "username": u["username"],
+                "isAdmin": bool(u.get("isAdmin")),
+                "isMaster": bool(u.get("isMaster")),
+                "kanbanIds": _user_kanban_ids(u),
+                "locked": bool(u.get("locked")),
+            } for u in users],
             ensure_ascii=False,
         ).encode("utf-8")
         self._relay(200, "application/json", body)
@@ -2132,11 +2765,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             username = payload["username"].strip()
             password = payload["password"]
             is_admin = bool(payload.get("isAdmin", False))
-        except (json.JSONDecodeError, KeyError, AttributeError) as err:
+            is_master = bool(payload.get("isMaster", False))
+            kanban_ids = payload.get("kanbanIds") or []
+            if not isinstance(kanban_ids, list):
+                raise ValueError("kanbanIds precisa ser uma lista")
+        except (json.JSONDecodeError, KeyError, AttributeError, ValueError) as err:
             self._relay(400, "application/json", ('{"error":"%s"}' % str(err)).encode("utf-8"))
             return
         if not username or not password:
             self._relay(400, "application/json", b'{"error":"usu\xc3\xa1rio e senha obrigat\xc3\xb3rios"}')
+            return
+        # Admin e Mestre nunca precisam de kanban (não têm restrição de
+        # origem nenhuma) — um usuário COMUM precisa de pelo menos um,
+        # senão não haveria como ele enviar/cancelar nada (pedido explícito
+        # do usuário: restrição é escolha do admin, mas precisa ser
+        # configurada JÁ na criação, não deixada "sem restrição" por
+        # esquecimento).
+        if not is_admin and not is_master and not kanban_ids:
+            self._relay(400, "application/json", b'{"error":"usu\xc3\xa1rio comum precisa de pelo menos um kanban"}')
             return
         with USERS_LOCK:
             users = _read_users()
@@ -2147,9 +2793,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "username": username,
                 "passwordHash": hash_password(password),
                 "isAdmin": is_admin,
+                "isMaster": is_master,
+                "kanbanIds": kanban_ids,
                 "failedAttempts": 0,
                 "locked": False,
                 "theme": DEFAULT_THEME,
+                "fullscreen": False,
             })
             _write_users(users)
         self._relay(200, "application/json", b'{"ok":true}')
@@ -2184,6 +2833,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # senão viraria um admin sem conseguir logar.
                     user["locked"] = False
                     user["failedAttempts"] = 0
+            if "isMaster" in payload:
+                user["isMaster"] = bool(payload["isMaster"])
+            # Mesma trava de criação (ver _create_user): usuário COMUM
+            # (nem admin, nem Mestre) precisa de pelo menos um kanban. Só
+            # valida quando o payload de fato toca em algo que poderia
+            # deixar essa combinação inválida — uma edição qualquer (ex:
+            # só trocar senha) numa conta antiga sem kanban configurado
+            # não é bloqueada à força por esta trava.
+            if "kanbanIds" in payload:
+                new_kanban_ids = payload["kanbanIds"]
+                if not isinstance(new_kanban_ids, list):
+                    self._relay(400, "application/json", b'{"error":"kanbanIds precisa ser uma lista"}')
+                    return
+                user["kanbanIds"] = new_kanban_ids
+            if ("isAdmin" in payload or "isMaster" in payload or "kanbanIds" in payload) \
+                    and not user.get("isAdmin") and not user.get("isMaster") and not _user_kanban_ids(user):
+                self._relay(400, "application/json", b'{"error":"usu\xc3\xa1rio comum precisa de pelo menos um kanban"}')
+                return
             if "locked" in payload:
                 # Desbloquear (painel "Usuários", clique no cadeado) também
                 # zera o contador — senão a próxima senha errada rebloquearia
@@ -2215,6 +2882,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         with CALIBRATION_LOCK:
             payload = CALIBRATION_FILE.read_bytes() if CALIBRATION_FILE.exists() else EMPTY_CALIBRATION
         self._relay(200, "application/json", payload)
+
+    # Kanbans (Close Ups da vista 'top') elegíveis pra restringir um
+    # usuário (painel Usuários, dropdown "KANBANS") — exclui os "livres pra
+    # todos" (FREE_KANBAN_IDS, ver acima). Só id+nome: o admin escolhe pelo
+    # nome, mas tudo que persiste é o id (ver pedido do usuário — nome pode
+    # ser renomeado depois sem quebrar quem já está restrito a ele).
+    def _get_kanbans(self):
+        with CALIBRATION_LOCK:
+            cal = _read_calibration()
+        kanbans = [
+            {"id": c["id"], "name": c.get("name") or c["id"]}
+            for c in cal["top"]["closeUps"]
+            if c["id"] not in FREE_KANBAN_IDS
+        ]
+        self._relay(200, "application/json", json.dumps(kanbans, ensure_ascii=False).encode("utf-8"))
 
     def _save_calibration(self):
         length = int(self.headers.get("Content-Length", 0) or 0)
@@ -2302,8 +2984,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "cancelPendingMessage": CANCEL_PENDING_MESSAGE if state.get("cancelPending") else None,
             "turnBlocked": bool(state.get("turnBlocked")),
             "turnBlockedMessage": TURN_BLOCKED_START_MESSAGE if state.get("turnBlocked") else None,
+            "awaitingCharge": bool(state.get("awaitingCharge")),
+            "awaitingChargeMessage": AWAITING_CHARGE_MESSAGE if state.get("awaitingCharge") else None,
+            "postPickupUnloadMessage": POST_PICKUP_UNLOAD_MESSAGE if (
+                state.get("pendingPostPickupUnload") or (state.get("currentRoute") or {}).get("unloadOnly")
+            ) else None,
             "robotCharging": _robot_status_cache.get("charging"),
             "robotBattery": _robot_status_cache.get("battery"),
+            "robotReturningToCharge": bool(_robot_status_cache.get("returningToCharge")),
+            "limitBreaker": _limit_breaker_active(),
         }, ensure_ascii=False).encode("utf-8")
         self._relay(200, "application/json", body)
 
@@ -2327,11 +3016,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._relay(400, "application/json", json.dumps({"error": str(err)}, ensure_ascii=False).encode("utf-8"))
             return
 
+        with CALIBRATION_LOCK:
+            cal = _read_calibration()
+
+        # Restrição por kanban (ver "Kanbans" acima, pedido do usuário
+        # 2026-10-01): GATE no servidor, não só feedback de UI — um usuário
+        # restrito só pode PEGAR (origem) do(s) kanban(s) atribuído(s) a
+        # ele (ou dos "livres pra todos"), mas pode ENTREGAR em qualquer
+        # lugar sem restrição nenhuma.
+        for pair in pairs:
+            if not _user_can_pick_up_from(requester, pair["pickup"], cal):
+                self._relay(403, "application/json", json.dumps(
+                    {"error": "Sua conta não tem permissão pra retirar pallets de %s — fora do seu kanban." % pair["pickup"]},
+                    ensure_ascii=False).encode("utf-8"))
+                return
+
         # Caso 3 (fronteira/FIFO) como GATE FINAL, não só feedback do
         # cliente — e em cadeia, simulando a ocupação passo a passo (ver
         # validate_route_chain).
-        with CALIBRATION_LOCK:
-            cal = _read_calibration()
         error = validate_route_chain(cal["top"]["lots"], cal.get("occupied") or [], pairs)
         if error:
             self._relay(400, "application/json", json.dumps({"error": error}, ensure_ascii=False).encode("utf-8"))
@@ -2345,17 +3047,40 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         # groupId só existe quando há sequência de verdade: com um par só
         # não há "resto do grupo" pra cancelar se ele falhar.
-        group_id = secrets.token_hex(8) if len(pairs) > 1 else None
+        #
+        # "Tarefas aguardando envio" (ver CONTEXT.md): o botão "Iniciar
+        # tarefas" manda a lista preparada inteira num envio só — precisa ser
+        # um só pra validate_route_chain acima projetar a ocupação através de
+        # TODAS elas (enviadas uma a uma, uma tarefa que depende de outra
+        # anterior seria recusada). Mas a lista mistura tarefas avulsas e
+        # grupos de "Lotes em sequência", cada um com seu pallet — então cada
+        # par pode trazer `group` (chave de grupo do cliente, ou null pra
+        # avulsa) e `palletType`/`palletTop` próprios. Sem `group` em nenhum
+        # par, é o formato antigo: o lote inteiro vira um grupo só.
+        if any("group" in pair for pair in pairs):
+            client_groups = {}
+            group_ids = []
+            for pair in pairs:
+                key = pair.get("group")
+                if key is None:
+                    group_ids.append(None)
+                else:
+                    if key not in client_groups:
+                        client_groups[key] = secrets.token_hex(8)
+                    group_ids.append(client_groups[key])
+        else:
+            legacy_group_id = secrets.token_hex(8) if len(pairs) > 1 else None
+            group_ids = [legacy_group_id] * len(pairs)
         routes = [{
             "id": secrets.token_hex(8),
             "pickup": pair["pickup"],
             "dropoff": pair["dropoff"],
-            "palletType": pallet_type,
-            "palletTop": pallet_top,
+            "palletType": pair.get("palletType", pallet_type),
+            "palletTop": bool(pair.get("palletTop", pallet_top)),
             "palletHeights": heights,
             "user": requester["username"],
-            "groupId": group_id,
-        } for pair in pairs]
+            "groupId": group_ids[i],
+        } for i, pair in enumerate(pairs)]
 
         first_slot = None
         with QUEUE_LOCK:
@@ -2393,6 +3118,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             for route in routes:
                 if not state.get("currentRoute"):
                     state["currentRoute"] = route
+                    # Fila estava REALMENTE vazia antes desta rota (ver
+                    # _advance_queue_locked acima, onde promoções marcam
+                    # False) — é o único caso onde uma AUTO_SYSTEM nativa
+                    # pode já estar rodando há um tempo desconhecido, então
+                    # é o único caso que precisa checar retorno pra energia
+                    # em _try_dispatch_current.
+                    state["currentRouteFresh"] = True
                     state["pickupCleared"] = False
                     slot = "current"
                 elif not state.get("pendingRoute"):
@@ -2437,12 +3169,66 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     #     CANCEL_PENDING_POLL_INTERVAL_SECONDS e cancela sozinha assim que
     #     der, sem o operador precisar fazer nada além de esperar o aviso
     #     sumir da tela.
-    def _queue_cancel_current(self):
+    # Liga/renova ou desliga a licença do limit breaker (ver
+    # LIMIT_BREAKER_LEASE_SECONDS). Só admin. `on: true` repetido só empurra o
+    # vencimento pra frente — o tablet chama isso a cada poucos segundos
+    # enquanto o Doomguy está sorrindo.
+    def _set_limit_breaker(self, requester):
+        if not requester.get("isAdmin"):
+            self._relay(403, "application/json", json.dumps({"error": "só admin"}, ensure_ascii=False).encode("utf-8"))
+            return
+        try:
+            on = bool(self._read_json_body().get("on"))
+        except json.JSONDecodeError:
+            on = False
+        was_active = _limit_breaker_active()
+        if on:
+            _limit_breaker["until"] = time.monotonic() + LIMIT_BREAKER_LEASE_SECONDS
+            _limit_breaker["by"] = requester["username"]
+            if not was_active:
+                print("LIMIT BREAKER LIGADO por %s — sem travas de cancelamento/início de rota." % requester["username"])
+        else:
+            _limit_breaker["until"] = 0.0
+            if was_active:
+                print("LIMIT BREAKER desligado por %s." % requester["username"])
+        self._relay(200, "application/json", json.dumps(
+            {"ok": True, "active": on, "leaseSeconds": LIMIT_BREAKER_LEASE_SECONDS}).encode("utf-8"))
+
+    def _queue_cancel_current(self, requester):
+        # "Limit breaker" (botão do Doomguy, modo desenvolvedor — ver
+        # CONTEXT.md): `force` pula TODO o tratamento de cancelamento seguro
+        # (cancelamento adiado/check-turn e alinhamento de docking pré-pickup)
+        # e cancela na hora. Vem POR REQUISIÇÃO e nunca é guardado aqui — de
+        # propósito: não existe "modo ligado" no servidor que possa sobrar
+        # depois de um reload/reinício. Só vale pra conta admin (o modo
+        # desenvolvedor em si é só uma trava de UI, a senha fica no bundle).
+        try:
+            payload = self._read_json_body()
+        except json.JSONDecodeError:
+            payload = {}
+        force = (bool(payload.get("force")) and bool(requester.get("isAdmin"))) or _limit_breaker_active()
+        if force:
+            print("LIMIT BREAKER: cancelamento forçado por %s (sem espera de giro seguro)." % requester["username"])
+        # Lido ANTES do QUEUE_LOCK de propósito — CALIBRATION_LOCK e
+        # QUEUE_LOCK nunca são aninhados neste código, pra nunca arriscar
+        # ordem de lock trocada/deadlock com outro trecho.
+        with CALIBRATION_LOCK:
+            cal = _read_calibration()
         with QUEUE_LOCK:
             state = _read_queue_state()
             current = state.get("currentRoute")
             if not current:
                 self._relay(200, "application/json", b'{"ok":true}')
+                return
+            # Restrição por kanban (ver "Kanbans" acima) — só se aplica
+            # quando há uma origem de verdade (current["pickup"]); UNLOAD
+            # isolado pós-cancelamento (pickup None) não tem origem pra
+            # checar, e de qualquer forma não tem botão de cancelar normal
+            # na UI (ver CONTEXT.md, "Cancelamento pós-pickup").
+            if current.get("pickup") and not force and not _user_can_pick_up_from(requester, current["pickup"], cal):
+                self._relay(403, "application/json", json.dumps(
+                    {"error": "Sua conta não tem permissão pra cancelar uma rota com origem em %s — fora do seu kanban." % current["pickup"]},
+                    ensure_ascii=False).encode("utf-8"))
                 return
             if not current.get("taskName"):
                 # RESERVADA, ainda esperando o check-turn liberar o disparo
@@ -2463,7 +3249,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             _try_dispatch_current()
             self._relay(200, "application/json", b'{"ok":true}')
             return
-        if already_pending:
+        if already_pending and not force:
             # clique repetido enquanto já está esperando — idempotente.
             self._relay(200, "application/json", json.dumps(
                 {"ok": True, "pending": True, "message": CANCEL_PENDING_MESSAGE},
@@ -2473,9 +3259,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # Chamada de rede FORA do lock (mesmo cuidado de _emergency_suppress/
         # _queue_tick) — não prende QUEUE_LOCK durante uma chamada que pode
         # ser lenta (timeout de rede até 3s, ver TURN_CHECK_TIMEOUT_SECONDS).
+        # Confere de novo, fresco, se o pickup já terminou de verdade ANTES
+        # de mandar qualquer cancelamento (ver CONTEXT.md, incidente
+        # 2026-09-30 — a sondagem periódica pode ter perdido essa corrida).
         # ANTES do pickup usa o alinhamento de docking (mais confiável, ver
         # _current_route_cancel_ready acima); DEPOIS, o check-turn de sempre.
-        safe = _current_route_cancel_ready(current, pickup_cleared)
+        pickup_cleared = _resolve_pickup_cleared_for_cancel(current, pickup_cleared)
+        safe = True if force else _current_route_cancel_ready(current, pickup_cleared)
 
         with QUEUE_LOCK:
             state = _read_queue_state()
@@ -2484,10 +3274,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 # terminou por conta própria enquanto perguntávamos.
                 self._relay(200, "application/json", b'{"ok":true}')
                 return
+            # Propaga a checagem fresca acima pro estado que
+            # _execute_cancel_current_locked vai ler daqui a pouco — ela
+            # decide pré/pós-pickup direto de `state["pickupCleared"]`.
+            if pickup_cleared:
+                state["pickupCleared"] = True
 
             if safe is False:
                 state["cancelPending"] = True
                 _write_queue_state(state)
+                # Acorda a thread de fundo AGORA (ver "Latência de até 4s no
+                # cancelamento adiado" — incidente de campo 2026-09-30): sem
+                # isso, a sondagem rápida só começa quando o sono atual da
+                # thread terminar sozinho, até QUEUE_POLL_INTERVAL_SECONDS
+                # (4s) de janela morta bem no início da corrida contra o
+                # reconhecimento de câmera na docagem.
+                _poke_queue_thread()
                 self._relay(200, "application/json", json.dumps(
                     {"ok": True, "pending": True, "message": CANCEL_PENDING_MESSAGE},
                     ensure_ascii=False).encode("utf-8"))
@@ -2503,6 +3305,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self._relay(502, "application/json", json.dumps({"error": "Erro ao cancelar a rota atual: " + str(err)}, ensure_ascii=False).encode("utf-8"))
                 return
             _write_queue_state(state)
+        # Pós-pickup (ver CONTEXT.md, "Cancelamento pós-pickup"): resolve já,
+        # na mesma resposta, em vez de esperar o próximo tick — o pallet está
+        # no garfo, quanto antes melhor. No caminho comum (sem pallet), é
+        # idempotente/no-op e a promoção normal abaixo é quem dispara.
+        _try_dispatch_post_pickup_unload()
         # A promoção pode já disparar a próxima na hora, se o giro
         # estiver seguro (mesma otimização do fim de rota normal).
         _try_dispatch_current()
@@ -2515,13 +3322,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     # intacta. Se o slot de pending esvaziar e ainda houver fila, a próxima
     # sobe pra pending na hora (ainda RESERVADA — o robô nunca fica sem
     # "próxima" localmente, mesmo que ainda não tenha sido disparada).
-    def _queue_remove_queued(self):
+    def _queue_remove_queued(self, requester):
         try:
             payload = self._read_json_body()
             route_id = payload["id"]
         except (json.JSONDecodeError, KeyError) as err:
             self._relay(400, "application/json", json.dumps({"error": str(err)}, ensure_ascii=False).encode("utf-8"))
             return
+        # Lido ANTES do QUEUE_LOCK de propósito — ver mesmo comentário em
+        # _queue_cancel_current (nunca aninhar CALIBRATION_LOCK dentro de
+        # QUEUE_LOCK).
+        with CALIBRATION_LOCK:
+            cal = _read_calibration()
         with QUEUE_LOCK:
             state = _read_queue_state()
             pending = state.get("pendingRoute")
@@ -2533,6 +3345,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 # já saiu (outro operador removeu, ou já virou currentRoute) —
                 # idempotente, não é erro.
                 self._relay(200, "application/json", b'{"ok":true}')
+                return
+
+            # Restrição por kanban (ver "Kanbans" acima, pedido do usuário:
+            # a mesma regra de cancelar vale pra remover da fila de espera).
+            if target.get("pickup") and not _user_can_pick_up_from(requester, target["pickup"], cal):
+                self._relay(403, "application/json", json.dumps(
+                    {"error": "Sua conta não tem permissão pra remover uma rota com origem em %s — fora do seu kanban." % target["pickup"]},
+                    ensure_ascii=False).encode("utf-8"))
                 return
 
             group_id = target.get("groupId")
@@ -2608,6 +3428,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 state["pickupCleared"] = False
                 state["cancelPending"] = False
                 state["turnBlocked"] = False
+                state["awaitingCharge"] = False
+                state["currentRouteFresh"] = False
                 state["emergency"] = True
                 _write_queue_state(state)
             elif not active and already:

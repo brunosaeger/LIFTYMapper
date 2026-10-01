@@ -24,7 +24,7 @@ async function jsonRequest(path, options) {
 // dispositivos nunca "decidem" a mesma coisa duas vezes (ver server.py,
 // QUEUE_LOCK).
 export function useLiveState() {
-  const [state, setState] = useState({ currentRoute: null, pendingRoute: null, routeQueue: [], occupied: [], emergency: false, cancelPending: false, cancelPendingMessage: null, turnBlocked: false, turnBlockedMessage: null, robotCharging: null, robotBattery: null });
+  const [state, setState] = useState({ currentRoute: null, pendingRoute: null, routeQueue: [], occupied: [], emergency: false, cancelPending: false, cancelPendingMessage: null, turnBlocked: false, turnBlockedMessage: null, awaitingCharge: false, awaitingChargeMessage: null, postPickupUnloadMessage: null, robotCharging: null, robotBattery: null, robotReturningToCharge: false });
   const [status, setStatus] = useState('loading'); // loading | idle | error
 
   const refresh = useCallback(() => {
@@ -76,11 +76,28 @@ export function useLiveState() {
   // cancelamento de verdade não aconteceu ainda; o servidor continua
   // tentando sozinho em segundo plano (o `cancelPending`/
   // `cancelPendingMessage` que vêm do próximo poll refletem isso).
-  const cancelCurrent = useCallback(async () => {
-    const result = await jsonRequest('/api/queue/cancel-current', { method: 'POST' });
+  // `force` ("limit breaker", modo desenvolvedor): pula a espera de giro
+  // seguro e cancela na hora — só honrado pelo servidor pra conta admin.
+  const cancelCurrent = useCallback(async ({ force = false } = {}) => {
+    const result = await jsonRequest('/api/queue/cancel-current', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force: !!force }),
+    });
     await refresh();
     return result; // { ok, pending?, message? }
   }, [refresh]);
+
+  // "Limit breaker" (modo desenvolvedor): liga/renova ou desliga a licença no
+  // servidor — ela expira sozinha se não for renovada (ver server.py,
+  // LIMIT_BREAKER_LEASE_SECONDS), por isso quem liga chama isso repetido.
+  const setLimitBreakerLease = useCallback(async (on) => {
+    await jsonRequest('/api/dev/limit-breaker', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ on: !!on }),
+    });
+  }, []);
 
   // Parada de emergência (liga/desliga). Ligar cancela tudo no robô e
   // mantém ele parado (o servidor reprime a task de carga que o robô
@@ -150,15 +167,32 @@ export function useLiveState() {
     // girar antes de começar a se mover.
     turnBlocked: state.turnBlocked,
     turnBlockedMessage: state.turnBlockedMessage,
+    // Trava de retorno pra energia (ver server.py, AWAITING_CHARGE_MESSAGE)
+    // — true enquanto a currentRoute está RESERVADA esperando o robô
+    // terminar de voltar sozinho pra carga (AUTO_SYSTEM) e começar a
+    // carregar de verdade, antes de começar a rota nova.
+    awaitingCharge: state.awaitingCharge,
+    awaitingChargeMessage: state.awaitingChargeMessage,
+    // Cancelamento pós-pickup (ver server.py, POST_PICKUP_UNLOAD_MESSAGE) —
+    // não nulo desde o instante em que uma rota é cancelada já com o pallet
+    // no garfo até o robô terminar de descarregar isolado no destino
+    // original (currentRoute.unloadOnly na Fila mostra qual).
+    postPickupUnloadMessage: state.postPickupUnloadMessage,
     // null = ainda não sabemos (servidor não conseguiu falar com o robô
     // ainda); true/false = carregando ou não, ver server.py _refresh_robot_status.
     robotCharging: state.robotCharging,
+    // 3º estado do banner (ver RobotStatusBanner.jsx): true enquanto o robô
+    // está voltando sozinho pra energia (AUTO_SYSTEM nativa) mas ainda não
+    // chegou/começou a carregar de verdade — só faz sentido quando
+    // robotCharging é false (ver server.py, _robot_returning_to_charge_now).
+    robotReturningToCharge: state.robotReturningToCharge,
     // null = ainda não sabemos, OU o robô não manda `battery` nesse formato
     // (ver _normalize_battery em server.py — 0-100 assumido, não confirmado
     // em campo ainda); 0-100 caso contrário.
     robotBattery: state.robotBattery,
     status,
     enqueueRoutes,
+    setLimitBreakerLease,
     cancelCurrent,
     removeQueued,
     setEmergency,

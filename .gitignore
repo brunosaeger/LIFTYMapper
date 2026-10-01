@@ -19,6 +19,10 @@ route_log.json
 queue_state.json
 robot_host.txt
 
+# Log de console do server.py (nohup/redirecionamento) — saída de runtime,
+# não código-fonte, pode conter IPs de tablets/robô na rede local.
+server.log
+
 # Login — users.json tem hash de senha (nunca texto puro, mas ainda assim
 # não é pra commitar) e session_secret.key é a chave que assina os cookies
 # de sessão (perder ela derruba todo mundo logado, vazar ela permite forjar

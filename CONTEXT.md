@@ -3453,4 +3453,1107 @@ nunca à toa.
 
 Feature considerada **estável e validada** a partir daqui.
 
+## Trava: não iniciar task durante retorno pra energia (2026-09-25)
 
+**Cenário levantado pelo usuário**: fila vazia → o robô volta sozinho pra
+carga (AUTO_SYSTEM nativa) → o operador manda uma rota nova ANTES dele
+chegar/começar a carregar. Até aqui, isso caía no gate normal de
+"check-turn no início de tarefas" (`_try_dispatch_current`): pergunta pro
+bridge se dá pra girar ONDE o robô estiver naquele instante e, se disser
+que sim, dispara na hora. O problema: nesse trecho o robô pode estar em
+QUALQUER heading, no meio do caminho de volta — sem docking point, sem
+ponto calibrado de referência por perto, nenhuma das garantias de
+alinhamento que já vimos em pontos de pallet/lote. E já sabemos, pela
+"Varredura ao vivo" (acima), que o check-turn diverge da navegação real —
+não é uma referência confiável nesse tipo de posição arbitrária.
+
+**Observação do usuário que simplifica tudo**: se a fila JÁ tinha algo
+enfileirado quando a rota anterior terminou, o robô nem chega a voltar pra
+energia — a próxima rota já assume, e ele parte de um ponto onde acabou de
+soltar um pallet (docking/lote, sempre alinhado, como já confirmado na
+seção anterior). Ou seja, **o cenário perigoso só existe quando a fila
+estava genuinamente vazia** (senão a AUTO_SYSTEM nem é criada) — não
+precisa de tratamento nenhum pro caso "fila não vazia", só pro retorno de
+verdade pra energia.
+
+**Decisão**: em vez de confiar no check-turn nesse trecho específico, uma
+trava mais simples e robusta — só aceita (dispara) a rota nova depois do
+robô CHEGAR na energia e começar a carregar de verdade
+(`_robot_status_cache["charging"]`, o mesmo sinal já usado pro bypass do
+check-turn no ponto de energia). Aceitar a rota na fila continua normal (o
+operador não é bloqueado nem precisa reenviar) — só o DISPARO fica adiado,
+com aviso na tela, mesmo padrão UX de `cancelPending`/`turnBlocked`.
+
+**Implementado em `server.py`**:
+- `_robot_returning_to_charge_now()` — `True` só quando existe uma
+  AUTO_SYSTEM ativa (`robot_find_active_charge_task_id`, já usada em
+  `_fire_route`/`_recover_from_rotate_error_if_stuck`) E o robô ainda não
+  está carregando. Fail-open pra `False` em erro de rede (mesma postura do
+  check-turn em todo o resto do arquivo — falha pontual não pode travar o
+  disparo pra sempre, mesmo que aqui o fail-open corra o risco oposto:
+  deixar disparar durante um retorno de verdade numa falha bem
+  cronometrada. Trade-off aceito, consistente com o resto do código).
+- `_try_dispatch_current()` — nova checagem ANTES do check-turn: se
+  `_robot_returning_to_charge_now()` é `True`, nem pergunta pro check-turn
+  — marca `awaitingCharge` no estado e devolve `False` (tenta de novo no
+  próximo tick). Assim que `charging` vira `True`, essa checagem já devolve
+  `False` sozinha (não está mais "voltando"), cai direto no bypass de
+  check-turn do ponto de energia (que já existia) e dispara imediatamente.
+- Novo campo `awaitingCharge` (+ `AWAITING_CHARGE_MESSAGE`) no
+  `queue_state.json`/API `/api/live-state`, limpo em
+  `_cancel_reserved_current_locked` (operador cancelou enquanto esperava) e
+  no disparo com sucesso — mesmo ciclo de vida de `turnBlocked`.
+  `_queue_tick` sonda mais rápido (`CANCEL_PENDING_POLL_INTERVAL_SECONDS`)
+  enquanto `awaitingCharge` está ativo, mesma urgência de tela de
+  `turnBlocked`.
+- Front (`MainApp.jsx`/`useLiveState.js`): `awaitingChargeMessage` entra no
+  mesmo banner de `cancelPendingMessage`/`turnBlockedMessage` (nunca
+  coexistem pra mesma rota — a trava de energia é checada ANTES do
+  check-turn, então uma rota RESERVADA só pode estar esperando por UM dos
+  dois motivos por vez).
+
+**Testado isolado** (9 cenários, com `_read_queue_state`/`_write_queue_state`
+mockados em memória — nunca o `queue_state.json` de verdade, que o processo
+rodando ao vivo lê/escreve sozinho): não dispara e marca `awaitingCharge` se
+voltando pra energia (sem nem perguntar pro check-turn); dispara normal se
+não é o caso; dispara assim que `charging` vira `True`, direto pelo bypass,
+sem perguntar check-turn; idempotente (não reescreve o estado à toa a cada
+tick); no-op se não há nada reservado; fail-open em erro de rede.
+
+**AINDA NÃO VALIDADO EM CAMPO** — precisa de um teste real com o robô
+voltando pra energia e uma rota nova chegando no meio do caminho.
+
+### Bug de campo 2026-09-25 — travava a PRÓPRIA fila (corrigido no mesmo dia)
+
+Usuário reportou o oposto do que essa trava deveria fazer: tinha um destino
+em andamento + outra tarefa NA FILA; cancelou o primeiro, e em vez do robô
+seguir com a tarefa já enfileirada, ele "exigiu ir até a base de
+carregamento pra iniciar a próxima". Hipótese do usuário: a `AUTO_SYSTEM`
+nasce imediatamente quando uma tarefa termina/é cancelada, mesmo havendo
+outra na fila local.
+
+**Confirmado com dados reais do robô** (`task-record/page`):
+```
+09:31:18  CD6toCD5MT6 (FAST) criada
+09:32:38  CD6toCD5MT6 CANCELLED
+09:32:38  energy_... (AUTO_SYSTEM) criada NO MESMO SEGUNDO
+09:33:36  essa AUTO_SYSTEM CANCELLED, outra energy_... já toma o lugar
+09:34:11  a 2ª AUTO_SYSTEM FINISHED (conectou de verdade)
+```
+A `AUTO_SYSTEM` nativa aparece porque a dispatch service vê "sem task
+ativa" por uma fração de segundo entre uma rota terminar e a próxima ser
+disparada — isso SEMPRE existiu (é o motivo de `_fire_route` já achar e
+cancelar essa AUTO_SYSTEM órfã antes/depois de disparar a rota nova) e
+nunca foi um problema, porque a rota nova disparava imediatamente por
+cima. A primeira versão de `_robot_returning_to_charge_now()` (implementada
+mais cedo nesse mesmo dia) via essa AUTO_SYSTEM transitória e a tratava
+IGUAL a um retorno de verdade — segurando a rota da fila (`awaitingCharge`)
+até o robô terminar de ir e voltar da carga (quase 90s nesse caso), quando
+na verdade havia trabalho de sobra pronto pra rodar na hora.
+
+**1ª correção (margem de tempo) — TAMBÉM abandonada, ver próxima seção**:
+`_robot_returning_to_charge_now()` só devolveria `True` se a MESMA
+`AUTO_SYSTEM` continuasse aparecendo por pelo menos
+`AWAITING_CHARGE_GRACE_SECONDS` (5s) seguidos, medido pelo relógio LOCAL
+(as duas máquinas estão desincronizadas em ~19h, confirmado comparando
+timestamps reais — comparar contra `createTime`/`startTime` do robô teria
+dado uma conta sem sentido). Chegou a ser implementada e testada, mas o
+usuário encontrou o furo antes de validar em campo de verdade — ver "Bug
+de campo 2026-09-25, 2ª rodada" logo abaixo.
+
+### Bug de campo 2026-09-25, 2ª rodada — margem de tempo não resolve uso simultâneo
+
+Usuário testou um cenário real antes de validar a correção acima: robô
+termina a ÚNICA operação (fila fica genuinamente vazia — exatamente o
+cenário que essa trava deveria proteger), e o operador manda uma rota nova
+rapidamente (cenário normal com vários tablets ao mesmo tempo). A rota foi
+aceita e disparada na hora — "óbvio, foi dentro da janela de 5s". Ou seja:
+a margem de tempo não conseguia diferenciar uma AUTO_SYSTEM genuína (que
+também é "nova" nesse instante, simplesmente porque acabou de nascer) de
+um blip de transição de fila — ela só filtrava CASOS CURTOS, não o
+CENÁRIO CERTO. O usuário perguntou se dava pra diferenciar um envio feito
+por uma pessoa (clique manual) de um disparo feito pelo próprio sistema de
+filas — resposta: sim, e é um sinal bem melhor que tempo nenhum.
+
+**Solução definitiva (ideia do usuário)**: a diferença nunca esteve em
+QUANTO TEMPO a AUTO_SYSTEM está ativa — está em DE ONDE a rota reservada
+veio:
+- Uma rota **promovida** da fila (já estava em `pendingRoute`/`routeQueue`
+  ANTES da anterior terminar) nunca pode enfrentar uma AUTO_SYSTEM
+  genuína — enquanto a rota anterior rodava, a dispatch service tinha uma
+  task nossa ativa, então não existia a janela "sem task" pra uma
+  AUTO_SYSTEM nascer. Qualquer uma vista bem nessa hora é sempre um blip
+  novo do exato instante da troca — já resolvido por `_fire_route` (acha e
+  cancela ela sozinho, antes/depois de disparar a promovida).
+- Só uma rota **fresca** (a fila estava REALMENTE vazia antes dela chegar
+  — só possível via `_queue_enqueue_batch`, nunca via promoção) pode
+  enfrentar uma AUTO_SYSTEM que já vinha rodando há qualquer tempo,
+  inclusive zero segundos — não importa, porque não havia mais nenhuma
+  rota nossa em andamento de qualquer forma.
+
+**Implementação**: novo campo `currentRouteFresh` (bool) no
+`queue_state.json`. `_queue_enqueue_batch` marca `True` só quando a rota
+cai no slot `currentRoute` porque a fila estava vazia
+(`not state.get("currentRoute")`). `_advance_queue_locked` sempre marca
+`False` (nas três saídas: promove `pendingRoute`, promove direto da
+`routeQueue`, ou fila esvazia de vez) — nunca é uma chegada "do nada".
+`_try_dispatch_current` só chama `_robot_returning_to_charge_now()` quando
+`currentRouteFresh` é `True`; se for `False` (promovida), dispara direto
+pro check-turn de sempre, sem checar retorno pra energia nenhum.
+`_robot_returning_to_charge_now()` voltou a ser simples (sem margem de
+tempo, sem estado em memória): `True` assim que existe QUALQUER
+AUTO_SYSTEM ativa — porque agora só é chamada exatamente no caso onde isso
+já é suficiente. `_queue_emergency` também passou a limpar
+`awaitingCharge`/`currentRouteFresh` junto com o resto (gap que já existia
+desde a 1ª versão de `awaitingCharge`, corrigido de brinde aqui).
+
+**Testado isolado** (13 cenários): `_advance_queue_locked` sempre marca
+`currentRouteFresh=False` nas três saídas; rota fresca segura quando
+retornando, dispara normal quando não; rota promovida dispara DIRETO
+mesmo com uma AUTO_SYSTEM ativa, sem nem chamar a checagem; bypass de
+carga; idempotência; no-op sem nada reservado — mais os 17 de pré-pickup
+cancel (regressão), tudo sem tocar o `queue_state.json` real.
+
+**Validado em campo (2026-09-25)** — sequência real de 9 transições
+consecutivas (`67536`→`67546`) confirmou o comportamento certo: rota
+termina, AUTO_SYSTEM nasce no mesmo segundo, próxima rota da fila dispara
+por cima em 2-5s, sem esperar nada. `currentRouteFresh` funcionando como
+esperado.
+
+### Bug de campo 2026-09-25, 3ª rodada — retardatária na fresta do próprio `_fire_route`
+
+Mesmo com `currentRouteFresh` funcionando bem nas outras 8 transições, UMA
+delas (`67546`→`67548`) desviou pra energia mesmo assim — usuário relatou
+"fez tudo muito bem, só essa desviou". Dados reais:
+```
+11:18:59  CAYtoCAXMT7 (67546) termina
+11:19:00  energy_... (67547, AUTO_SYSTEM) E CD5toCD6MT7 (67548, nossa rota)
+          criadas NO MESMO SEGUNDO
+11:20:12  67547 termina sozinha (FINISHED -- conectou de verdade, ~72s)
+11:20:13  67548 só AGORA começa a se mover (startTime), logo depois da 67547
+```
+**Causa**: diferente do bug das rodadas 1-2 (que era sobre quando ESPERAR),
+este é uma corrida dentro do próprio `_fire_route`, que sempre existiu:
+ele checa "existe carga ativa?" (`robot_find_active_charge_task_id`,
+olhando só o registro MAIS RECENTE) ANTES de criar a rota nova — de
+propósito, porque checar DEPOIS veria a própria rota nova como "mais
+recente" e nunca acharia a AUTO_SYSTEM antiga. Mas isso deixa uma fresta:
+se a AUTO_SYSTEM nascer bem no instante ENTRE essa checagem e o robô
+começar a mover pra rota nova, `_fire_route` nunca chega a vê-la — e o
+robô, do lado de dentro do dispatch nativo, prioriza o comando que já
+estava em voo (a AUTO_SYSTEM), deixando a rota nova "criada" mas parada até
+a AUTO_SYSTEM terminar sozinha.
+
+**Correção**: `robot_find_any_active_charge_task_id(size=3)` — escaneia os
+ÚLTIMOS registros (não só o topo) em vez de olhar só o mais recente.
+`_fire_route` agora faz uma SEGUNDA checagem com essa função, DEPOIS de
+criar a rota nova — nesse momento o topo já é a nossa própria rota, mas
+uma AUTO_SYSTEM retardatária que tenha nascido na fresta ainda aparece
+mais abaixo na lista, e é cancelada também (sem duplicar se for o mesmo id
+já cancelado na checagem de antes).
+
+**Continua sendo mitigação, não eliminação total** (mesma ressalva já
+registrada antes pra esse tipo de corrida): se a AUTO_SYSTEM nascer DEPOIS
+até dessa segunda checagem, ainda escaparia — mas a janela agora é muito
+menor (só o tempo de criar a rota + fazer a checagem, não mais o tempo
+inteiro até o próximo tick).
+
+**Testado isolado** (8 cenários): retardatária achada e cancelada mesmo
+com a checagem de antes vindo vazia; não duplica cancelamento se for o
+mesmo id; cancela as duas se forem ids diferentes; não cancela nada sem
+retardatária; disparo não falha se a checagem de retardatária der erro de
+rede; `robot_find_any_active_charge_task_id` escaneando corretamente —
+mais os 13 de `awaitingCharge` e 17 de pré-pickup cancel (regressão), 38
+no total, sem tocar o `queue_state.json` real.
+
+**AINDA NÃO REVALIDADO EM CAMPO** — precisa de outra sequência longa pra
+confirmar que esse desvio específico não se repete (aceitando que a
+corrida nunca é 100% eliminável, só bem mais estreita).
+
+
+
+## Tarefas aguardando envio (IMPLEMENTADO 2026-09-25, AINDA NÃO VALIDADO EM CAMPO)
+
+**Pedido do usuário**: "Enviar tarefa" no Ponto a Ponto não dispara mais na
+hora — a tarefa entra numa lista local, nova subseção **TAREFAS AGUARDANDO
+ENVIO** logo abaixo do botão, pra dar tempo de conferir antes de mandar pro
+robô. Só o botão verde **▶ Iniciar tarefas** envia. Motivo: organização e
+evitar mandar algo errado por pressa.
+
+**O que dá pra fazer na lista** (`web/src/components/StagedTasksPanel.jsx`):
+- Barrinhas no estilo do painel Fila, com número de ordem, rota, e o ícone
+  da textura do pallet (madeira/azul) à direita; X fora da barra remove.
+  Entram deslizando da esquerda pra direita.
+- **Tocar na textura** abre uma janelinha pra trocar madeira/azul (e "Pallet
+  de cima" no azul).
+- **Tocar na barrinha** carrega a tarefa no Ponto a Ponto pra editar
+  (origem/destino aparecem ampliados no mapa, azul/laranja, igual à seleção
+  normal): título vira "Editando tarefa", Enviar vira "Salvar alterações",
+  Limpar vira "Cancelar edição", e o checkbox "Lotes em sequência" TRAVA
+  (avulsa não vira grupo). Tocar num grupo edita a sequência inteira (abre
+  em modo sequência, também travado). Tocar de novo na mesma barrinha sai
+  sem mudar nada. "Iniciar tarefas" fica bloqueado enquanto edita.
+- **Segurar ~0,3s e arrastar** reordena: a barrinha cresce ao levantar,
+  vira uma prévia semitransparente seguindo o dedo, e as vizinhas deslizam
+  pra abrir espaço. Deslizar SEM segurar rola a lista (as barrinhas têm
+  `touch-action: none` pro arrasto funcionar no dedo, então a rolagem é
+  feita na mão pelo componente). Soltar fora da lista (mapa, canto vazio)
+  volta pro lugar.
+- **Grupos de "Lotes em sequência"** chegam juntos, num tracejado laranja,
+  e só se movem inteiros (o modelo é uma lista de UNIDADES — avulsa ou
+  grupo — nunca tarefas soltas de um grupo). Dividem o mesmo pallet (o
+  servidor sempre tratou o grupo com um pallet só). Remover uma tarefa de um
+  grupo deixa o resto; grupo com uma só vira avulsa.
+
+**Regra de obstrução** (`MainApp.jsx`, `validateChain`/`checkStagedChange`):
+a MESMA regra do servidor (`validate_route_chain`): cada tarefa conferida
+contra o armazém como ele estará quando ela rodar (ocupação projetada pelas
+anteriores). Reordenar, remover ou salvar uma edição que quebra uma cadeia
+válida é recusado com aviso e pulso vermelho no mapa (ex: pôr "pegar A2"
+antes de "pegar A", ou remover a que tira o A quando a seguinte depende
+disso). A seleção nova no Ponto a Ponto também projeta a partir das já
+preparadas (`projectedOccupancy` → `stagedBeforeSelection`), então dá pra
+montar A e depois A2 em tarefas separadas. Se a lista ficar inválida por
+fora (ocupação mudou), a primeira tarefa problemática fica em vermelho e
+"Iniciar" trava com o motivo — e aí mexer na ordem é permitido (pode ser
+justamente o conserto).
+
+**Envio num lote só, com pallet e grupo POR PAR** (`server.py`,
+`_queue_enqueue_batch`): mandar cada tarefa preparada separadamente não
+funcionaria — o servidor valida a cadeia só DENTRO de um envio, então uma
+tarefa que depende de outra anterior seria recusada. Por isso "Iniciar"
+manda a lista inteira de uma vez, e cada par agora pode trazer `group`
+(chave do cliente, ou `null` pra avulsa) e `palletType`/`palletTop`
+próprios. Avulsas continuam independentes na fila do servidor (sem
+`groupId` — cancelar uma não derruba as outras); cada grupo ganha seu
+próprio `groupId`. Sem `group` em nenhum par = formato antigo, idêntico ao
+de antes (o lote inteiro vira um grupo, pallet único).
+
+**⚠️ Deploy**: o `server.py` serve o `web/dist` direto do disco, então o
+front novo entra no ar pra qualquer tablet que recarregar mesmo SEM
+reiniciar o servidor. Um servidor antigo ignora `group`/pallet por par:
+uma lista com pallets misturados iria toda com o pallet da primeira
+(altura errada no garfo) e tudo viraria um grupo só. **Reiniciar o
+`server.py` antes de usar "Iniciar tarefas".**
+
+**Estado local do dispositivo**: a lista não vai pro servidor até o
+"Iniciar" — não é compartilhada entre tablets e some num reload da página.
+
+**Testado** (backend FALSO `mock_server.py` + Vite numa porta separada +
+Chromium headless — nunca contra o `server.py` real, que controla o robô):
+18 cenários com mouse (entrada na lista sem envio, tarefa dependente aceita,
+grupo com tracejado, reordenação inválida recusada, grupo inteiro pro topo,
+soltar no mapa volta, remoção de dependência recusada, troca de pallet,
+edição de avulsa e de grupo, "Iniciar" manda UM envio com grupo/pallet por
+par e esvazia a lista, nenhum "task" na tela) + 5 com toque real via CDP
+(deslizar não reordena, segurar mostra a prévia, arrastar com o dedo
+reordena, toque rápido abre edição). O teste de toque achou um bug real,
+corrigido: depois de um arrasto com o dedo o toque seguinte era ignorado
+(a marca "ignorar o clique do fim do arrasto" ficava pendurada, porque com
+dedo o navegador não dispara esse clique). E o de mouse achou outro: grupo
+(alto) não chegava ao topo — a posição passou a ser calculada pela borda
+que empurra (de cima subindo, de baixo descendo), não pelo centro. Servidor:
+5 testes isolados do formato novo e do antigo, com disco/robô mockados.
+
+**Também nesta mudança**: sidebar do Ponto a Ponto com a mesma largura da
+Fila (448px); "task" → "tarefa(s)" em todos os textos visíveis.
+
+## "Limit breaker" — modo de teste do desenvolvedor (IMPLEMENTADO 2026-09-28)
+
+Botão com a cara do Doomguy no Toolbar, ao lado do `{ }`, **só visível em
+modo desenvolvedor**. Tocar alterna rosto sério → sorrindo (ligado, com
+brilho vermelho pulsando). Enquanto ligado, cancelar a rota em andamento
+pula TODO o tratamento de cancelamento seguro — nem a espera de giro
+(check-turn/`cancelPending`) nem o alinhamento de docking pré-pickup — e
+cancela na hora. Pedido do usuário: agilizar testes de desenvolvimento.
+
+**Atualização (mesmo dia, pedido do usuário: "precisa ser 100% livre")**:
+o limit breaker desliga TAMBÉM as travas de início de tarefas — check-turn
+no disparo (`turnBlocked`) e a espera de carga (`awaitingCharge`) — e
+resolve na hora um cancelamento que já estava pendente em segundo plano.
+
+**Por que virou licença em vez de `force` por requisição**: o disparo da
+próxima rota da fila acontece na thread de fundo (`_queue_tick` →
+`_try_dispatch_current`), sem nenhuma requisição do tablet que pudesse
+carregar o pedido. Então o servidor mantém uma LICENÇA em memória
+(`_limit_breaker`, `_limit_breaker_active()`) que expira sozinha em
+`LIMIT_BREAKER_LEASE_SECONDS` (12s). O tablet com o Doomguy sorrindo renova
+a cada 4s (`POST /api/dev/limit-breaker {"on": true}`, só admin — 403 pra
+outros); desligar o botão ou sair do modo desenvolvedor manda
+`{"on": false}` na hora.
+
+**Nunca fica ligado esquecido** (exigência do usuário): recarregar/fechar a
+página ou reiniciar o app = para de renovar, desliga sozinho em até ~12s;
+reiniciar o servidor = zera na hora (só memória). Enquanto a licença está
+ativa, ela vale pro sistema INTEIRO (qualquer tablet), não só pra quem
+ligou — é um modo de teste. O `force` por requisição no
+`POST /api/queue/cancel-current` continua existindo (cancelamento na hora
+mesmo antes da primeira renovação chegar). O servidor loga
+`LIMIT BREAKER LIGADO/desligado por <usuário>` e cada cancelamento forçado,
+e `/api/live-state` expõe `limitBreaker` (estado real no servidor).
+
+Imagens em `web/src/assets/doomguy-normal.png`/`doomguy-limit.png`
+(recortadas e igualadas de tamanho a partir das do usuário, renderizadas
+com `image-rendering: pixelated`). Senha do modo desenvolvedor trocada no
+mesmo dia (constante `DEV_PASSWORD` em `MainApp.jsx`).
+
+**Testado**: 5 testes isolados do servidor (admin com force cancela sem
+perguntar giro; force fura pendente; force de não-admin ignorado; sem force
+espera normal; pendente sem force continua idempotente) + 8 no navegador
+contra backend falso (botão escondido fora do modo dev, senha antiga
+recusada, nova libera, imagem troca, `force:true`/`false` no corpo,
+sair do modo dev e recarregar desligam). Depois da atualização: +7 testes
+da licença no servidor (liga/desliga, 403 pra não-admin, expira sem
+renovar, renovar empurra o vencimento, sem licença as travas de início
+seguram, com licença dispara sem trava de energia nem check-turn e limpa
+`turnBlocked`/`awaitingCharge`, cancelamento pendente resolve na hora no
+tick) + 4 no navegador (renova enquanto ligado, desligar e sair do modo dev
+mandam `off`, para de renovar depois).
+
+## Incidente de campo 2026-09-29 — GENERATE_PATH_UNKNOWN_ERROR depois de cancelar num docking point fora do corredor
+
+Monitor só-leitura (pose/tasks/erros/fila a cada 2s, sem check-turn)
+durante uma sessão de ~20 tarefas. Um único erro:
+`GENERATE_PATH_UNKNOWN_ERROR — desviou da rota atual P3 -> P1, distância
+7.39m` (08:05:21 no relógio do robô).
+
+**Linha do tempo** (relógio do robô):
+```
+08:03:32  EXC2toEXC3 começa; operador cancela 8s depois (cancelPending)
+          robô segue: corredor y≈44.6 de P1 (23.1,44.8) até P3 (10.5,44.5),
+          desce a pista até HEXC2 (11.67,37.10) e gira pra alinhar com EXC2
+08:05:12  cancelamento pré-pickup executa no giro de alinhamento, como
+          projetado — robô a 0.05m do HEXC2
+08:05:16  AUTO_SYSTEM (energy) nasce — nunca inicia (startTime vazio)
+08:05:17  CAZtoCAZ2 (próxima da fila) disparada pelo server.py (fica WAITING)
+08:05:21  erro P3->P1 7.39m; AUTO_SYSTEM cancelada; CAZtoCAZ2 RUNNING
+```
+Depois disso o robô **hesitou ~2 min** antes de seguir a rota normalmente:
+32s parado no HEXC2, giro de 180°, anda 0.8m, 10s parado, sobe até P3,
+**40s parado em P3**, e só então segue pelo corredor até HCAZ.
+
+**O que os números mostram**: 7.39m é exatamente a distância do HEXC2 ao
+segmento P3→P1 (conferido pela calibração). O HEXC2 fica no fundo de uma
+pista sem saída, ~7m ao sul do corredor. A AUTO_SYSTEM de volta pra carga
+tenta gerar a rota a partir do trecho P3→P1 — o MESMO trecho do incidente
+de 2026-09-19/23 (24.60m daquela vez) — e desiste quando o robô está longe
+dele. Isso matiza a conclusão anterior ("curvas fechadas, não distância"):
+pelo menos pra essa mensagem, a distância que o robô reporta bate
+exatamente com a distância geométrica até o trecho.
+
+**Contraste na mesma sessão**: cancelamentos nos docking points de CA*/CD*
+(HCAZ, HCD..., colados no corredor norte-sul x≈23.8) retomaram a próxima
+rota em ~5s, sem erro. O problema só apareceu no docking point no fundo da
+pista EX*. Caso parecido às 06:53:24: `EXPtoRDY2` cancelada → AUTO_SYSTEM
+que nunca inicia → erro `HEXF3 -> HEXF2 1.02m`. (O de 07:18:08, `HEXQ ->
+P19 4.36m`, foi no meio de uma task de 27 min — outro caso, fora da janela
+do monitor.)
+
+**Nosso sistema fez o que devia**: cancelamento no alinhamento de
+docking, próxima rota da fila disparada na hora (`currentRouteFresh=False`,
+sem trava de energia), AUTO_SYSTEM órfã cancelada. O erro da AUTO_SYSTEM
+em si é inofensivo (ela seria cancelada de qualquer jeito). O custo real
+foram os ~2 min de hesitação pra sair da pista — sem intervenção manual.
+
+**Sem correção aplicada ainda** — opções levantadas, a decidir:
+1. Aceitar (ele se recuperou sozinho).
+2. Ajustar o grafo de rotas na REEMAN pra ter um nó na boca/no meio das
+   pistas EX* (docking points nunca a vários metros do grafo) — mesmo tipo
+   de ajuste que resolveu o incidente de 2026-09-23.
+3. Do nosso lado, evitar cancelar no fundo de pistas longe do grafo — não
+   é trivial (o alinhamento no docking é justamente o ponto seguro pra
+   girar).
+
+`nav_status` (`/reeman/nav_status`) ficou em `res=4` a sessão toda — reflete
+a navegação direta da SLAM (último `cancel_goal`), não as tasks da dispatch;
+não serve pra acompanhar tarefa.
+
+## Incidente 2026-09-29 (2) — AUTO_SYSTEM "sequestra" a rota da fila; e o P3→P1 é FIXO
+
+**O que o usuário viu**: rota `EXC2toRAY2` terminou com sucesso; a próxima
+da fila (`OAtoOB`, adicionada durante a anterior) deveria começar, mas o
+robô foi até a energia primeiro. O usuário cancelou `OAtoOB` nesse meio.
+
+**Linha do tempo** (relógio do robô, `task-record` + `action-record`):
+```
+08:39:59  EXC2toRAY2 FINISHED
+08:40:00  OAtoOB criada pelo server.py (promovida da fila, na hora)
+08:40:01  AUTO_SYSTEM (energy) criada E atribuída ao robô
+08:40:04  OAtoOB só agora atribuída — atrás da AUTO_SYSTEM
+08:40:05  AUTO_SYSTEM começa; robô vai até a energia (~4 min)
+08:43:57  AUTO_SYSTEM FINISHED
+08:43:59  OAtoOB finalmente começa; cancelamento pré-pickup (pedido durante
+          a ida pra energia) espera o docking HOA, como projetado
+08:46:21  OAtoOB CANCELLED no giro de alinhamento, a 0.05m do HOA — certo
+08:46:29  nova AUTO_SYSTEM — fica ASSIGNED e nunca inicia
+08:46:38  GENERATE_PATH_UNKNOWN_ERROR "P3 -> P1, 41.03m"
+```
+
+**Causa do desvio pra energia**: a REEMAN criou a AUTO_SYSTEM ~1s DEPOIS da
+nossa rota já existir (a nossa ainda não tinha sido atribuída ao robô —
+isso levou 4s), e atribuiu a dela primeiro. As duas checagens de
+`_fire_route` (antes e logo depois de criar a rota) rodam antes disso,
+então não tinham o que cancelar. A "corrida" que eu tinha descrito como
+estreita (milissegundos) na verdade tem janela de SEGUNDOS: enquanto a
+nossa rota espera atribuição, a dispatch acha o robô ocioso. Nenhuma trava
+nossa roda depois do disparo pra corrigir isso. O cancelamento em si
+funcionou certo (não cancelou durante a ida pra energia porque não era a
+nossa rota que estava andando; cancelou no docking HOA quando ela rodou).
+
+**Descoberta que CORRIGE a análise do incidente anterior**: o erro sempre
+cita o MESMO trecho P3→P1, não importa onde o robô esteja — 7.39m do
+HEXC2, 41.03m do HOA (conferido: distância geométrica 41.06m), 24.60m do
+HEXA em 2026-09-19. Ou seja, **P3→P1 não é "o trilho mais próximo"; é o
+trecho INICIAL fixo do retorno automático pra carga** configurado na
+REEMAN. Onde quer que o robô esteja, a AUTO_SYSTEM tenta começar por ele e
+só consegue se o robô estiver bem perto. Consequência: **ligar os docking
+points ao P3 com trilhos de saída (a solução proposta antes) provavelmente
+NÃO resolve** o erro da AUTO_SYSTEM — ela não usa o grafo livremente. Fica
+registrado como hipótese descartada pelos dados antes de ser testada.
+
+**Estado deixado**: AUTO_SYSTEM `67663` ASSIGNED sem conseguir iniciar
+(robô parado no HOA) — o mesmo "travado sem task" de 2026-09-19. Rotas
+normais (`FAST`) planejam bem de qualquer lugar; mandar uma tarefa ou levar
+na mão resolve.
+
+**Correção (2026-09-29, mesmo dia)** — usuário ajustou a rota de volta pra
+carga na REEMAN (parte do P3→P1) e pediu a correção do "sequestro" no
+servidor:
+- `_cancel_charge_task_hijacking_route(task_name)`: chamada em TODO tick de
+  `_queue_tick` enquanto a `currentRoute` está disparada e não terminou
+  (ramo "não avançou", fora do `QUEUE_LOCK`). Se houver qualquer AUTO_SYSTEM
+  ativa (`robot_find_any_active_charge_task_id`, olha os 3 registros mais
+  recentes), cancela. Fila ociosa, rota reservada (sem `taskName`) ou rota
+  que acabou de terminar NÃO passam por aqui — a volta pra carga genuína
+  continua livre, sem a oscilação da supressão removida em 2026-09-24.
+- `_route_fired_at` + `ROUTE_FIRED_WATCH_SECONDS` (20s) /
+  `ROUTE_FIRED_WATCH_INTERVAL_SECONDS` (1.5s): `_fire_route` marca a hora do
+  disparo e o loop da fila roda a cada 1.5s nessa janela, pra pegar a
+  AUTO_SYSTEM antes dela começar a andar (+1s criada, +5s andando no
+  incidente).
+- Testado isolado (7): rota esperando atribuição e rota rodando cancelam a
+  AUTO_SYSTEM; sem AUTO_SYSTEM não cancela nada; fila ociosa, rota reservada
+  e rota recém-terminada não cancelam; `_fire_route` marca a hora.
+  **AINDA NÃO VALIDADO EM CAMPO.**
+
+## Rolagem do menu Ponto a Ponto com o dedo (CORRIGIDO 2026-09-29)
+
+**Problema relatado**: no tablet, não dava pra rolar o menu Ponto a Ponto
+arrastando o dedo na subseção "Tarefas aguardando envio" — ao contrário do
+painel de marcações X, que rola bem.
+
+**Causa**: o painel X usa rolagem 100% nativa do navegador (o `.sidebar`
+rola sozinho). A lista de tarefas tinha três coisas atrapalhando: as
+barrinhas com `touch-action: none` (pro arrasto funcionar) desligavam a
+rolagem nativa quando o dedo começava em cima delas; a rolagem "feita na
+mão" que compensava isso mexia só na lista interna, não no menu; e a lista
+tinha rolagem própria (máx. 380px) dentro do menu que também rola.
+
+**Correção** (`StagedTasksPanel.jsx`, `App.css`):
+- Lista sem rolagem própria — quem rola é o menu inteiro, nativo, igual ao
+  painel X. Barrinhas com `touch-action: pan-y`: deslizar na vertical rola
+  normalmente.
+- O arrasto continua exigindo SEGURAR parado ~0,3s. Só aí o componente
+  trava a rolagem nativa (`touchmove` com `preventDefault`, listener
+  não-passivo) até soltar. Menu de contexto do Android bloqueado no segurar.
+- Arrastando perto da borda de cima/baixo do menu (70px), ele rola sozinho
+  (até 14px por quadro), e as posições das barrinhas são corrigidas pelo
+  quanto o menu rolou (`retarget`).
+- Fora da lista (em cima do botão Iniciar, do mapa, de espaço vazio), a
+  prévia mostra as vizinhas voltando pro lugar — é o que acontece ao
+  soltar ali (regra do usuário: soltar em lugar inválido volta pro lugar).
+
+**Testado** (toque real via CDP, backend falso): deslizar em cima de uma
+barrinha rola o menu (~290px) sem reordenar nem abrir edição; segurar e
+arrastar reordena sem o menu rolar junto; arrastar até a borda rola o
+menu sozinho até o fim; dedo em cima do Iniciar = prévia volta pro lugar;
+voltando pra lista e soltando, a tarefa vai pro fim; toque rápido abre
+edição. Arrasto com mouse continua funcionando.
+
+**Complemento (mesmo dia)**: segurar o dedo numa tarefa abria o menu do
+Chrome do tablet (baixar, imprimir, modo de leitura). Bloqueado no app
+inteiro: `contextmenu` com `preventDefault` global em `main.jsx` (exceto
+`input`/`textarea`, onde o menu serve pra colar), `user-select: none` +
+`-webkit-touch-callout: none` no `body` (campos de texto continuam
+selecionáveis) e `-webkit-user-drag: none` em imagens. Testado no navegador:
+bloqueado em botões, lista de tarefas, mapa e toolbar; liberado em campo de
+texto.
+
+## Visualizar tarefa (IMPLEMENTADO 2026-09-29)
+
+Tocar numa barrinha de "Tarefas aguardando envio" (além de abrir a edição,
+como já fazia):
+1. O mapa dá zoom no **kanban (Close Up) onde está a ORIGEM** — o mesmo zoom
+   animado do toque num kanban no modo Interação (`handleCloseUpClick`).
+   Ponto fora de qualquer kanban: zoom centralizado nele (4× o
+   enquadramento geral).
+2. O banner "VISUALIZANDO: KANBAN X" aparece (agora também fora do modo
+   Interação) com uma 2ª linha `ORIGEM → DESTINO`, cada ponta numa pílula
+   clicável (ciano/âmbar, as cores do destaque no mapa); a ponta sendo
+   vista fica preenchida.
+3. Tocar numa ponta leva o mapa ao kanban DELA e troca o nome no banner.
+4. Tocar de novo na mesma barrinha (ou salvar/cancelar a edição, sair do
+   modo) sai da visualização — banner some, o mapa fica onde está. Num
+   grupo, tocar noutra barrinha do mesmo grupo só troca a tarefa vista.
+
+**Como acha o kanban**: `FloorPlanCanvas.contentPositionOf(name)` calcula a
+posição real da célula (lote em (x,y), girado/esticado, célula i em
+(i·cellSize, 0) — mesma transformação do desenho) e `closeUpContaining`
+testa contra os retângulos dos kanbans (o menor, se sobrepor). O pedido
+chega por `focusRequest {name, id}` (MainApp → mapa; `id` muda a cada
+pedido).
+
+**Nomes ao vivo**: o banner lê a seleção em edição (`pickupNames`/
+`dropoffNames` no índice da tarefa), no apelido visual — mudar a origem
+clicando no mapa já atualiza o banner. Banner centralizado no mapa também
+com a sidebar larga (Ponto a Ponto/Fila, `--wide`).
+
+**Testado** (navegador, backend falso, tarefa com origem e destino em
+kanbans diferentes — MÁQUINA 80 → MÁQUINA 79): zoom ao tocar; banner com o
+kanban da origem e origem destacada; origem visível na tela; tocar no
+destino troca kanban/destaque e mostra o destino; voltar pra origem; tocar
+de novo sai (banner some).
+
+## Cancelamento pós-pickup: UNLOAD isolado via `task-template/generic/chain` (IMPLEMENTADO 2026-09-30, AINDA NÃO VALIDADO EM CAMPO)
+
+**Problema que ficou em aberto desde o início do projeto**: cancelar uma
+rota DEPOIS do pickup (robô já com o pallet no garfo) nunca teve tratamento
+automático — a estrutura do dispatch sempre exigiu pickup+dropoff numa
+task, então não tinha como criar uma tarefa só pra "descarregar aqui" (nem
+pelo site do fabricante, confirmado pelo usuário tentando na prática).
+Cancelar nesse trecho, até aqui, só freava o robô onde estivesse — sem
+soltar o pallet em lugar nenhum.
+
+**Descoberta que destravou isso (2026-09-29/30)**: testado ao vivo,
+`POST /task-template/generic/chain` aceita uma `taskChain` com uma ÚNICA
+ação (sem exigir PICKUP+UNLOAD) — recusado pelo SITE do fabricante, mas
+aceito pela API (`code: 0`, vira um `task-record` de verdade,
+`taskType: TEMP_TASK_CHAIN`). Achado num teste de investigação: mandamos
+`{"taskChain":[{"action":"UNLOAD","targetPoint":"A",...}]}` com o garfo
+VAZIO — aceitou, criou o registro, mas ficou em `WAITING` até cancelarmos
+uma `AUTO_SYSTEM` antiga que estava competindo pelo único AGV da frota (não
+tem relação com o UNLOAD em si). **Ainda não testado com pallet de verdade
+em cima** — só confirma que a API aceita o formato, não que o robô executa
+o descarregar fisicamente sem erro.
+
+**Design (pedido do usuário, confirmado incluindo "Lotes em sequência";
+CORRIGIDO em 2026-09-30 depois do 1º teste de campo — ver "Bug de campo
+2026-09-30 (3º do dia)" abaixo, esta descrição já reflete a versão
+corrigida)**:
+1. Operador cancela uma rota que já passou do pickup (`pickupCleared`).
+2. O robô continua até o ponto de DESTINO normalmente (a task original não
+   é interrompida no meio do caminho) — mas só pra usar aquele ponto como
+   docagem segura pra cancelar, NÃO pra entregar ali. Cancelar significa
+   abortar a entrega, não completá-la.
+3. No destino, o MESMO mecanismo de alinhamento de docking que já usávamos
+   pra pré-pickup (ver seção acima) dispara o cancelamento — contra o ponto
+   de DESTINO (é lá que o robô está fisicamente chegando). Giro que o robô
+   já faz de qualquer jeito, mesma margem de 30°.
+4. Assim que cancela, dispara na hora uma tarefa de PRIORIDADE MÁXIMA — só
+   com UNLOAD no ponto de ORIGEM da rota cancelada (devolve o pallet pra
+   onde foi pego) — que aparece na fila como **"DESCARREGANDO EM: {nome
+   fantasia da origem}"**. A fila normal (pending/queue) fica esperando
+   atrás dela, sem tentar avançar.
+5. Terminando o descarregar (pallet de volta na origem), a fila segue
+   normal (próxima tarefa, ou volta pra energia — exatamente como já
+   acontecia).
+6. "Lotes em sequência": não muda nada de especial — o resto do grupo já
+   caía imediatamente ao cancelar (antes ou depois do pickup, sempre foi
+   assim), e a tarefa isolada de descarregar nunca herda `groupId` nenhum.
+
+**Unificação do mecanismo de alinhamento** (`server.py`): o que antes era
+`_pre_pickup_cancel_ready`/`PRE_PICKUP_CANCEL_*` (só pro pickup) virou
+`_docking_alignment_cancel_ready(pallet_point)`/`DOCKING_ALIGNMENT_CANCEL_*`
+— a MESMA função, parametrizada pelo ponto. `_current_route_cancel_ready`
+escolhe `current["dropoff"]` se `pickup_cleared`, senão `current["pickup"]`.
+`_cancel_poll_interval` perdeu o parâmetro `pickup_cleared`: agora sonda
+rápido sempre que `cancelPending`, dos dois lados (a corrida contra o
+reconhecimento de câmera na docagem vale pra pickup E pra dropoff).
+
+**Implementação nova**:
+- `robot_create_and_run_unload_chain(dropoff)` — `POST /task-template/
+  generic/chain` com `taskChain` de uma ação só (`UNLOAD`, `params: {}`,
+  `agvTypes` em vez de `agvId` — só AGV da frota hoje). A resposta devolve
+  `taskChainId`, que é o MESMO id do task-record criado (confirmado ao
+  vivo) — por isso não precisamos de um nome nosso pra sondar depois.
+- `robot_fetch_task_record_by_id(id, size=5)` — acha o registro entre os
+  mais recentes (o dispatch não dá um endpoint de busca por id direto).
+- `_execute_cancel_current_locked`: se `pickupCleared`, em vez de avançar a
+  fila, marca `pendingPostPickupUnload` com `dropoff = current["pickup"]`
+  (o campo se chama "dropoff" porque é o destino da tarefa NOVA e isolada,
+  que é a ORIGEM da rota cancelada — ver correção abaixo) — a fila normal
+  fica parada até isso resolver. `_drop_group_from_queue` continua rodando
+  IMEDIATAMENTE, igual sempre foi.
+- `_try_dispatch_post_pickup_unload()` — resolve o pendente: dispara o
+  chain, e só quando CONSEGUE vira a `currentRoute` de verdade (com
+  `taskName`/`taskRecordId`/`unloadOnly: True`, `pickup: None`,
+  `groupId: None`, `pickupCleared: True` por construção). Se a rede falhar,
+  NÃO desiste — mantém `pendingPostPickupUnload` pro próximo tick tentar de
+  novo (o pallet continua no garfo, desistir não é opção). Chamada: na
+  mesma resposta HTTP do cancelamento, no mesmo tick que resolve um
+  `cancelPending` em segundo plano, e em TODO tick normal enquanto
+  continuar pendente (sondagem rápida, mesmo intervalo da corrida contra a
+  câmera).
+- `_apply_record_status`: `unloadOnly` + `FINISHED` marca o destino ocupado
+  e avança a fila normal (igual sempre foi). `unloadOnly` + terminal SEM
+  sucesso (CANCELLED/FAILED por fora) NÃO desiste — volta pra
+  `pendingPostPickupUnload` pra tentar de novo, com aviso no console
+  (`ATENÇÃO: UNLOAD isolado... pallet pode continuar no garfo`).
+- `_queue_tick`/`_reconcile_queue_state_on_startup`: sondam uma rota
+  `unloadOnly` por ID (`robot_fetch_task_record_by_id`), não por nome — o
+  dispatch dá um nome aleatório ("76f46_2026-09-30 10:40:05") que não
+  temos como prever.
+- Aviso ao operador: `POST_PICKUP_UNLOAD_MESSAGE`, exposto em
+  `/api/live-state` como `postPickupUnloadMessage` (ativo desde o
+  `pendingPostPickupUnload` até a `currentRoute.unloadOnly` terminar) —
+  reaproveita o `CancelPendingBanner` já existente (mesmo padrão de
+  `cancelPendingMessage`/`turnBlockedMessage`/`awaitingChargeMessage`,
+  nunca coexistem).
+- Front (`QueuePanel.jsx`): `currentRoute.unloadOnly` renderiza
+  "DESCARREGANDO EM: {nome fantasia}" em vez de origem→destino, e SEM botão
+  de cancelar (cancelar de novo só recriaria o mesmo problema, possivelmente
+  no meio do movimento de descarregar). `HistoryPanel.jsx`: mesma
+  substituição pro histórico (`pickup: null` → "Descarregando em: X").
+
+**Limitação conhecida, aceita por ora**: parada de emergência durante a
+janela `pendingPostPickupUnload`/`unloadOnly` ainda limpa tudo sem
+tratamento especial — mesmo comportamento (e mesma lacuna) que já existia
+pra qualquer rota cancelada carregando um pallet antes desta feature. Não
+foi pedido pelo usuário resolver isso agora; registrado aqui pra não
+esquecer se algum dia for revisitado.
+
+**Testado isolado** (23 cenários, tudo mockado — nunca o robô real nem o
+`queue_state.json` real): mecanismo de alinhamento escolhe pickup/dropoff
+corretamente; `_cancel_poll_interval` sempre rápido quando pendente;
+`robot_create_and_run_unload_chain` monta o corpo exato confirmado ao vivo
+e levanta erro sem `taskChainId`; `robot_fetch_task_record_by_id` acha por
+id; `_execute_cancel_current_locked` pré-pickup inalterado (regressão),
+pós-pickup não avança a fila e marca pendente, sequência solta o grupo
+igual; `_try_dispatch_post_pickup_unload` sucesso/falha-com-retry/no-op/
+corrida; `_apply_record_status` unloadOnly FINISHED avança normal,
+CANCELLED/FAILED tenta de novo; sondagem por id em vez de nome;
+`log_route_requested` aceita `pickup=None`; handler HTTP ponta a ponta
+(pré-pickup regressão + pós-pickup sucesso/falha). Navegador (backend
+falso): banner aparece, fila mostra "DESCARREGANDO EM: X" sem botão de
+cancelar, próxima rota normal da fila continua normal.
+
+**AINDA NÃO VALIDADO EM CAMPO** — falta: (1) confirmar que `POST /task-
+template/generic/chain` com UNLOAD funciona com pallet de verdade em cima
+(só testamos com o garfo vazio); (2) reproduzir o cenário completo
+(cancelar depois do pickup, ver o giro no destino, ver a tarefa isolada
+aparecer na fila, ver o pallet realmente descarregar, ver a fila seguir
+sozinha). **Reiniciar o `server.py` antes de testar** — o processo rodando
+agora é anterior a esta mudança.
+
+## Bug de campo 2026-09-30 — pickupCleared perdeu a corrida, foi pra energia com o pallet possivelmente no garfo (CORRIGIDO no mesmo dia)
+
+**O que o usuário relatou**: cancelou uma rota com o robô "dentro de um
+lote, em cima de um ponto de docagem" — em vez de disparar o UNLOAD
+isolado (feature nova, ver seção acima), o robô só cancelou e foi pra
+energia (comportamento pré-pickup). Perguntou: o sistema considera alguma
+flag de "o robô está carregando um pallet"? Sim — `pickupCleared` (Caso 2)
+— mas essa investigação achou um jeito real dela FALHAR.
+
+**Dados reais** (task `67689`, `CD3toCAXMT7`): a ação PICKUP mostra
+`finishTime: 2026-09-30 11:26:58` mas `status: CANCELLED`. Comparado com
+uma coleta genuína recente (task `67682`, PICKUP `start`→`finish` = 64s):
+aqui a fase de PICKUP durou **85s** (11:25:28 até a UNLOAD "iniciar" às
+11:26:53) — mais que a referência de coleta completa — e só 5s depois disso
+é que a task inteira aparece `CANCELLED`. Forte indício de que **o pallet
+já tinha sido pego de verdade** antes do cancelamento chegar.
+
+**Causa raiz**: `pickupCleared` é setada pela sondagem PERIÓDICA de Caso 2
+(uma vez por tick, checando `action-record/list` — ver `_queue_tick`). Se o
+PICKUP terminar de verdade e a task for cancelada (por nós ou por fora)
+DENTRO do mesmo intervalo de sondagem, a ação de PICKUP NUNCA chega a ser
+observada com `status: FINISHED` — no próximo poll, ela já está
+`CANCELLED` (o cancelamento contaminou retroativamente o status da ação
+que tinha acabado de completar), e o `finishTime` vira só o carimbo do
+cancelamento (mesma ressalva já documentada no comentário de Caso 2, "não
+é de conclusão"). Ou seja: **um pickup genuinamente concluído pode nunca
+deixar rastro de sucesso**, se o cancelamento for rápido o bastante — e
+como o cancelamento pré-pickup é DESENHADO pra acontecer bem no fim do giro
+de alinhamento (ver seção acima), essa corrida é mais fácil de perder do
+que parece: o pickup pode terminar segundos antes do clique de cancelar.
+
+**Correção** (`server.py`): `_pickup_actually_completed(current)` — faz UMA
+checagem FRESCA (`action-record/list`) bem antes de mandar qualquer
+comando de cancelamento nosso, ainda sem contaminação (a ação só vira
+`CANCELLED` DEPOIS que a gente manda cancelar). `_resolve_pickup_cleared_
+for_cancel(current, pickup_cleared)`: se a flag salva já é `True`, confia
+nela (nunca regride); se é `False`, faz a checagem fresca — confirma
+`True` só se `finishTime` existe E `status != CANCELLED` NESSE INSTANTE.
+Chamada nos DOIS pontos que decidem um cancelamento (`_queue_cancel_
+current` e o bloco de `cancelPending` em `_queue_tick`), ANTES de escolher
+qual ponto alinhar (origem ou destino) e antes de gravar `pickupCleared` no
+estado que `_execute_cancel_current_locked` vai ler.
+
+**Por que isso não existia desde o início**: a feature de cancelamento
+pós-pickup é NOVA (mesmo dia) — antes dela, `pickupCleared` errado só
+significava "usa o check-turn em vez do alinhamento", sem consequência de
+segurança (as duas formas cancelavam do mesmo jeito). Agora que
+`pickupCleared` decide "dispara UNLOAD isolado ou não", a corrida virou
+crítica — motivo de ter sido pega logo no 1º teste de campo.
+
+**Testado isolado** (11 cenários): `_pickup_actually_completed` confirma
+com FINISHED genuíno, recusa com CANCELLED mesmo tendo finishTime (o caso
+real), recusa se ainda rodando, `None` em falha de rede/sem registro;
+`_resolve_pickup_cleared_for_cancel` nunca regride de True, corrige False
+pra True quando a checagem fresca confirma (cenário do incidente), mantém
+False se realmente não pegou ou se a checagem for inconclusiva; ponta a
+ponta pelo handler HTTP reproduzindo o incidente (flag salva False + pickup
+já concluído de verdade → vira UNLOAD isolado no destino, não energia) e a
+contraprova (flag False + realmente não pegou → continua indo pra fila
+normal). Um teste antigo precisou ser corrigido nesse processo: usava
+`pickupCleared=False` sem mockar a checagem nova, o que faria uma chamada
+de rede de VERDADE pro robô durante o teste "isolado" — achado e corrigido
+antes de rodar (a suíte toda caiu de ~0.3s pra ~0.01s depois do mock).
+
+**AINDA NÃO REVALIDADO EM CAMPO** — próximo cancelamento pós-pickup real
+deve mostrar a tarefa "DESCARREGANDO EM: X" em vez de ir pra energia,
+mesmo quando `pickupCleared` não tinha sido pega a tempo pela sondagem
+periódica. **Reiniciar o `server.py`** antes de testar de novo.
+
+## Bug de campo 2026-09-30 (2º do dia) — UNLOAD começou 44s antes do cancelamento pós-pickup ser executado
+
+**O que o usuário relatou**: com a correção acima já em campo, o
+cancelamento pós-pickup foi ACEITO corretamente (o robô foi até o ponto de
+deploy como esperado), mas o robô **iniciou o próprio deploy da rota
+original** no ponto onde deveria ter cancelado, em vez de parar pro giro de
+alinhamento de docking (ver `_docking_alignment_cancel_ready`).
+
+**Dados reais** (task `67691`): a ação UNLOAD da rota original começa às
+`11:42:16`; a task inteira só é marcada `CANCELLED` às `11:43:00` — **44
+segundos depois**. Ou seja, o cancelamento de fato aconteceu, mas tarde
+demais: o UNLOAD já tinha sido disparado antes.
+
+**Hipótese investigada (não confirmada como causa única)**: a thread de
+fundo que sonda a fila (`_start_queue_thread`) dormia com `threading.Event.
+wait(intervalo)` sem jeito de acordar antes da hora, exceto no encerramento
+do servidor. Se o clique de cancelar do operador encontrasse o robô ainda
+FORA da margem seguro-pra-cancelar (`safe=False`), `cancelPending=True`
+era gravado, mas a thread de fundo só ia reparar nisso no próximo ciclo de
+sondagem — até `QUEUE_POLL_INTERVAL_SECONDS` (4s) de "janela morta" se o
+ciclo tivesse acabado de começar a dormir. Isso por si só não bate com 44s
+de atraso — mas é uma folga real que não deveria existir, e some do
+caminho de investigação para o próximo teste.
+
+**Correção aplicada** (`server.py`, não depende do robô pra ser testada):
+`_queue_wake` (`threading.Event`) substitui a espera cega por
+`QUEUE_POLL_INTERVAL_SECONDS`: a thread de fundo agora dorme em `_queue_wake.
+wait(intervalo)`, que acorda tanto no timeout normal quanto na hora exata
+em que alguém chama `_poke_queue_thread()`. `_poke_queue_thread()` é
+chamada nos 3 pontos onde o sistema entra num "estado de espera" que a
+sondagem precisa resolver o quanto antes: `cancelPending=True` (handler
+`_queue_cancel_current`), `turnBlocked=True` e `awaitingCharge=True`
+(ambos em `_try_dispatch_current`). `_stop_queue_thread` também dá `set()`
+em `_queue_wake` pra encerrar rápido no shutdown, sem depender do timeout
+em andamento.
+
+**Testado isolado** (6 cenários, thread de fundo de verdade — é sobre
+timing — mas `_queue_tick` mockado, nunca fala com o robô nem toca
+`queue_state.json` real): poke acorda a thread bem antes do intervalo
+normal terminar; sem poke, o intervalo normal é respeitado; `_stop_queue_
+thread` ainda encerra rápido mesmo com intervalo longo configurado; os 3
+pontos de transição (`cancelPending`/`turnBlocked`/`awaitingCharge`) de
+fato chamam `_poke_queue_thread` uma vez cada.
+
+**IMPORTANTE — isto é uma melhoria arquitetural, NÃO uma correção
+confirmada da causa raiz**: a folga de até 4s que essa mudança elimina é
+real e vale a pena eliminar, mas sozinha não explica 44s de atraso. A causa
+exata do atraso de 44s ainda não foi determinada — falta o log de console
+do `server.py` daquele teste (os prints de diagnóstico como "alinhamento
+de docking: dentro da margem" não foram capturados). **Próximo teste de
+campo deve rodar o servidor redirecionando a saída pra arquivo** (ex.:
+`nohup python3 server.py > server.log 2>&1 &`) pra não perder esses prints
+de novo. **Reiniciar o `server.py`** antes de testar (mudança só entra em
+vigor depois do restart).
+
+**Explicação alternativa, dada pelo usuário (mais provável que a hipótese
+acima)**: o usuário trocou o robô pro modo manual ENQUANTO essa tarefa de
+cancelamento pós-pickup ainda estava pendente (esperando o giro de
+alinhamento de docking pra cancelar com segurança). Se for isso, os 44s não
+são sondagem lenta nenhuma — o robô passou a responder ao controle manual
+em vez de à fila do `server.py`, e nenhuma correção de latência em segundo
+plano teria como competir com isso. Nesse caso a lição prática não é de
+código, é operacional: **evitar trocar pro modo manual enquanto o aviso de
+"cancelamento pendente" ou "descarregando em X" estiver na tela** — o
+sistema foi desenhado pra resolver isso sozinho (ver "Cancelamento adiado
+até giro seguro"); manual só deveria entrar como último recurso se ficar
+preso por muito tempo sem resolver. A correção de latência
+(`_queue_wake`/`_poke_queue_thread`) continua válida por si só, mas
+provavelmente não é o que teria evitado este caso específico.
+
+**Efeito colateral descoberto durante a investigação (não corrigido
+ainda)**: a tarefa de recuperação criada pelo cancelamento pós-pickup desse
+mesmo teste (task `67692`, alvo CAX) bateu `LOCATION_LOST` 67s depois de
+começar e ficou presa em `status: RUNNING`/`finishTime: None`
+indefinidamente — o robô terminou voltando pra energia e carregando de
+verdade, mas o `queue_state.json` ainda acha que essa `currentRoute`
+(`unloadOnly: true`) está rodando, o que bloqueia qualquer novo despacho.
+Como rotas `unloadOnly` não têm botão de cancelar na UI (de propósito, ver
+seção acima — cancelar de novo recriaria o mesmo problema durante um
+descarregamento ativo), não existe hoje um jeito de destravar isso pela
+interface quando ela FALHA em vez de completar. Ideia ainda não
+implementada nem validada com o usuário: reabilitar o cancelar de rotas
+`unloadOnly` especificamente quando o "Limit Breaker" (modo desenvolvedor)
+estiver ativo — operador comum não devia poder interromper um
+descarregamento em andamento, mas uma recuperação travada precisa de uma
+saída.
+
+## Bug de campo 2026-09-30 (3º do dia) — cancelamento pós-pickup entregava no DESTINO, deveria devolver à ORIGEM (CORRIGIDO no mesmo dia)
+
+**O que aconteceu**: no teste de campo com o `server.log` sendo observado
+ao vivo (ver bug anterior), o cancelamento pós-pickup funcionou tecnicamente
+— alinhou no destino, cancelou, disparou a tarefa isolada "DESCARREGANDO
+EM: X" — mas **X era o ponto de DESTINO da rota cancelada**, e o pallet
+acabou sendo entregue lá. O usuário reportou como possível bug: o pallet
+ficou no destino original quando o esperado, segundo ele, era o robô
+usar o destino só pra cancelar com segurança e depois criar uma tarefa
+devolvendo o pallet à ORIGEM.
+
+**Causa raiz**: confusão de especificação desde o pedido original (2026-09-
+30, ver seção "Cancelamento pós-pickup" acima) — a frase "o robô vai até o
+ponto de deploy... cria outra tarefa... apenas com o unload" foi
+implementada como "termina de entregar no destino, já que está indo pra lá
+mesmo". O usuário esclareceu depois de ver o teste ao vivo: a intenção
+sempre foi **abortar a entrega** (mesmo significado de "cancelar" que já
+vale pra pré-pickup — parar e não completar), não terminá-la — a diferença
+é que com o pallet no garfo não dá pra simplesmente "não fazer nada" (o
+pallet tem que ir a algum lugar), então o lugar certo é de volta à ORIGEM
+de onde foi pego, não o destino que a entrega original tinha.
+
+**Confirmação de que não teve dano físico**: o pallet ficou no destino
+original (usuário confirmou), o operador está devolvendo manualmente agora
+pra poder repetir o teste com a correção. O robô também confirmou ter
+baixado o garfo e iniciado o unload de verdade antes do cancelamento
+executar (ver bug anterior, "44s de atraso") — ou seja, o atraso na
+execução do cancelamento não causou nenhum problema de posicionamento
+errado, só reforça que a lógica de ONDE entregar depois é que estava
+errada, não o timing de quando cancelar.
+
+**Correção** (`server.py`): o mecanismo de alinhamento de docking pra
+cancelar CONTINUA usando o ponto de DESTINO (`_current_route_cancel_ready`
+não mudou — o robô fisicamente está chegando lá, é o ponto certo pra usar
+a docagem e cancelar com segurança). O que mudou é só o ALVO da tarefa
+isolada criada depois: `_execute_cancel_current_locked` agora monta
+`pendingPostPickupUnload` com `dropoff = current["pickup"]` (a ORIGEM da
+rota cancelada) em vez de `current["dropoff"]`. `_try_dispatch_post_pickup_
+unload` não precisou mudar — já lê `pending["dropoff"]` genericamente (o
+nome do campo significa "destino desta tarefa nova", que agora É a origem
+da rota cancelada). `POST_PICKUP_UNLOAD_MESSAGE` e o comentário em
+`QueuePanel.jsx` atualizados pra não falar mais em "destino original".
+
+**Testado isolado** (2 cenários, mockando `_robot_try_cancel`/
+`robot_stop_navigation`/rede — nunca fala com o robô de verdade):
+`_execute_cancel_current_locked` com `pickupCleared=True` grava
+`pendingPostPickupUnload["dropoff"]` igual ao `pickup` da rota cancelada
+(não ao `dropoff`); `_try_dispatch_post_pickup_unload` cria a `currentRoute`
+isolada com `dropoff` igual à origem e chama `robot_create_and_run_unload_
+chain` com esse mesmo ponto. Um erro de isolamento foi cometido e corrigido
+no processo — o 1º teste não mockava `_robot_try_cancel`, fazendo uma
+chamada de rede de verdade (o robô respondeu HTTP 400 "já terminal", só
+não deu pra perceber sem prestar atenção no output) — corrigido antes de
+seguir (suíte caiu de rede real pra 0.005s).
+
+**AINDA NÃO VALIDADO EM CAMPO COM A CORREÇÃO** — próximo teste deve mostrar
+"DESCARREGANDO EM: {origem}" (não mais o destino) e o pallet deve realmente
+voltar pro ponto onde foi pego. **Reiniciar o `server.py`** antes de testar
+de novo.
+
+## Bug de scroll num tablet específico (Lenovo ZUI TB311FU) — "100vh mente" (CORRIGIDO 2026-09-30)
+
+**Sintoma**: nesse tablet (WebView Android mais simples/skin customizada),
+o menu lateral de Ponto a Ponto não rolava pra baixo, e o botão "Enviar
+tarefa" nem aparecia — "comido" pela parte debaixo da tela.
+
+**Causa**: `100vh` nesse WebView mede a altura "cheia" da tela, não a área
+realmente visível depois da barra de navegação do sistema — o `.app`
+(`height: 100vh`) se achava maior que a tela de verdade, empurrando o fim
+da sidebar pra fora. Sem nada "transbordando" do ponto de vista do CSS, o
+`overflow-y: auto` da sidebar nunca ativava.
+
+**Correção**: `main.jsx` mede a altura real via `window.innerHeight`
+(reflete a área visível de verdade nesses casos) e guarda numa variável CSS
+(`--app-vh`, atualizada em resize/orientação). `App.css`: `.app` e
+`.login-screen` usam `var(--app-vh, 100vh)` em vez de `100vh` puro (100vh
+só como fallback antes do JS rodar). `-webkit-overflow-scrolling: touch`
+também adicionado na sidebar, reforço pra WebViews mais antigos.
+
+## Status "Voltando à Energia" (IMPLEMENTADO 2026-09-30)
+
+**Pedido do usuário**: quando o robô está numa task de retorno pra energia
+(AUTO_SYSTEM nativa, ainda não chegou/começou a carregar), mostrar
+"VOLTANDO À ENERGIA" no banner de status em vez de "EM OPERAÇÃO".
+
+**Implementação**: `_robot_status_cache` ganhou `returningToCharge`,
+atualizado no MESMO ciclo de `_refresh_robot_status` (chamado por
+`_queue_tick`, não por requisição HTTP — senão cada tablet multiplicaria a
+chamada ao robô) via `_robot_returning_to_charge_now()` (já existia, usado
+em `_try_dispatch_current` pra travar início de rota — reaproveitado aqui).
+Exposto em `/api/live-state` como `robotReturningToCharge`.
+`RobotStatusBanner.jsx`: 3º estado (`is-returning`, cor laranja —
+`--accent-orange`, mesma família do Close Up) — só considerado quando
+`charging` é false.
+
+## Tela cheia por conta (IMPLEMENTADO 2026-09-30)
+
+**Pedido do usuário**: botão de tela cheia ao lado do de tema, preferência
+vinculada à CONTA (não ao tablet), igual o tema.
+
+**Ressalva importante**: a API de Fullscreen do navegador só entra em tela
+cheia dentro de um GESTO do usuário — nenhum navegador deixa
+`requestFullscreen()` disparar sozinho ao carregar a página. Então a
+preferência salva não "força" nada sozinha ao logar.
+
+**Implementação**: `server.py` — `_user_fullscreen(user)`, endpoint
+`POST /api/session/fullscreen` (self-service, mesmo padrão de
+`/api/session/theme`), campo `fullscreen` no payload de sessão/login, e no
+registro do usuário (default `False`). `MainApp.jsx`: `wantsFullscreen`
+(preferência, da conta) vs `isFullscreen` (estado DE FATO do navegador,
+via evento `fullscreenchange`) — quando a conta quer tela cheia mas o
+navegador não está nela (ex: acabou de logar), um listener de
+`pointerdown` ÚNICO no documento inteiro aproveita o PRÓXIMO toque em
+qualquer lugar do app (vai acontecer de qualquer jeito, é touchscreen de
+operação) pra satisfazer a exigência de gesto sem precisar de aviso/botão
+extra. O botão do Toolbar (gesto explícito) chama request/exitFullscreen
+direto.
+
+## Painel Histórico: filtros, nome fantasia, tag CANCELADA, zoom (IMPLEMENTADO 2026-09-30/10-01)
+
+**Pedido do usuário**: sidebar do Histórico do mesmo tamanho de Fila/Ponto
+a Ponto; filtro por conta solicitante (busca com sugestões) combinável com
+data e horário; nome fantasia em vez do nome técnico; tag "CANCELADA";
+clicar numa rota do histórico mostra origem/destino no mapa com zoom de
+perto + banner "VISUALIZANDO", igual ao "Visualizar tarefa" do Ponto a
+Ponto.
+
+**Implementação** (`HistoryPanel.jsx`, filtragem 100% client-side — a
+lista inteira já vem de `GET /api/route-log`, sem round-trip novo por
+filtro):
+- `.sidebar--history` entrou no grupo de largura 448px (`.sidebar--wide`).
+- 3 filtros combináveis por AND: data (já existia), horário (dois
+  `<input type="time">` de/até, comparação lexicográfica de string no
+  `HH:MM`), conta (busca com sugestões — nomes distintos vistos no próprio
+  histórico carregado, sem endpoint novo).
+- Nome fantasia via `displayCellName` (precisa de `lots`/`points` como
+  prop, antes não recebia).
+- Tag `CANCELADA`/`FALHOU` (`history-route__tag`) ao lado do nome.
+- Cada rota virou `<button>` (era `<div>`) — clicar chama `onSelectEntry`.
+
+**Bug achado e corrigido no mesmo dia**: o destaque não aparecia ao
+clicar — `highlightsRoute(mode)` (`FloorPlanCanvas.jsx`, decide quais
+modos desenham pickup/dropoff colorido) não incluía `'history'` na lista.
+
+**Zoom + banner "VISUALIZANDO"** (`MainApp.jsx`): reaproveita o mecanismo
+já existente do Ponto a Ponto (`requestFocus`/`focusRequest`, usado em
+"Visualizar tarefa") — `selectedHistoryRoute`/`historyFocusedEndpoint`
+espelham `viewTask`/`viewTask.active`. `handleFocusEndpoint` agora checa
+`mode` pra decidir se o clique no banner é sobre a seleção de Ponto a
+Ponto ou a do Histórico (nunca os dois ao mesmo tempo, modos diferentes).
+Pickup `null` (UNLOAD isolado pós-cancelamento) foca o destino direto.
+
+## "Enviado por" na Fila (IMPLEMENTADO 2026-10-01)
+
+Pedido do usuário: mostrar quem solicitou cada rota, discreto (cinza,
+menor), abaixo do nome — `QueuePanel.jsx`, `queue-route__user`, lê
+`route.user`/`currentRoute.user` (já existia nos dados, só não era
+exibido).
+
+## Delimitação de usuários por grupo de lotes ("Kanbans") (IMPLEMENTADO 2026-10-01)
+
+**Pedido do usuário**: restringir um usuário comum a só RETIRAR pallets de
+um ou mais grupos de lotes (delimitados visualmente por um Close Up no
+mapa — "kanban"), mas podendo ENTREGAR em qualquer lugar sem restrição.
+Novo papel "Mestre": acesso a qualquer kanban + cancela qualquer tarefa,
+mas sem acesso a Histórico/Usuários (igual operador comum). Dois kanbans
+("SAÍDAS 69/71" e "SAÍDAS 47,40,61,52,35") são livres pra todos — nunca
+aparecem na lista de restrição, e qualquer usuário restrito pode pegar ali
+mesmo sem ter esse kanban atribuído.
+
+**Decisões confirmadas com o usuário antes de implementar** (pergunta
+feita de propósito — errar modelo de permissão custa caro de desfazer):
+usuário comum precisa de **pelo menos um kanban JÁ NA CRIAÇÃO** (não dá
+pra criar sem); Mestre **não vê** as abas Histórico/Usuários (mesma
+restrição de operador comum hoje); a restrição vale **também** pra remover
+uma tarefa da fila de espera, não só cancelar a que está rodando.
+
+**IDs, não nomes** (pedido explícito do usuário — nomes de kanban podem
+mudar): tanto os 2 kanbans "livres pra todos" quanto a lista de kanbans de
+cada usuário são guardados pelo `id` (UUID) do Close Up, nunca pelo nome.
+
+**Geometria portada pro servidor** (`server.py`) — a restrição é um GATE
+de verdade, não só UI: `_closeup_id_for_name(name, cal)` reimplementa em
+Python a mesma matemática que `FloorPlanCanvas.jsx` já usa no cliente
+(`contentPositionOf`/`closeUpContaining`) pra achar qual Close Up (o
+menor, se houver sobreposição) contém a posição de um nome técnico
+(célula de lote ou ponto avulso). Constantes replicadas e **não
+compartilhadas** entre front/back (risco documentado no código): dimensão
+do `floorplan.jpg` (1411×759, lida com Pillow) e `DEFAULT_CELL_SIZE`
+(11.97, copiado de `FloorPlanCanvas.jsx`) — se um dia a imagem for trocada
+por outra de tamanho diferente, ou esse valor mudar no front, isto aqui
+precisa acompanhar manualmente.
+
+**`FREE_KANBAN_IDS`** (`server.py`): os 2 ids fixos das "SAÍDAS" —
+achados consultando `calibration.json` real pelo nome ATUAL, mas fixados
+pelo `id`.
+
+**`_user_can_pick_up_from(user, pickup_name, cal)`**: admin/Mestre sempre
+podem; usuário comum sem NENHUM kanban atribuído (conta antiga, de antes
+desta feature) também não é restrito — só passa a valer quando o admin
+atribui pelo menos um. Destino nunca é restrito, só a origem.
+
+**Enforcement** (3 pontos, todos com `_read_calibration()` feito ANTES de
+entrar no `QUEUE_LOCK` — `CALIBRATION_LOCK` nunca é aninhado dentro de
+`QUEUE_LOCK` nesse código, pra nunca arriscar ordem de lock trocada):
+`_queue_enqueue_batch` (checa TODAS as origens do lote antes de aceitar
+qualquer uma), `_queue_cancel_current` (checa a origem da `currentRoute`,
+pulado se `force`/limit breaker), `_queue_remove_queued` (ganhou o
+parâmetro `requester` que não tinha antes — checa a origem da rota
+alvo, mesma regra de cancelar).
+
+**Schema de usuário**: `isMaster` (bool) e `kanbanIds` (lista de ids)
+novos em `users.json`. Validação (criação E edição,
+`_create_user`/`_update_user`): usuário resultante nem admin nem Mestre
+precisa ter `kanbanIds` não-vazio, senão 400. `GET /api/kanbans` (novo
+endpoint, qualquer usuário autenticado): lista `{id, name}` dos Close Ups
+elegíveis, já excluindo os 2 livres.
+
+**Front** (`UsersPanel.jsx`): `.sidebar` do modo `users` entrou no grupo
+`.sidebar--wide`. Checkbox "mestre" ao lado de "admin". Seção "KANBANS"
+(só pra quem não é admin nem Mestre) com `KanbanPicker` compartilhado
+(criação E edição): chips dos já escolhidos (clicar foca de novo no mapa)
++ "+" abre dropdown dos ainda não escolhidos (escolher já foca no mapa na
+hora). Criação bloqueia o botão "Criar" até ter pelo menos 1 kanban
+(mesma trava do servidor, com feedback antes de tentar salvar).
+
+**Visual no mapa** (`FloorPlanCanvas.jsx`): novo `closeUpFocusRequest`
+(mesmo espírito de `focusRequest`, mas focando um Close Up DIRETO pelo id
+em vez de um ponto) — zoom + ativa o banner "VISUALIZANDO: KANBAN X"
+(reaproveita `handleCloseUpClick`, o mesmo do modo Interação) E destaca o
+contorno tracejado do Close Up (`CloseUpMarker`, novo estado `previewing`
+= `mode === 'users' && isSelected`, reaproveitando `selectedCloseUpId` que
+já existia). Áreas de Close Up agora também são desenhadas (antes só em
+`closeup`/`interaction`) quando `mode === 'users'` — só a selecionada fica
+visível, as outras continuam invisíveis/sem clique.
+
+**Testado isolado** (9 cenários, `test_kanban_permission.py` — geometria
+contra a calibração REAL, só leitura; permissão com dados sintéticos):
+todas as 218 células reais mapeiam pra algum Close Up; nome inexistente
+devolve `None`; os 2 ids livres existem na calibração real; admin/Mestre
+sempre podem; usuário comum sem kanban configurado não é restrito; usuário
+restrito com kanban certo pode, com errado não; usuário restrito sempre
+pode no kanban livre mesmo sem tê-lo atribuído.
+
+**Testado end-to-end via curl contra o servidor real** (`/api/kanbans`
+excluindo os 2 livres; criar usuário comum sem kanban → 400; com kanban →
+200; enqueue com origem FORA do kanban → 403; DENTRO do kanban → passa da
+checagem de permissão, falha depois por motivo de negócio não relacionado
+— confirma que o gate não bloqueia o caminho válido). Usuário de teste
+removido depois.
+
+**AINDA NÃO VALIDADO EM CAMPO COM USUÁRIO DE VERDADE** — o próximo passo é
+o admin criar um usuário restrito de verdade e confirmar na prática
+(enviar de dentro do kanban funciona, de fora é recusado com a mensagem
+certa, Mestre cancela qualquer coisa, Mestre/usuário comum não veem
+Histórico/Usuários).

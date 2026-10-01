@@ -1,6 +1,6 @@
 import { displayCellName } from '../hooks/useCalibration';
 
-function QueueRoute({ pickup, dropoff, lots, points, variant, selected, onSelect, onCancel, cancelLabel, cancelPending }) {
+function QueueRoute({ pickup, dropoff, unloadOnly, user, lots, points, variant, selected, onSelect, onCancel, cancelLabel, cancelPending }) {
   // Cancelamento adiado (ver CONTEXT.md, "Cancelamento adiado até giro
   // seguro") — só existe pra rota EM ANDAMENTO (variant "current"); as
   // outras (pending/queued na fila) não têm essa espera, cancelam na hora
@@ -14,8 +14,20 @@ function QueueRoute({ pickup, dropoff, lots, points, variant, selected, onSelect
         {/* Substituição puramente visual (ver useCalibration.js,
             displayCellName) — pickup/dropoff continuam sendo os nomes
             técnicos que vieram do servidor, usados em onSelect/onCancel
-            acima sem nenhuma mudança. */}
-        <span className="queue-route__name">{displayCellName(pickup, lots, points)} → {displayCellName(dropoff, lots, points)}</span>
+            acima sem nenhuma mudança.
+            unloadOnly (ver CONTEXT.md, "Cancelamento pós-pickup"): tarefa
+            isolada de UNLOAD criada depois de cancelar já com o pallet no
+            garfo — não tem origem (já foi feita, cancelada), devolve o
+            pallet ao ponto de ORIGEM da rota cancelada (dropoff aqui é o
+            destino desta tarefa nova, não da rota original). */}
+        <span className="queue-route__name">
+          {unloadOnly
+            ? 'DESCARREGANDO EM: ' + displayCellName(dropoff, lots, points)
+            : displayCellName(pickup, lots, points) + ' → ' + displayCellName(dropoff, lots, points)}
+        </span>
+        {/* Pedido do usuário, 2026-10-01: mostrar quem solicitou, discreto
+            (cinza, menor) — não compete visualmente com o nome da rota. */}
+        {user && <span className="queue-route__user">Enviado por: {user}</span>}
         {variant === 'current' && (
           <span className="queue-route__bar" aria-hidden="true">
             <span className="queue-route__bar-fill" />
@@ -64,12 +76,19 @@ export default function QueuePanel({ currentRoute, waitingRoutes, lots, points, 
             <QueueRoute
               pickup={currentRoute.pickup}
               dropoff={currentRoute.dropoff}
+              unloadOnly={currentRoute.unloadOnly}
+              user={currentRoute.user}
               lots={lots}
               points={points}
               variant="current"
               selected={!selectedRouteId}
               onSelect={() => onSelectRoute(null)}
-              onCancel={onCancelCurrent}
+              // Tarefa isolada de descarregar (ver CONTEXT.md, "Cancelamento
+              // pós-pickup") não pode ser cancelada pela UI: cancelar ela de
+              // novo só recriaria o mesmo problema que ela existe pra
+              // resolver (pallet preso no garfo), possivelmente em posição
+              // pior (no meio do movimento de descarregar).
+              onCancel={currentRoute.unloadOnly ? null : onCancelCurrent}
               cancelLabel="Cancelar rota em andamento (a próxima assume)"
               cancelPending={cancelPending}
             />
@@ -90,6 +109,7 @@ export default function QueuePanel({ currentRoute, waitingRoutes, lots, points, 
                 key={route.id}
                 pickup={route.pickup}
                 dropoff={route.dropoff}
+                user={route.user}
                 lots={lots}
                 points={points}
                 variant="waiting"

@@ -45,18 +45,25 @@ function BatteryIcon({ pct }) {
 // `battery` (0-100 ou null — ver server.py, _normalize_battery, campo
 // documentado mas NÃO confirmado em campo ainda) some sozinho se vier
 // null: o resto do banner continua funcionando normal sem ele.
-export default function RobotStatusBanner({ charging, battery }) {
+// `returningToCharge`: 3º estado (pedido do usuário, 2026-10-01) — o robô
+// está voltando sozinho pra energia (AUTO_SYSTEM nativa) mas ainda não
+// chegou/começou a carregar de verdade. Só é considerado quando `charging`
+// é false (ver server.py, _robot_returning_to_charge_now — já garante
+// isso, mas checar aqui de novo evita depender só do backend pra nunca
+// mostrar os dois rótulos ao mesmo tempo).
+export default function RobotStatusBanner({ charging, battery, returningToCharge }) {
   if (charging === null || charging === undefined) return null;
   const hasBattery = typeof battery === 'number';
+  const label = charging ? 'Recarregando' : (returningToCharge ? 'Voltando à Energia' : 'Em Operação');
 
   return (
-    <div className={'robot-status-banner' + (charging ? ' is-charging' : '')} aria-hidden="true">
+    <div className={'robot-status-banner' + (charging ? ' is-charging' : returningToCharge ? ' is-returning' : '')} aria-hidden="true">
       <span className="robot-status-banner__dot" />
       {/* "ROBÔ" na cor neutra das abas do header (Editar pontos/Histórico/
-          Usuários); o status em si (mint = operando, âmbar = recarregando)
-          — ver .robot-status-banner__status no CSS. */}
+          Usuários); o status em si (mint = operando, âmbar = recarregando
+          ou voltando) — ver .robot-status-banner__status no CSS. */}
       <span className="robot-status-banner__label">Robô:</span>
-      <span className="robot-status-banner__status">{charging ? 'Recarregando' : 'Em Operação'}</span>
+      <span className="robot-status-banner__status">{label}</span>
       {hasBattery && (
         <span className="robot-status-banner__battery">
           <BatteryIcon pct={battery} />

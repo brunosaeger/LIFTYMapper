@@ -57,6 +57,23 @@ body {
   background: var(--panel-base);
   color: var(--text-primary);
   overflow: hidden;
+  /* App de tablet: segurar o dedo não seleciona texto nem abre o balão de
+     ações do sistema (ver também o bloqueio de contextmenu em main.jsx). */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* Campos de texto continuam selecionáveis (digitar/colar senha, nomes...). */
+input,
+textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Imagem não "sai arrastando" (ex: o Doomguy, texturas) ao segurar. */
+img {
+  -webkit-user-drag: none;
 }
 
 button {

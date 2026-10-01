@@ -48,16 +48,32 @@ export async function saveTheme(theme) {
   });
 }
 
+// Preferência de tela cheia da CONTA (pedido do usuário, 2026-10-01) — mesmo
+// espírito do tema acima, mesma ressalva de self-service.
+export async function saveFullscreen(fullscreen) {
+  return jsonRequest('/api/session/fullscreen', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fullscreen }),
+  });
+}
+
 export async function fetchUsers() {
   return jsonRequest('/api/users');
 }
 
-export async function createUser({ username, password, isAdmin }) {
+export async function createUser({ username, password, isAdmin, isMaster, kanbanIds }) {
   return jsonRequest('/api/users', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password, isAdmin }),
+    body: JSON.stringify({ username, password, isAdmin, isMaster, kanbanIds }),
   });
+}
+
+// Kanbans (Close Ups elegíveis pra restringir um usuário, ver CONTEXT.md) —
+// exclui os "livres pra todos" (server.py, FREE_KANBAN_IDS). Só id+nome.
+export async function fetchKanbans() {
+  return jsonRequest('/api/kanbans');
 }
 
 // changes: { password?, isAdmin? } — só manda o que quer trocar, o server

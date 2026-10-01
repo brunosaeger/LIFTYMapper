@@ -1,8 +1,15 @@
 <!doctype html>
-<html lang="en">
+<html lang="pt-BR" translate="no">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <!-- App de tablet (pedido do usuário): nunca oferecer tradução. O
+         `lang="en"` antigo (incompatível com o conteúdo, todo em
+         português) provavelmente era a causa raiz do Chrome propor
+         tradução sozinho; `lang="pt-BR"` corrige a detecção, e o
+         `translate="no"` acima + a meta abaixo bloqueiam a oferta mesmo
+         que o Chrome ainda ache necessário. -->
+    <meta name="google" content="notranslate" />
     <title>LIFTY Mapper</title>
   </head>
   <body>

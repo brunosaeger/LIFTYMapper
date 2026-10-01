@@ -66,14 +66,16 @@ function usesHoverGesture(mode) {
 // pickupNames/dropoffNames (azul/âmbar) são desenhados no gesto ativo de
 // Ponto a Ponto, na seleção passiva do painel Fila (clicar numa task lá
 // manda o par pro mapa via mapPickupNames/mapDropoffNames em MainApp.jsx),
-// e também em Interação e Marcação: entrar/sair desses dois modos PRESERVA
-// a seleção de ptp em andamento (MainApp.jsx, isPeekMode/keepRoute) — são
-// "peek modes" (ir olhar de perto / corrigir uma ocupação sem perder o que
-// já tava escolhendo), então o destaque precisa continuar visível enquanto
-// o operador está neles, senão pareceria que a seleção sumiu mesmo
-// continuando viva por baixo.
+// na seleção passiva do painel Histórico (mesma ideia, ver
+// selectedHistoryRoute em MainApp.jsx), e também em Interação e Marcação:
+// entrar/sair desses dois modos PRESERVA a seleção de ptp em andamento
+// (MainApp.jsx, isPeekMode/keepRoute) — são "peek modes" (ir olhar de
+// perto / corrigir uma ocupação sem perder o que já tava escolhendo),
+// então o destaque precisa continuar visível enquanto o operador está
+// neles, senão pareceria que a seleção sumiu mesmo continuando viva por
+// baixo.
 function highlightsRoute(mode) {
-  return mode === 'ptp' || mode === 'queue' || mode === 'interaction' || mode === 'mark';
+  return mode === 'ptp' || mode === 'queue' || mode === 'history' || mode === 'interaction' || mode === 'mark';
 }
 
 function markerColors(mode, { isSelected, isPickup, isDropoff }) {
@@ -596,6 +598,11 @@ function CloseUpMarker({ closeUp, mode, isSelected, onSelect, onChange, onActiva
   const groupRef = useRef(null);
   const trRef = useRef(null);
   const editable = mode === 'closeup';
+  // Painel Usuários, seletor de "KANBANS" (pedido do usuário, 2026-10-01):
+  // mostra o contorno tracejado do Close Up escolhido, só leitura (sem
+  // poder arrastar/redimensionar) — pra o admin confirmar visualmente que
+  // é a área certa antes de atribuir ao usuário.
+  const previewing = mode === 'users' && isSelected;
 
   useEffect(() => {
     if (editable && isSelected && trRef.current && groupRef.current) {
@@ -630,10 +637,10 @@ function CloseUpMarker({ closeUp, mode, isSelected, onSelect, onChange, onActiva
         <Rect
           width={closeUp.width}
           height={closeUp.height}
-          fill={editable ? hexToRgba(COLORS.accentOrange, LOT_FILL_ALPHA) : 'transparent'}
-          stroke={editable ? COLORS.accentOrange : undefined}
-          strokeWidth={editable ? 2 : 0}
-          dash={editable ? [10, 6] : undefined}
+          fill={(editable || previewing) ? hexToRgba(COLORS.accentOrange, LOT_FILL_ALPHA) : 'transparent'}
+          stroke={(editable || previewing) ? COLORS.accentOrange : undefined}
+          strokeWidth={(editable || previewing) ? 2 : 0}
+          dash={(editable || previewing) ? [10, 6] : undefined}
           listening={editable || mode === 'interaction'}
         />
       </Group>
@@ -672,6 +679,17 @@ export default function FloorPlanCanvas({
   selectedCloseUpId,
   onSelectCloseUp,
   onCloseUpActivate,
+  // "Visualizar tarefa" (ver MainApp.jsx): { name, id } — `id` muda a cada
+  // pedido (mesmo repetindo o nome), é ele que dispara o zoom até o kanban
+  // onde o ponto `name` está.
+  focusRequest,
+  // Painel Usuários, seletor de "KANBANS" (ver MainApp.jsx,
+  // requestCloseUpFocus): { closeUpId, reqId } — mesmo espírito do
+  // focusRequest acima, mas focando um Close Up DIRETO pelo id (o admin
+  // está escolhendo o kanban, não um ponto/tarefa) — zoom + contorno
+  // tracejado (ver CloseUpMarker, previewing) pra confirmar visualmente
+  // qual área é.
+  closeUpFocusRequest,
   // Listas (não nomes soltos) porque o modo "Lotes em sequência" seleciona
   // vários de uma vez — ver MainApp.jsx. No modo normal vêm com 0 ou 1 nome.
   pickupNames,
@@ -792,6 +810,89 @@ export default function FloorPlanCanvas({
       },
     });
   }
+
+  // Posição de um ponto/célula de lote em px de CONTEÚDO (mesmo espaço dos
+  // marcadores). Célula: o lote é um Group em (lot.x, lot.y), girado e
+  // esticado, e a célula i fica em (i * cellSize, 0) no referencial dele —
+  // mesma transformação que o Konva aplica ao desenhar (ver LotMarker).
+  function contentPositionOf(name) {
+    for (const lot of lots) {
+      for (let i = 0; i < lot.count; i++) {
+        if (lotCellName(lot.prefix, i) !== name) continue;
+        const lx = i * (lot.cellSize || DEFAULT_CELL_SIZE) * (lot.scaleX || 1);
+        const rad = ((lot.rotation || 0) * Math.PI) / 180;
+        return {
+          x: lot.x * image.width + lx * Math.cos(rad),
+          y: lot.y * image.height + lx * Math.sin(rad),
+        };
+      }
+    }
+    const p = points.find((pt) => pt.name === name);
+    return p ? { x: p.x * image.width, y: p.y * image.height } : null;
+  }
+
+  // Kanban (Close Up) que contém a posição — o menor, se houver sobreposição.
+  // Já devolve no formato que handleCloseUpClick espera (x/y em px).
+  function closeUpContaining(pos) {
+    let best = null;
+    for (const c of closeUps) {
+      const x = c.x * image.width;
+      const y = c.y * image.height;
+      const w = c.width * (c.scaleX || 1);
+      const h = c.height * (c.scaleY || 1);
+      const inside = pos.x >= Math.min(x, x + w) && pos.x <= Math.max(x, x + w)
+        && pos.y >= Math.min(y, y + h) && pos.y <= Math.max(y, y + h);
+      if (inside && (!best || Math.abs(w * h) < best.area)) best = { closeUp: { ...c, x, y }, area: Math.abs(w * h) };
+    }
+    return best ? best.closeUp : null;
+  }
+
+  // Ponto fora de qualquer kanban: zoom centralizado nele mesmo.
+  const POINT_FOCUS_ZOOM_MULT = 4;
+  function zoomToContentPoint(pos) {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const newScale = clampScale(baseScale * POINT_FOCUS_ZOOM_MULT);
+    const newPos = { x: containerWidth / 2 - pos.x * newScale, y: containerHeight / 2 - pos.y * newScale };
+    stage.to({
+      scaleX: newScale,
+      scaleY: newScale,
+      x: newPos.x,
+      y: newPos.y,
+      duration: 0.35,
+      easing: Konva.Easings.EaseOut,
+      onFinish: () => {
+        setStageScale(newScale);
+        setStagePos(newPos);
+      },
+    });
+  }
+
+  useEffect(() => {
+    if (!focusRequest || !image || !baseScale) return;
+    const pos = contentPositionOf(focusRequest.name);
+    if (!pos) return;
+    const closeUp = closeUpContaining(pos);
+    if (closeUp) {
+      handleCloseUpClick(closeUp); // mesmo zoom + banner do toque num kanban (modo Interação)
+    } else {
+      onCloseUpActivate?.(null);
+      zoomToContentPoint(pos);
+    }
+    // Só reage a um PEDIDO novo (id), não a cada re-render/mudança de lotes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusRequest?.id, !!image, !!baseScale]);
+
+  useEffect(() => {
+    if (!closeUpFocusRequest || !image || !baseScale) return;
+    const c = closeUps.find((cu) => cu.id === closeUpFocusRequest.closeUpId);
+    if (!c) return;
+    // x/y em fração -> px de conteúdo (mesma conversão do .map() que monta
+    // CloseUpMarker no render, ver comentário em handleCloseUpClick).
+    handleCloseUpClick({ ...c, x: c.x * image.width, y: c.y * image.height });
+    onSelectCloseUp?.(c.id); // contorno tracejado (ver CloseUpMarker, previewing)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [closeUpFocusRequest?.reqId, !!image, !!baseScale]);
 
   // lotDraftRef espelha lotDraft (estado, só pra re-renderizar o preview).
   // finishLotDrag lê do ref, não do state: precisa do valor mais recente de
@@ -1445,11 +1546,14 @@ export default function FloorPlanCanvas({
                 isPreview
               />
             )}
-            {/* Áreas de Close Up: só existem (visual E clicável) nos dois
-                modos que precisam delas — em qualquer outro, nem são
-                mapeadas, o que já garante "invisível e sem intercepção de
-                clique" fora de 'closeup'/'interaction' (ver CloseUpMarker). */}
-            {(mode === 'closeup' || mode === 'interaction') && closeUps.map((c) => (
+            {/* Áreas de Close Up: só existem (visual E clicável) nos modos
+                que precisam delas — em qualquer outro, nem são mapeadas, o
+                que já garante "invisível e sem intercepção de clique" fora
+                de 'closeup'/'interaction'/'users' (ver CloseUpMarker).
+                'users': só a selecionada fica visível (contorno tracejado,
+                ver previewing), as outras ficam invisíveis e sem clique
+                igual sempre foram fora de 'closeup'/'interaction'. */}
+            {(mode === 'closeup' || mode === 'interaction' || mode === 'users') && closeUps.map((c) => (
               <CloseUpMarker
                 key={c.id}
                 closeUp={{ ...c, x: c.x * image.width, y: c.y * image.height }}

@@ -7,6 +7,7 @@ import LotsPanel from './components/LotsPanel';
 import CloseUpsPanel from './components/CloseUpsPanel';
 import PalletHeightsPanel from './components/PalletHeightsPanel';
 import PointToPointBar from './components/PointToPointBar';
+import StagedTasksPanel from './components/StagedTasksPanel';
 import QueuePanel from './components/QueuePanel';
 import OccupancyPanel from './components/OccupancyPanel';
 import HistoryPanel from './components/HistoryPanel';
@@ -17,7 +18,7 @@ import DevModeModal from './components/DevModeModal';
 import { useCalibration, lotCellName, displayCellName } from './hooks/useCalibration';
 import { useLiveState } from './hooks/useLiveState';
 import { useToast } from './hooks/useToast';
-import { saveTheme } from './api/auth';
+import { saveTheme, saveFullscreen } from './api/auth';
 import { applyTheme } from './theme';
 // App.css já é carregado pelo App.jsx (raiz) — precisa estar disponível
 // mesmo antes de MainApp montar, pra estilizar a LoginScreen.
@@ -26,10 +27,10 @@ import { applyTheme } from './theme';
 // dia a dia) — não é segurança de verdade, a senha fica visível em texto no
 // bundle JS pra quem abrir o devtools. Não guardar nada sensível atrás
 // disso.
-const DEV_PASSWORD = 'ihavenomouthandimustscream';
+const DEV_PASSWORD = 'ripandtear2002';
 
 
-// Prefixo do toast de "Enviar task" conforme o slot que o servidor devolve
+// Prefixo do toast de "Iniciar tarefas" conforme o slot que o servidor devolve
 // (ver POST /api/queue/enqueue, campo "slot") — o cliente não sabe mais
 // sozinho se a rota virou atual/pendente/fila, quem decide é o servidor.
 // Referência estável pra "nada selecionado" (ver mapPickupNames) — um `[]`
@@ -67,8 +68,8 @@ export default function MainApp({ user, onLogout }) {
   // pra ele em vez de mudar estado local direto (quem decide/dispara de
   // verdade é sempre o server.py, nunca o navegador).
   const {
-    currentRoute, pendingRoute, routeQueue, occupied, emergency, cancelPending, cancelPendingMessage, turnBlockedMessage, robotCharging, robotBattery,
-    enqueueRoutes, cancelCurrent, removeQueued, setOccupiedMany, toggleOccupied, setEmergency,
+    currentRoute, pendingRoute, routeQueue, occupied, emergency, cancelPending, cancelPendingMessage, turnBlockedMessage, awaitingChargeMessage, postPickupUnloadMessage, robotCharging, robotBattery, robotReturningToCharge,
+    enqueueRoutes, cancelCurrent, removeQueued, setOccupiedMany, toggleOccupied, setEmergency, setLimitBreakerLease,
   } = useLiveState();
   const [toast, showToast] = useToast();
 
@@ -100,6 +101,56 @@ export default function MainApp({ user, onLogout }) {
     saveTheme(next).catch(() => {});
   }
 
+  // Preferência de tela cheia da CONTA (pedido do usuário, 2026-10-01) —
+  // mesmo espírito do tema acima (persiste por conta, não por tablet), mas
+  // com uma pegada a mais: a API de Fullscreen do navegador só entra em
+  // tela cheia dentro de um gesto do usuário (toque/clique) — nenhum
+  // navegador deixa isso disparar sozinho ao carregar a página. `wantsFull`
+  // é a PREFERÊNCIA (o que a conta quer, persistido no servidor);
+  // `isFullscreen` é o estado DE FATO do navegador agora (pode discordar
+  // brevemente — ex. acabou de logar e ainda não tocou em nada, ou saiu de
+  // tela cheia pelo gesto do próprio Android).
+  const [wantsFullscreen, setWantsFullscreen] = useState(!!user.fullscreen);
+  const [isFullscreen, setIsFullscreen] = useState(!!document.fullscreenElement);
+
+  useEffect(() => {
+    function onChange() { setIsFullscreen(!!document.fullscreenElement); }
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
+
+  // Reentrada silenciosa: se a conta quer tela cheia mas o navegador não
+  // está nela agora (ex. acabou de logar), aproveita o PRIMEIRO toque em
+  // qualquer lugar do app — que vai acontecer de qualquer jeito, é um
+  // tablet de operação — pra satisfazer a exigência de gesto do usuário,
+  // sem precisar de um botão/aviso extra pedindo pra tocar em algo.
+  // Melhor esforço: se o navegador recusar (ex. toque não contou como
+  // gesto válido por algum motivo), não insiste — o botão manual continua
+  // disponível no Toolbar.
+  useEffect(() => {
+    if (!wantsFullscreen || isFullscreen) return;
+    function tryEnter() {
+      document.removeEventListener('pointerdown', tryEnter, true);
+      if (document.fullscreenElement) return;
+      document.documentElement.requestFullscreen().catch(() => {});
+    }
+    document.addEventListener('pointerdown', tryEnter, true);
+    return () => document.removeEventListener('pointerdown', tryEnter, true);
+  }, [wantsFullscreen, isFullscreen]);
+
+  // Botão no Toolbar: ESTE clique já É o gesto do usuário, então pode
+  // chamar request/exitFullscreen direto, sem esperar o próximo toque.
+  function handleToggleFullscreen() {
+    const next = !wantsFullscreen;
+    setWantsFullscreen(next);
+    saveFullscreen(next).catch(() => {});
+    if (next) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    } else if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
+  }
+
   // 'edit' só é alcançável em modo desenvolvedor (ver handleDevButtonClick e
   // baseMode abaixo) — o padrão pra quem não desbloqueou é 'ptp', o modo
   // operacional do dia a dia.
@@ -115,6 +166,16 @@ export default function MainApp({ user, onLogout }) {
   // a última vez que o painel foi aberto (zerada em handleToggleQueueMode).
   const [selectedQueueRouteId, setSelectedQueueRouteId] = useState(null);
   const [queueNotifCount, setQueueNotifCount] = useState(0);
+  // Painel Histórico: qual entrada foi clicada, pra destacar origem/destino
+  // no mapa (ver mapPickupNames abaixo) — guarda o par direto (o painel já
+  // tem a entrada inteira em mãos, sem precisar re-achar por id como no
+  // painel Fila). null = nada selecionado (comportamento de sempre).
+  // `historyFocusedEndpoint` ('pickup'|'dropoff'|null): qual ponta está
+  // sendo vista no mapa agora (banner "VISUALIZANDO", ver
+  // handleSelectHistoryEntry/handleFocusEndpoint) — mesmo espírito do
+  // `viewTask.active` do Ponto a Ponto, só que pro Histórico.
+  const [selectedHistoryRoute, setSelectedHistoryRoute] = useState(null);
+  const [historyFocusedEndpoint, setHistoryFocusedEndpoint] = useState(null);
   // Banner "VISUALIZANDO: KANBAN X" (CloseUpStatusBanner.jsx): qual Close Up
   // o operador tocou por último no modo Interação. Zerado em qualquer troca
   // de modo (ver resetSelection abaixo, SEM keepRoute — não é seleção de
@@ -145,6 +206,46 @@ export default function MainApp({ user, onLogout }) {
   // trava de sessão, não uma preferência salva.
   const [devMode, setDevMode] = useState(false);
   const [devModalOpen, setDevModalOpen] = useState(false);
+  // "Limit breaker" (botão do Doomguy, só em modo desenvolvedor): enquanto
+  // ligado, cancelar a rota em andamento pula TODO o tratamento de
+  // cancelamento seguro (espera de giro/alinhamento de docking) — pra testar
+  // rápido. Só memória desta página, de propósito: recarregar, reiniciar ou
+  // sair do modo desenvolvedor sempre desliga (o servidor também não guarda
+  // nada — o `force` vai por requisição), pra nunca ficar ligado esquecido.
+  const [limitBreaker, setLimitBreaker] = useState(false);
+  const limitBreakerOn = devMode && limitBreaker;
+
+  // Enquanto ligado, renova a licença no servidor bem antes dela vencer
+  // (LIMIT_BREAKER_LEASE_SECONDS = 12s lá). Desligar/sair do modo dev/
+  // desmontar manda "off" na hora; recarregar ou fechar a aba simplesmente
+  // para de renovar e o servidor desliga sozinho em segundos.
+  useEffect(() => {
+    if (!limitBreakerOn) return undefined;
+    let cancelled = false;
+    function renew() {
+      setLimitBreakerLease(true).catch((err) => {
+        if (cancelled) return;
+        setLimitBreaker(false);
+        showToast('Limit breaker não ligou no servidor (' + err.message + ') — reinicie o server.py se ele for de antes dessa função.', 'error');
+      });
+    }
+    renew();
+    const timer = setInterval(renew, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      setLimitBreakerLease(false).catch(() => {});
+    };
+  }, [limitBreakerOn, setLimitBreakerLease, showToast]);
+
+  function handleToggleLimitBreaker() {
+    const next = !limitBreaker;
+    setLimitBreaker(next);
+    showToast(
+      next ? 'LIMIT BREAKER ligado — sem travas de cancelamento nem de início de tarefas.' : 'Limit breaker desligado — travas de segurança de volta.',
+      next ? 'error' : 'success',
+    );
+  }
 
   // Listas (não nomes soltos) porque o modo "Lotes em sequência" seleciona
   // vários de uma vez — ver CONTEXT.md. Fora dele, ficam com no máximo 1
@@ -170,7 +271,59 @@ export default function MainApp({ user, onLogout }) {
   // altura configurável no editor). Só faz sentido com azul. Também NÃO é
   // resetado por resetSelection — é preferência de sessão, igual palletType.
   const [palletTop, setPalletTop] = useState(false);
-  const [sending, setSending] = useState(false);
+
+  // "Tarefas aguardando envio" (ver StagedTasksPanel.jsx e CONTEXT.md):
+  // "Enviar tarefa" não manda mais direto pro robô — a tarefa entra nesta
+  // lista local, onde dá pra conferir, reordenar, trocar pallet ou editar,
+  // e só "Iniciar tarefas" manda tudo pro servidor. Cada item é uma
+  // UNIDADE: uma tarefa avulsa, ou um grupo inteiro de "Lotes em
+  // sequência" (groupKey preenchido) — o grupo só se move junto e divide o
+  // mesmo pallet. Estado deste dispositivo só (não é compartilhado entre
+  // tablets — nada disso existe no servidor até o "Iniciar").
+  const [stagedUnits, setStagedUnits] = useState([]);
+  // Unidade sendo editada (tocar numa barrinha): a origem/destino dela vão
+  // pra seleção do Ponto a Ponto (e pro mapa, ampliados), e "Enviar" vira
+  // "Salvar alterações". editPrevRef guarda as preferências de sessão
+  // (sequência/pallet) de antes, pra devolver ao sair da edição.
+  const [editingUnitId, setEditingUnitId] = useState(null);
+  const editPrevRef = useRef(null);
+  // "Visualizar tarefa": qual tarefa (índice dentro da unidade em edição) o
+  // banner mostra, e qual ponta está sendo vista no mapa. Só existe junto
+  // com editingUnitId. focusRequest é o pedido pro mapa dar zoom até o
+  // kanban onde o ponto está (`id` muda a cada pedido, ver FloorPlanCanvas).
+  const [viewTask, setViewTask] = useState(null); // { index, active: 'pickup' | 'dropoff' }
+  const [focusRequest, setFocusRequest] = useState(null);
+  const focusIdRef = useRef(0);
+
+  function requestFocus(name) {
+    if (!name) return;
+    focusIdRef.current += 1;
+    setFocusRequest({ name, id: focusIdRef.current });
+  }
+
+  // Painel Usuários, seletor de "KANBANS" (pedido do usuário, 2026-10-01):
+  // mesmo espírito de focusRequest acima, mas focando um Close Up DIRETO
+  // pelo id (o admin está escolhendo um kanban, não um ponto/tarefa) — zoom
+  // + contorno tracejado (ver FloorPlanCanvas.jsx, closeUpFocusRequest/
+  // CloseUpMarker previewing) pra confirmar visualmente qual área é.
+  const [closeUpFocusRequest, setCloseUpFocusRequest] = useState(null);
+  const closeUpFocusIdRef = useRef(0);
+
+  function requestCloseUpFocus(closeUpId) {
+    if (!closeUpId) return;
+    closeUpFocusIdRef.current += 1;
+    setCloseUpFocusRequest({ closeUpId, reqId: closeUpFocusIdRef.current });
+  }
+  const [starting, setStarting] = useState(false);
+  const stagedIdRef = useRef(0);
+  const editingIndex = editingUnitId ? stagedUnits.findIndex((u) => u.id === editingUnitId) : -1;
+  const editingUnit = editingIndex >= 0 ? stagedUnits[editingIndex] : null;
+  const stagedBeforeSelection = editingIndex >= 0 ? stagedUnits.slice(0, editingIndex) : stagedUnits;
+
+  function newStagedId(prefix) {
+    stagedIdRef.current += 1;
+    return prefix + '-' + Date.now().toString(36) + '-' + stagedIdRef.current;
+  }
 
   // keepRoute: true preserva pickupNames/dropoffNames/activeSlot — usado só
   // ao entrar/sair do modo Interação (ver handleToggleInteractionMode): é
@@ -194,11 +347,16 @@ export default function MainApp({ user, onLogout }) {
     setSelectedLotId(null);
     setSelectedCloseUpId(null);
     setSelectedQueueRouteId(null);
+    setSelectedHistoryRoute(null);
+    setHistoryFocusedEndpoint(null);
     setActiveCloseUpId(null); // banner "VISUALIZANDO: KANBAN X" — nunca sobrevive a uma troca de modo, nem entrando/saindo de Interação
     if (!keepRoute) {
       setPickupNames([]);
       setDropoffNames([]);
       setActiveSlot('pickup');
+      // Edição de uma tarefa preparada é uma seleção de ptp como outra
+      // qualquer — cai junto, sem salvar (a lista em si continua intacta).
+      if (editingUnitId) restoreEditPrefs();
     }
   }
 
@@ -282,6 +440,7 @@ export default function MainApp({ user, onLogout }) {
   function handleDevButtonClick() {
     if (devMode) {
       setDevMode(false);
+      setLimitBreaker(false);
       setMode((m) => (m === 'edit' ? 'ptp' : m));
       resetSelection();
     } else {
@@ -325,11 +484,66 @@ export default function MainApp({ user, onLogout }) {
   // Fora do modo sequência as duas listas têm no máximo 1 item e nada foi
   // "executado" ainda, então isso devolve exatamente a ocupação atual — o
   // comportamento antigo, sem caso especial nenhum.
+  //
+  // Com a lista de "Tarefas aguardando envio", a seleção nova vai rodar
+  // DEPOIS das já preparadas — então a projeção parte do armazém como ele
+  // estará depois delas (ou só das que vêm ANTES, se estiver editando uma
+  // do meio da lista).
   function projectedOccupancy(pickedUp, droppedOff) {
-    const set = new Set(occupied);
+    const set = occupancyAfter(flattenUnits(stagedBeforeSelection));
     for (const name of pickedUp) set.delete(name);
     for (const name of droppedOff) set.add(name);
     return set;
+  }
+
+  // Lista preparada achatada na ordem de execução, uma entrada por tarefa —
+  // é exatamente o que vai pro servidor no "Iniciar tarefas".
+  function flattenUnits(units) {
+    return units.flatMap((u) => u.tasks.map((t) => ({
+      taskId: t.id,
+      pickup: t.pickup,
+      dropoff: t.dropoff,
+      palletType: u.palletType,
+      palletTop: u.palletType === 'blue' && !!u.palletTop,
+      group: u.groupKey,
+    })));
+  }
+
+  function occupancyAfter(pairs) {
+    const set = new Set(occupied);
+    for (const p of pairs) {
+      set.delete(p.pickup);
+      set.add(p.dropoff);
+    }
+    return set;
+  }
+
+  // Mesma regra que o servidor aplica no envio (validate_route_chain em
+  // server.py): cada tarefa conferida contra o armazém como ele estará
+  // quando ela rodar. Devolve a PRIMEIRA que quebra, ou null.
+  function validateChain(pairs) {
+    const set = new Set(occupied);
+    for (const p of pairs) {
+      if (!isPickupAllowed(p.pickup, set)) return { taskId: p.taskId, name: p.pickup, message: pickupDeniedMessage(p.pickup) };
+      set.delete(p.pickup);
+      if (!isDropoffAllowed(p.dropoff, set)) return { taskId: p.taskId, name: p.dropoff, message: dropoffDeniedMessage(p.dropoff) };
+      set.add(p.dropoff);
+    }
+    return null;
+  }
+
+  // Aceita uma nova versão da lista (reordenada, com algo removido ou
+  // editado) só se ela não QUEBRA uma cadeia que estava válida. Se a lista
+  // já estava inválida antes (ex: a ocupação mudou por fora), deixa mexer —
+  // pode ser justamente a mudança que conserta — a não ser que o erro novo
+  // caia numa das tarefas em `ownTaskIds` (as que o operador acabou de
+  // montar/editar).
+  function checkStagedChange(next, ownTaskIds = []) {
+    const before = validateChain(flattenUnits(stagedUnits));
+    const after = validateChain(flattenUnits(next));
+    if (!after) return null;
+    if (!before || ownTaskIds.includes(after.taskId)) return after;
+    return null;
   }
 
   function isPickupAllowed(name, occupiedSet) {
@@ -592,6 +806,9 @@ export default function MainApp({ user, onLogout }) {
   }
 
   function handleToggleSequenceMode() {
+    // Editando uma tarefa preparada, avulsa continua avulsa e grupo
+    // continua grupo — trocar aqui misturaria as duas coisas.
+    if (editingUnitId) return;
     // Trocar de modo zera a seleção: as regras de validade são diferentes
     // entre os dois, então carregar uma seleção montada sob outras regras
     // poderia virar um envio inválido sem o operador perceber.
@@ -607,46 +824,267 @@ export default function MainApp({ user, onLogout }) {
     setActiveSlot('pickup');
   }
 
-  // Disparo/avanço/sondagem de verdade (falar com o robô, decidir
-  // atual/pendente/fila, detectar FINISHED/CANCELLED, marcar ocupação) não
-  // mora mais aqui — é tudo dono do servidor agora (ver CONTEXT.md, "Fila
-  // de rotas compartilhada", e hooks/useLiveState.js). Este componente só
-  // manda a INTENÇÃO ("quero enviar essa rota") e mostra o que o servidor
-  // reporta de volta (qual slot a rota ocupou, ver TOAST_BY_SLOT).
-  async function handleEnqueueRoute() {
+  function routeLabel(pickup, dropoff) {
+    // Substituição puramente visual (ver useCalibration.js, displayCellName)
+    // — o que vai pro servidor continua sendo o nome técnico.
+    return displayCellName(pickup, lots, points) + ' → ' + displayCellName(dropoff, lots, points);
+  }
+
+  function rejectStaged(err, prefix) {
+    showToast(prefix + err.message, 'error');
+    triggerInvalidPulse(err.name);
+  }
+
+  // "Enviar tarefa": a seleção montada entra na lista de "Tarefas
+  // aguardando envio" — nada vai pro robô ainda (ver "Iniciar tarefas",
+  // handleStartStaged). Editando uma tarefa da lista, o mesmo botão salva.
+  function handleStageSelection() {
     // Contagens iguais é pré-requisito (o botão já fica desabilitado sem
     // isso, ver PointToPointBar) — todo pallet pego precisa ter pra onde ir.
     if (!pickupNames.length || pickupNames.length !== dropoffNames.length) return;
-    const pairs = pickupNames.map((pickup, i) => ({ pickup, dropoff: dropoffNames[i] }));
-    setSending(true);
-    try {
-      // SEMPRE em lote, mesmo pra um par só: o servidor valida a cadeia
-      // inteira com ocupação projetada (rota 2 em diante seria rejeitada se
-      // fosse enviada uma a uma, porque no instante do envio a origem
-      // anterior ainda está ocupada — o robô nem começou). Ver
-      // /api/queue/enqueue-batch em server.py.
-      // palletTop só vale pra azul; o servidor ignora pra madeira, mas
-      // manda limpo mesmo assim.
-      const { slot } = await enqueueRoutes({ pairs, palletType, palletTop: palletType === 'blue' && palletTop });
-      // Substituição puramente visual (ver useCalibration.js,
-      // displayCellName) — `pairs` (mandado pro servidor acima) continua
-      // com os nomes técnicos, só o texto do toast troca pro apelido.
-      const label = pairs.length > 1
-        ? pairs.length + ' rotas enviadas em sequência: ' + pairs.map((p) => displayCellName(p.pickup, lots, points) + '→' + displayCellName(p.dropoff, lots, points)).join(', ')
-        : TOAST_BY_SLOT[slot] + displayCellName(pairs[0].pickup, lots, points) + ' → ' + displayCellName(pairs[0].dropoff, lots, points);
-      showToast(label, slot === 'current' ? 'success' : 'info');
-      // Bolinha de notificação do botão Fila: conta as tasks solicitadas
-      // desde a última vez que o painel foi aberto (ver handleToggleQueueMode).
-      setQueueNotifCount((c) => c + pairs.length);
-      // Limpa só no sucesso: se deu erro, a seleção montada continua ali
-      // pro operador corrigir em vez de ter que remontar tudo do zero.
-      handleClearSelection();
-    } catch (err) {
-      showToast('Erro ao enviar rota: ' + err.message, 'error');
-    } finally {
-      setSending(false);
+    if (editingUnitId) {
+      handleSaveEdit();
+      return;
+    }
+    const tasks = pickupNames.map((pickup, i) => ({ id: newStagedId('t'), pickup, dropoff: dropoffNames[i] }));
+    const unitId = newStagedId('u');
+    const unit = {
+      id: unitId,
+      // Só vira grupo (tracejado laranja, move junto) com sequência de verdade.
+      groupKey: tasks.length > 1 ? unitId : null,
+      palletType,
+      palletTop: palletType === 'blue' && palletTop,
+      tasks,
+    };
+    const next = [...stagedUnits, unit];
+    const err = checkStagedChange(next, tasks.map((t) => t.id));
+    if (err) {
+      rejectStaged(err, '');
+      return;
+    }
+    setStagedUnits(next);
+    showToast(
+      tasks.length > 1
+        ? tasks.length + ' tarefas em sequência adicionadas à lista de envio.'
+        : 'Tarefa adicionada à lista de envio: ' + routeLabel(tasks[0].pickup, tasks[0].dropoff),
+      'info',
+    );
+    handleClearSelection();
+  }
+
+  // Tocar numa barrinha: carrega a unidade na seleção do Ponto a Ponto
+  // (mapa mostra origem/destino ampliados, dá pra trocar clicando). Tocar
+  // de novo na mesma sai da edição sem mudar nada. Um grupo de sequência
+  // abre em modo sequência (edita o grupo inteiro); uma avulsa trava a
+  // sequência desligada.
+  //
+  // "Visualizar tarefa": além de carregar pra edição, o mapa dá zoom no
+  // kanban onde a ORIGEM da tarefa tocada está, e o banner "VISUALIZANDO"
+  // mostra ORIGEM → DESTINO clicáveis (handleFocusEndpoint). Num grupo, tocar
+  // noutra barrinha do MESMO grupo só troca a tarefa visualizada.
+  function handleSelectStagedUnit(unitId, taskId = null) {
+    const unit = stagedUnits.find((u) => u.id === unitId);
+    if (!unit) return;
+    const index = Math.max(0, taskId ? unit.tasks.findIndex((t) => t.id === taskId) : 0);
+    if (editingUnitId === unitId) {
+      if (viewTask && viewTask.index !== index) {
+        setViewTask({ index, active: 'pickup' });
+        requestFocus(pickupNames[index]);
+        return;
+      }
+      handleCancelEdit();
+      return;
+    }
+    setViewTask({ index, active: 'pickup' });
+    requestFocus(unit.tasks[index].pickup);
+    if (!editingUnitId) editPrevRef.current = { sequenceMode, palletType, palletTop };
+    setEditingUnitId(unitId);
+    setSequenceMode(!!unit.groupKey);
+    setPickupNames(unit.tasks.map((t) => t.pickup));
+    setDropoffNames(unit.tasks.map((t) => t.dropoff));
+    setActiveSlot('pickup');
+    setPalletType(unit.palletType);
+    setPalletTop(!!unit.palletTop);
+  }
+
+  // Banner: toca na origem ou no destino → mapa vai até o kanban daquele
+  // ponto. Serve tanto pro Ponto a Ponto (viewTask) quanto pro Histórico
+  // (selectedHistoryRoute, ver handleSelectHistoryEntry abaixo) — nunca os
+  // dois ao mesmo tempo (modos diferentes), então checar o modo decide
+  // qual dos dois está valendo agora.
+  function handleFocusEndpoint(kind) {
+    if (mode === 'history') {
+      if (!selectedHistoryRoute) return;
+      const name = kind === 'pickup' ? selectedHistoryRoute.pickup : selectedHistoryRoute.dropoff;
+      if (!name) return;
+      setHistoryFocusedEndpoint(kind);
+      requestFocus(name);
+      return;
+    }
+    if (!viewTask) return;
+    const name = (kind === 'pickup' ? pickupNames : dropoffNames)[viewTask.index];
+    if (!name) return;
+    setViewTask({ ...viewTask, active: kind });
+    requestFocus(name);
+  }
+
+  // Clicar numa rota do painel Histórico: alterna seleção (clicar de novo
+  // na mesma desseleciona — mesmo gesto do painel Fila) e, ao SELECIONAR,
+  // já dá zoom de perto na origem (ou no destino, se não houver origem —
+  // caso do UNLOAD isolado pós-cancelamento, ver CONTEXT.md "Cancelamento
+  // pós-pickup") e liga o banner "VISUALIZANDO" com origem/destino
+  // clicáveis, mesmo espírito de "Visualizar tarefa" no Ponto a Ponto.
+  function handleSelectHistoryEntry(entry) {
+    setSelectedHistoryRoute((cur) => {
+      if (cur && cur.id === entry.id) {
+        setHistoryFocusedEndpoint(null);
+        return null;
+      }
+      const startKind = entry.pickup ? 'pickup' : 'dropoff';
+      setHistoryFocusedEndpoint(startKind);
+      requestFocus(entry.pickup || entry.dropoff);
+      return entry;
+    });
+  }
+
+  function restoreEditPrefs() {
+    const prev = editPrevRef.current;
+    editPrevRef.current = null;
+    setEditingUnitId(null);
+    // Sai da visualização junto: some a linha da tarefa e o nome do kanban
+    // (o mapa fica onde está).
+    setViewTask(null);
+    setActiveCloseUpId(null);
+    if (prev) {
+      setSequenceMode(prev.sequenceMode);
+      setPalletType(prev.palletType);
+      setPalletTop(prev.palletTop);
     }
   }
+
+  function handleCancelEdit() {
+    restoreEditPrefs();
+    handleClearSelection();
+  }
+
+  function handleSaveEdit() {
+    if (!editingUnit) {
+      handleCancelEdit();
+      return;
+    }
+    // Reaproveita o id das tarefas que já existiam (não reanima a barrinha à
+    // toa); só as novas de um grupo que cresceu ganham id novo.
+    const tasks = pickupNames.map((pickup, i) => ({
+      id: editingUnit.tasks[i]?.id || newStagedId('t'),
+      pickup,
+      dropoff: dropoffNames[i],
+    }));
+    const edited = {
+      ...editingUnit,
+      tasks,
+      groupKey: tasks.length > 1 ? (editingUnit.groupKey || editingUnit.id) : null,
+      palletType,
+      palletTop: palletType === 'blue' && palletTop,
+    };
+    const next = stagedUnits.map((u) => (u.id === edited.id ? edited : u));
+    const err = checkStagedChange(next, tasks.map((t) => t.id));
+    if (err) {
+      rejectStaged(err, 'Não dá pra salvar: ');
+      return;
+    }
+    setStagedUnits(next);
+    showToast(tasks.length > 1 ? 'Sequência atualizada.' : 'Tarefa atualizada: ' + routeLabel(tasks[0].pickup, tasks[0].dropoff), 'success');
+    handleCancelEdit();
+  }
+
+  // Arrastar e soltar (StagedTasksPanel): move a UNIDADE inteira de `from`
+  // pra `to`. Recusa (e a barrinha volta pro lugar) se a nova ordem obstrui
+  // algum lote — ex: tentar pegar A2 antes do A sair.
+  function handleReorderStaged(from, to) {
+    const next = [...stagedUnits];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    const err = checkStagedChange(next);
+    if (err) {
+      rejectStaged(err, 'Ordem inválida: ');
+      return false;
+    }
+    setStagedUnits(next);
+    return true;
+  }
+
+  function handleRemoveStagedTask(unitId, taskId) {
+    const next = stagedUnits
+      .map((u) => (u.id === unitId ? { ...u, tasks: u.tasks.filter((t) => t.id !== taskId) } : u))
+      .filter((u) => u.tasks.length > 0)
+      // Grupo que ficou com uma tarefa só volta a ser avulsa.
+      .map((u) => (u.groupKey && u.tasks.length < 2 ? { ...u, groupKey: null } : u));
+    const err = checkStagedChange(next);
+    if (err) {
+      rejectStaged(err, 'Não dá pra remover — a tarefa seguinte depende dela: ');
+      return;
+    }
+    if (unitId === editingUnitId) handleCancelEdit();
+    setStagedUnits(next);
+  }
+
+  function handleChangeStagedPallet(unitId, type, top) {
+    const cleanTop = type === 'blue' && !!top;
+    setStagedUnits((units) => units.map((u) => (u.id === unitId ? { ...u, palletType: type, palletTop: cleanTop } : u)));
+    if (unitId === editingUnitId) {
+      setPalletType(type);
+      setPalletTop(cleanTop);
+    }
+  }
+
+  // Disparo/avanço/sondagem de verdade (falar com o robô, decidir
+  // atual/pendente/fila, detectar FINISHED/CANCELLED, marcar ocupação) não
+  // mora aqui — é tudo dono do servidor (ver CONTEXT.md, "Fila de rotas
+  // compartilhada", e hooks/useLiveState.js). "Iniciar tarefas" só manda a
+  // INTENÇÃO e mostra o que o servidor reporta de volta.
+  async function handleStartStaged() {
+    if (!stagedUnits.length || editingUnitId) return;
+    const flat = flattenUnits(stagedUnits);
+    const err = validateChain(flat);
+    if (err) {
+      rejectStaged(err, 'Ordem inválida: ');
+      return;
+    }
+    // A lista inteira num envio só: o servidor valida a cadeia com ocupação
+    // projetada através de TODAS (mandadas uma a uma, uma tarefa que depende
+    // de outra anterior seria recusada, porque no instante do envio a origem
+    // anterior ainda está ocupada). Cada par leva pallet e grupo próprios —
+    // avulsa vai com group null e continua independente na fila do servidor
+    // (ver /api/queue/enqueue-batch em server.py).
+    const pairs = flat.map(({ pickup, dropoff, palletType: type, palletTop: top, group }) => ({
+      pickup, dropoff, palletType: type, palletTop: top, group,
+    }));
+    setStarting(true);
+    try {
+      const { slot } = await enqueueRoutes({ pairs, palletType: pairs[0].palletType, palletTop: pairs[0].palletTop });
+      showToast(
+        pairs.length > 1
+          ? pairs.length + ' tarefas iniciadas.'
+          : TOAST_BY_SLOT[slot] + routeLabel(pairs[0].pickup, pairs[0].dropoff),
+        slot === 'current' ? 'success' : 'info',
+      );
+      // Bolinha de notificação do botão Fila: conta as tarefas solicitadas
+      // desde a última vez que o painel foi aberto (ver handleToggleQueueMode).
+      setQueueNotifCount((c) => c + pairs.length);
+      // Limpa só no sucesso: se deu erro, a lista continua ali pro operador
+      // corrigir em vez de ter que remontar tudo do zero.
+      setStagedUnits([]);
+    } catch (e) {
+      showToast('Erro ao iniciar tarefas: ' + e.message, 'error');
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  const stagedChainError = validateChain(flattenUnits(stagedUnits));
+  const stagedBlockedReason = editingUnitId
+    ? { text: 'Salve ou cancele a edição antes de iniciar.', kind: 'info' }
+    : stagedChainError ? { text: 'Ordem inválida: ' + stagedChainError.message, kind: 'error' } : null;
 
   // Cancelamento adiado até giro seguro (ver CONTEXT.md e useLiveState.js):
   // `result.pending` true significa que o robô não tem espaço pra girar
@@ -657,7 +1095,7 @@ export default function MainApp({ user, onLogout }) {
   async function handleCancelCurrent() {
     if (!currentRoute) return;
     try {
-      const result = await cancelCurrent();
+      const result = await cancelCurrent({ force: devMode && limitBreaker });
       if (result && result.pending) {
         showToast(result.message || 'Aguardando o robô achar espaço seguro pra girar...', 'info');
       } else {
@@ -726,13 +1164,17 @@ export default function MainApp({ user, onLogout }) {
   // O que o mapa destaca, em ordem de prioridade:
   // 1. Seleção sendo montada no Ponto a Ponto (com a numeração da sequência);
   // 2. Rota (ou grupo) selecionada no painel Fila;
-  // 3. A ROTA ATUAL, um par só, sem número — o padrão de repouso, o que o
+  // 3. Entrada selecionada no painel Histórico (pickup pode ser null — ver
+  //    HistoryPanel, UNLOAD isolado pós-cancelamento — por isso o filter);
+  // 4. A ROTA ATUAL, um par só, sem número — o padrão de repouso, o que o
   //    robô está fazendo AGORA.
   const mapPickupNames = pickupNames.length ? pickupNames
     : selectedQueueGroup ? selectedQueueGroup.map((r) => r.pickup)
+    : selectedHistoryRoute ? [selectedHistoryRoute.pickup].filter(Boolean)
     : currentRoute ? [currentRoute.pickup] : EMPTY_SELECTION;
   const mapDropoffNames = dropoffNames.length ? dropoffNames
     : selectedQueueGroup ? selectedQueueGroup.map((r) => r.dropoff)
+    : selectedHistoryRoute ? [selectedHistoryRoute.dropoff].filter(Boolean)
     : currentRoute ? [currentRoute.dropoff] : EMPTY_SELECTION;
 
   return (
@@ -747,19 +1189,45 @@ export default function MainApp({ user, onLogout }) {
         saveStatus={saveStatus}
         theme={theme}
         onToggleTheme={handleToggleTheme}
+        isFullscreen={isFullscreen}
+        onToggleFullscreen={handleToggleFullscreen}
         devMode={devMode}
         onDevButtonClick={handleDevButtonClick}
+        limitBreaker={limitBreaker}
+        onToggleLimitBreaker={handleToggleLimitBreaker}
         user={user}
         onLogout={onLogout}
         robotCharging={robotCharging}
         robotBattery={robotBattery}
+        robotReturningToCharge={robotReturningToCharge}
       />
-      <CloseUpStatusBanner name={activeCloseUpId ? closeUps.find((c) => c.id === activeCloseUpId)?.name : null} />
-      {/* cancelPendingMessage (esperando girar pra CANCELAR) e
-          turnBlockedMessage (esperando girar pra COMEÇAR uma rota nova) nunca
-          coexistem — ver server.py, "check-turn no início de tarefas": uma só
-          existe pra currentRoute JÁ disparada, a outra só pra RESERVADA. */}
-      <CancelPendingBanner message={cancelPendingMessage || turnBlockedMessage} />
+      <CloseUpStatusBanner
+        name={activeCloseUpId ? closeUps.find((c) => c.id === activeCloseUpId)?.name : null}
+        // Nomes AO VIVO da seleção em edição (mudar a origem no mapa já
+        // atualiza aqui), no apelido visual — nunca o nome técnico.
+        task={viewTask && editingUnitId && mode === 'ptp' ? {
+          pickupLabel: pickupNames[viewTask.index] ? displayCellName(pickupNames[viewTask.index], lots, points) : null,
+          dropoffLabel: dropoffNames[viewTask.index] ? displayCellName(dropoffNames[viewTask.index], lots, points) : null,
+          active: viewTask.active,
+        } : mode === 'history' && selectedHistoryRoute ? {
+          pickupLabel: selectedHistoryRoute.pickup ? displayCellName(selectedHistoryRoute.pickup, lots, points) : null,
+          dropoffLabel: selectedHistoryRoute.dropoff ? displayCellName(selectedHistoryRoute.dropoff, lots, points) : null,
+          active: historyFocusedEndpoint,
+        } : null}
+        onFocusEndpoint={handleFocusEndpoint}
+        wide={mode === 'ptp' || mode === 'queue' || mode === 'history'}
+      />
+      {/* cancelPendingMessage (esperando girar pra CANCELAR), turnBlockedMessage
+          (esperando girar pra COMEÇAR uma rota nova), awaitingChargeMessage
+          (esperando o robô voltar pra energia e carregar antes de COMEÇAR uma
+          rota nova) e postPickupUnloadMessage (cancelou já com o pallet no
+          garfo — descarregando isolado antes de seguir, ver CONTEXT.md
+          "Cancelamento pós-pickup") nunca coexistem — cada uma cobre uma
+          janela sequencial diferente da mesma currentRoute, nunca ao mesmo
+          tempo (ver server.py, "check-turn no início de tarefas", "Trava:
+          não iniciar task durante retorno pra energia" e "Cancelamento
+          pós-pickup"). */}
+      <CancelPendingBanner message={cancelPendingMessage || turnBlockedMessage || awaitingChargeMessage || postPickupUnloadMessage} />
 
       <div className="app__body">
         {/*
@@ -788,6 +1256,8 @@ export default function MainApp({ user, onLogout }) {
           selectedCloseUpId={selectedCloseUpId}
           onSelectCloseUp={handleSelectCloseUp}
           onCloseUpActivate={handleCloseUpActivate}
+          focusRequest={focusRequest}
+          closeUpFocusRequest={closeUpFocusRequest}
           pickupNames={mapPickupNames}
           dropoffNames={mapDropoffNames}
           onPointToPointClick={handlePointToPointClick}
@@ -853,16 +1323,15 @@ export default function MainApp({ user, onLogout }) {
           </aside>
         )}
         {mode === 'ptp' && (
-          <aside className="sidebar">
+          <aside className="sidebar sidebar--wide">
             <PointToPointBar
               pickupNames={pickupNames}
               dropoffNames={dropoffNames}
               lots={lots}
               points={points}
-              onClear={handleClearSelection}
-              onSend={handleEnqueueRoute}
-              sending={sending}
-              willQueue={!!currentRoute}
+              onClear={editingUnitId ? handleCancelEdit : handleClearSelection}
+              onSend={handleStageSelection}
+              editing={editingUnit ? (editingUnit.groupKey ? 'group' : 'single') : null}
               palletType={palletType}
               onPalletTypeChange={setPalletType}
               palletTop={palletTop}
@@ -871,6 +1340,20 @@ export default function MainApp({ user, onLogout }) {
               onToggleSequenceMode={handleToggleSequenceMode}
               activeSlot={activeSlot}
               onActiveSlotChange={setActiveSlot}
+            />
+            <StagedTasksPanel
+              units={stagedUnits}
+              lots={lots}
+              points={points}
+              editingUnitId={editingUnitId}
+              invalidTaskId={stagedChainError?.taskId ?? null}
+              blockedReason={stagedBlockedReason}
+              onSelectUnit={handleSelectStagedUnit}
+              onRemoveTask={handleRemoveStagedTask}
+              onReorder={handleReorderStaged}
+              onChangePallet={handleChangeStagedPallet}
+              onStart={handleStartStaged}
+              starting={starting}
             />
           </aside>
         )}
@@ -896,12 +1379,21 @@ export default function MainApp({ user, onLogout }) {
         )}
         {mode === 'history' && (
           <aside className="sidebar sidebar--history">
-            <HistoryPanel />
+            <HistoryPanel
+              lots={lots}
+              points={points}
+              selectedEntryId={selectedHistoryRoute ? selectedHistoryRoute.id : null}
+              onSelectEntry={handleSelectHistoryEntry}
+            />
           </aside>
         )}
         {mode === 'users' && (
-          <aside className="sidebar">
-            <UsersPanel currentUsername={user.username} showToast={showToast} />
+          <aside className="sidebar sidebar--wide">
+            <UsersPanel
+              currentUsername={user.username}
+              showToast={showToast}
+              onFocusKanban={requestCloseUpFocus}
+            />
           </aside>
         )}
       </div>
