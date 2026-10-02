@@ -1249,85 +1249,34 @@ export default function FloorPlanCanvas({
     setStagePos(newPos);
   }
 
-  // --- zoom: pinça de dois dedos no touch -----------------------------------
-  const pinchRef = useRef({ dist: 0, center: null });
-  // getBoundingClientRect é leitura de layout síncrona (força o navegador a
-  // recalcular posição/tamanho na hora) — chamar isso a cada touchmove (que
-  // dispara dezenas de vezes por segundo durante o pinça) é caro o
-  // suficiente em tablets mais fracos pra derrubar o frame rate a ponto do
-  // navegador começar a atrasar/agrupar os touchmove seguintes, o que dá
-  // exatamente a sensação de "trava, precisa fazer o gesto de novo".
-  // Cacheia uma vez por gesto (o container não se move/redimensiona no meio
-  // de um pinça) em vez de recalcular a cada frame.
-  const pinchRectRef = useRef(null);
-
-  function touchPoint(touch, rect) {
-    return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
-  }
+  // --- pinça de dois dedos: BLOQUEADA de propósito (pedido do usuário,
+  // 2026-10-02) — zoom só pela roda do mouse ou pelos botões de lupa
+  // (reset-toggle "-"/interaction-toggle "+"). `pinchActiveRef` detecta o
+  // INÍCIO de uma tentativa de pinça (2+ dedos, não tinha antes) sem
+  // aplicar zoom nenhum — só pra avisar o operador que ali não é mais o
+  // jeito de dar zoom: pulsa a lupa "+" (ver pinchPulseId/view-toggle__
+  // pinch-pulse) uma vez por gesto, não a cada frame do touchmove.
+  const pinchActiveRef = useRef(false);
+  const [pinchPulseId, setPinchPulseId] = useState(0);
 
   function handleTouchMove(e) {
     const touches = e.evt.touches;
-    const stage = e.target.getStage();
     if (touches.length < 2) {
+      pinchActiveRef.current = false;
       handleStageMouseMove(e);
       return;
     }
-    e.evt.preventDefault();
+    e.evt.preventDefault(); // nunca deixa o navegador fazer zoom nativo da página com isso
+    const stage = e.target.getStage();
     if (stage.isDragging()) stage.stopDrag();
-    if (!pinchRectRef.current) {
-      pinchRectRef.current = stage.container().getBoundingClientRect();
+    if (!pinchActiveRef.current) {
+      pinchActiveRef.current = true;
+      setPinchPulseId((id) => id + 1);
     }
-    const rect = pinchRectRef.current;
-    const p1 = touchPoint(touches[0], rect);
-    const p2 = touchPoint(touches[1], rect);
-    const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-    const center = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
-    if (!pinchRef.current.center) {
-      pinchRef.current = { dist, center };
-      return;
-    }
-    // Mesmo motivo do handleWheel acima — pinça É mudança de zoom, some o
-    // banner de Close Up (chamado a cada frame do gesto de propósito: é
-    // barato — setActiveCloseUpId(null) já null não re-renderiza nada).
-    onCloseUpActivate?.(null);
-    const oldScale = stage.scaleX();
-    const pointTo = {
-      x: (center.x - stage.x()) / oldScale,
-      y: (center.y - stage.y()) / oldScale,
-    };
-    const newScale = clampScale(oldScale * (dist / pinchRef.current.dist));
-    const newPos = {
-      x: center.x - pointTo.x * newScale,
-      y: center.y - pointTo.y * newScale,
-    };
-    // Muta o node do Konva DIRETO, sem passar por setState — era essa a
-    // causa do zoom "engasgado"/aos saltos: touchmove dispara dezenas de
-    // vezes por segundo, e cada setState força o React a re-renderizar a
-    // árvore inteira (reconciliação + Konva reaplicando props) só pra
-    // mudar 4 números. Num tablet mais fraco o React não acompanha esse
-    // ritmo, os eventos se acumulam e o navegador passa a agrupar/atrasar
-    // os touchmove seguintes — visualmente isso é exatamente "não
-    // acompanha o dedo, dá um zoom abrupto e estático". stage.scale/
-    // position+batchDraw é só redesenho de canvas, muito mais barato, e é
-    // pra isso que existe. stageScale/stagePos (estado React) só
-    // sincronizam no FIM do gesto — ver handleTouchEnd.
-    stage.scale({ x: newScale, y: newScale });
-    stage.position(newPos);
-    stage.batchDraw();
-    pinchRef.current = { dist, center };
   }
 
   function handleTouchEnd(e) {
-    if (e.evt.touches.length < 2) {
-      const stage = e.target.getStage();
-      // Sincroniza o estado React com o transform que o Konva já aplicou
-      // direto durante o gesto (ver handleTouchMove) — uma vez só, aqui,
-      // não a cada frame do pinça.
-      setStageScale(stage.scaleX());
-      setStagePos({ x: stage.x(), y: stage.y() });
-      pinchRef.current = { dist: 0, center: null };
-      pinchRectRef.current = null; // próximo pinça recalcula do zero
-    }
+    if (e.evt.touches.length < 2) pinchActiveRef.current = false;
     commitOnRelease();
   }
 
@@ -1378,6 +1327,12 @@ export default function FloorPlanCanvas({
         aria-label={interactionModeActive ? 'Sair do modo Interação' : 'Entrar no modo Interação'}
         title="Modo Interação"
       >
+        {/* Pulso azul menta ao redor do botão quando detecta uma tentativa
+            de pinça (pedido do usuário, 2026-10-02 — pinça foi bloqueada,
+            isso avisa que o zoom agora é por aqui). `key` muda a cada
+            tentativa pra reiniciar a animação do zero, mesmo que o
+            operador tente de novo antes da anterior terminar. */}
+        {pinchPulseId > 0 && <span key={pinchPulseId} className="view-toggle__pinch-pulse" aria-hidden="true" />}
         {/* Lupa com "+" (zoom-in) — substituiu a mãozinha (que já tinha
             substituído o alternador de vista topo/isométrica, legado, ver
             CONTEXT.md). Par visual do zoom-out no reset-toggle acima. */}

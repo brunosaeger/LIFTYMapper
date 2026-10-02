@@ -68,7 +68,7 @@ export default function MainApp({ user, onLogout }) {
   // pra ele em vez de mudar estado local direto (quem decide/dispara de
   // verdade é sempre o server.py, nunca o navegador).
   const {
-    currentRoute, pendingRoute, routeQueue, occupied, emergency, cancelPending, cancelPendingMessage, turnBlockedMessage, awaitingChargeMessage, postPickupUnloadMessage, robotCharging, robotBattery, robotReturningToCharge,
+    currentRoute, pendingRoute, routeQueue, occupied, emergency, cancelPending, cancelPendingMessage, turnBlockedMessage, awaitingChargeMessage, postPickupUnloadMessage, robotCharging, robotBattery, robotReturningToCharge, robotStalledMessage,
     enqueueRoutes, cancelCurrent, removeQueued, setOccupiedMany, toggleOccupied, setEmergency, setLimitBreakerLease,
   } = useLiveState();
   const [toast, showToast] = useToast();
@@ -370,15 +370,6 @@ export default function MainApp({ user, onLogout }) {
     resetSelection({ keepRoute });
   }
 
-  // Mode "de repouso" pra onde os toggles de mark/ptp voltam ao sair: 'edit'
-  // pra quem desbloqueou o modo desenvolvedor (útil ficar ali, é onde se
-  // edita pontos/lotes), 'ptp' pra todo mundo mais — nunca 'edit' sem
-  // devMode, senão a aba escondida no Toolbar (ver Toolbar.jsx) ficaria
-  // inútil: o app já cairia sozinho no modo que ela deveria trancar.
-  function baseMode() {
-    return devMode ? 'edit' : 'ptp';
-  }
-
   // Modo de marcação de ocupação: botão flutuante próprio (ver
   // FloorPlanCanvas), não é uma aba do Toolbar. keepRoute sempre true (é
   // um "peek mode", ver isPeekMode acima) — corrigir uma ocupação errada
@@ -386,18 +377,26 @@ export default function MainApp({ user, onLogout }) {
   // operador volta pro ptp com a origem/destino ainda escolhidos, tanto no
   // painel quanto no destaque do mapa (ver highlightsRoute em
   // FloorPlanCanvas.jsx).
+  //
+  // Bug corrigido (pedido do usuário, 2026-10-02): clicar no ÍCONE JÁ
+  // ATIVO não "desliga" mais o modo (antes caía pro baseMode(), que pra
+  // quem não é dev é 'ptp' — clicar de novo no ícone de marcação te jogava
+  // pro Ponto a Ponto sem pedir). Agora só MUDA de modo quando o ícone
+  // clicado é de um modo DIFERENTE do atual — clicar no mesmo ícone de
+  // novo é no-op, o menu correspondente continua aberto. Pra sair de um
+  // desses modos, clica em outro ícone (inclusive o de Ponto a Ponto).
   function handleToggleMarkMode() {
-    setMode((m) => (m === 'mark' ? baseMode() : 'mark'));
+    if (mode === 'mark') return;
+    setMode('mark');
     resetSelection({ keepRoute: true });
   }
 
   // Ponto a Ponto: mesmo padrão do modo de marcação acima — só acessível
-  // pelo botão flutuante (ícone de rota), não pelo Toolbar. Pra quem não é
-  // dev, ptp JÁ é o modo de repouso — sair dele não muda nada (baseMode()
-  // devolve 'ptp' de novo), o que é o comportamento certo.
+  // pelo botão flutuante (ícone de rota), não pelo Toolbar.
   function handleTogglePtpMode() {
+    if (mode === 'ptp') return;
     const keepRoute = isPeekMode(mode); // ver handleModeChange acima
-    setMode((m) => (m === 'ptp' ? baseMode() : 'ptp'));
+    setMode('ptp');
     resetSelection({ keepRoute });
   }
 
@@ -406,9 +405,10 @@ export default function MainApp({ user, onLogout }) {
   // "olho" -> "mãozinha" em FloorPlanCanvas.jsx). Acessível a qualquer
   // usuário (não só dev) — é o modo seguro de navegação pro operador.
   // keepRoute sempre true aqui (é o próprio toggle de Interação, outro
-  // "peek mode" — cobre tanto entrar quanto sair dela).
+  // "peek mode").
   function handleToggleInteractionMode() {
-    setMode((m) => (m === 'interaction' ? baseMode() : 'interaction'));
+    if (mode === 'interaction') return;
+    setMode('interaction');
     resetSelection({ keepRoute: true });
   }
 
@@ -418,11 +418,11 @@ export default function MainApp({ user, onLogout }) {
   // gesto). Abrir o painel zera a notificação (bolinha vermelha com a
   // contagem de tasks solicitadas desde a última vez que foi aberto).
   function handleToggleQueueMode() {
+    if (mode === 'queue') return;
     const keepRoute = isPeekMode(mode); // ver handleModeChange acima
-    const entering = mode !== 'queue';
-    setMode(entering ? 'queue' : baseMode());
+    setMode('queue');
     resetSelection({ keepRoute });
-    if (entering) setQueueNotifCount(0);
+    setQueueNotifCount(0);
   }
 
   // Clique numa rota do painel Fila: alterna a seleção (clicar na mesma
@@ -882,21 +882,32 @@ export default function MainApp({ user, onLogout }) {
   // kanban onde a ORIGEM da tarefa tocada está, e o banner "VISUALIZANDO"
   // mostra ORIGEM → DESTINO clicáveis (handleFocusEndpoint). Num grupo, tocar
   // noutra barrinha do MESMO grupo só troca a tarefa visualizada.
+  //
+  // Clicar NO GRUPO em si (não numa barrinha específica — taskId null E o
+  // grupo tem groupKey, ver StagedTasksPanel/handleClickUnit) é diferente:
+  // bug relatado pelo usuário (2026-10-02) — mostrava só a 1ª tarefa do
+  // grupo, como se as outras não existissem. `index: null` é o sentinela
+  // "visualizando o GRUPO inteiro" — o banner passa a mostrar TODAS as N
+  // origens e TODOS os N destinos (empilhados), em vez de um par só (ver
+  // CloseUpStatusBanner.jsx). Tocar numa barrinha específica continua
+  // mostrando só aquele par, sem mudança nenhuma.
   function handleSelectStagedUnit(unitId, taskId = null) {
     const unit = stagedUnits.find((u) => u.id === unitId);
     if (!unit) return;
-    const index = Math.max(0, taskId ? unit.tasks.findIndex((t) => t.id === taskId) : 0);
+    const viewingGroup = !taskId && !!unit.groupKey;
+    const index = viewingGroup ? null : Math.max(0, taskId ? unit.tasks.findIndex((t) => t.id === taskId) : 0);
+    const focusPickup = viewingGroup ? unit.tasks[0].pickup : unit.tasks[index].pickup;
     if (editingUnitId === unitId) {
       if (viewTask && viewTask.index !== index) {
-        setViewTask({ index, active: 'pickup' });
-        requestFocus(pickupNames[index]);
+        setViewTask({ index, active: 'pickup', activeIndex: 0 });
+        requestFocus(viewingGroup ? focusPickup : pickupNames[index]);
         return;
       }
       handleCancelEdit();
       return;
     }
-    setViewTask({ index, active: 'pickup' });
-    requestFocus(unit.tasks[index].pickup);
+    setViewTask({ index, active: 'pickup', activeIndex: 0 });
+    requestFocus(focusPickup);
     if (!editingUnitId) editPrevRef.current = { sequenceMode, palletType, palletTop };
     setEditingUnitId(unitId);
     setSequenceMode(!!unit.groupKey);
@@ -911,8 +922,11 @@ export default function MainApp({ user, onLogout }) {
   // ponto. Serve tanto pro Ponto a Ponto (viewTask) quanto pro Histórico
   // (selectedHistoryRoute, ver handleSelectHistoryEntry abaixo) — nunca os
   // dois ao mesmo tempo (modos diferentes), então checar o modo decide
-  // qual dos dois está valendo agora.
-  function handleFocusEndpoint(kind) {
+  // qual dos dois está valendo agora. `index` só importa na visualização de
+  // GRUPO (viewTask.index === null) — qual das N origens/destinos
+  // empilhadas foi tocada; nos outros casos (uma tarefa só, ou Histórico)
+  // é sempre 0, já que só existe um par.
+  function handleFocusEndpoint(kind, index = 0) {
     if (mode === 'history') {
       if (!selectedHistoryRoute) return;
       const name = kind === 'pickup' ? selectedHistoryRoute.pickup : selectedHistoryRoute.dropoff;
@@ -922,9 +936,16 @@ export default function MainApp({ user, onLogout }) {
       return;
     }
     if (!viewTask) return;
+    if (viewTask.index === null) {
+      const name = (kind === 'pickup' ? pickupNames : dropoffNames)[index];
+      if (!name) return;
+      setViewTask({ ...viewTask, active: kind, activeIndex: index });
+      requestFocus(name);
+      return;
+    }
     const name = (kind === 'pickup' ? pickupNames : dropoffNames)[viewTask.index];
     if (!name) return;
-    setViewTask({ ...viewTask, active: kind });
+    setViewTask({ ...viewTask, active: kind, activeIndex: 0 });
     requestFocus(name);
   }
 
@@ -1205,14 +1226,20 @@ export default function MainApp({ user, onLogout }) {
         name={activeCloseUpId ? closeUps.find((c) => c.id === activeCloseUpId)?.name : null}
         // Nomes AO VIVO da seleção em edição (mudar a origem no mapa já
         // atualiza aqui), no apelido visual — nunca o nome técnico.
+        // pickups/dropoffs SEMPRE em lista (mesmo quando só existe um par) —
+        // uniformiza o banner pros dois casos: uma tarefa só (lista de 1) e
+        // o GRUPO inteiro de "Lotes em sequência" (lista de N, uma por
+        // tarefa — bug corrigido 2026-10-02, antes só mostrava a 1ª).
         task={viewTask && editingUnitId && mode === 'ptp' ? {
-          pickupLabel: pickupNames[viewTask.index] ? displayCellName(pickupNames[viewTask.index], lots, points) : null,
-          dropoffLabel: dropoffNames[viewTask.index] ? displayCellName(dropoffNames[viewTask.index], lots, points) : null,
-          active: viewTask.active,
+          pickups: (viewTask.index === null ? pickupNames : [pickupNames[viewTask.index]])
+            .map((n) => (n ? displayCellName(n, lots, points) : null)),
+          dropoffs: (viewTask.index === null ? dropoffNames : [dropoffNames[viewTask.index]])
+            .map((n) => (n ? displayCellName(n, lots, points) : null)),
+          active: { kind: viewTask.active, index: viewTask.activeIndex },
         } : mode === 'history' && selectedHistoryRoute ? {
-          pickupLabel: selectedHistoryRoute.pickup ? displayCellName(selectedHistoryRoute.pickup, lots, points) : null,
-          dropoffLabel: selectedHistoryRoute.dropoff ? displayCellName(selectedHistoryRoute.dropoff, lots, points) : null,
-          active: historyFocusedEndpoint,
+          pickups: [selectedHistoryRoute.pickup ? displayCellName(selectedHistoryRoute.pickup, lots, points) : null],
+          dropoffs: [selectedHistoryRoute.dropoff ? displayCellName(selectedHistoryRoute.dropoff, lots, points) : null],
+          active: { kind: historyFocusedEndpoint, index: 0 },
         } : null}
         onFocusEndpoint={handleFocusEndpoint}
         wide={mode === 'ptp' || mode === 'queue' || mode === 'history'}
@@ -1227,7 +1254,12 @@ export default function MainApp({ user, onLogout }) {
           tempo (ver server.py, "check-turn no início de tarefas", "Trava:
           não iniciar task durante retorno pra energia" e "Cancelamento
           pós-pickup"). */}
-      <CancelPendingBanner message={cancelPendingMessage || turnBlockedMessage || awaitingChargeMessage || postPickupUnloadMessage} />
+      {/* robotStalledMessage (vermelho, anomalia) tem prioridade sobre as
+          esperas normais (âmbar) — nunca escondido por elas. */}
+      <CancelPendingBanner
+        message={robotStalledMessage || cancelPendingMessage || turnBlockedMessage || awaitingChargeMessage || postPickupUnloadMessage}
+        variant={robotStalledMessage ? 'danger' : 'warning'}
+      />
 
       <div className="app__body">
         {/*

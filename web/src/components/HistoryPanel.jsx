@@ -35,12 +35,23 @@ const KNOWN_PHRASES = [
   ['地图', 'Mapa'],
 ];
 
+// Rede de segurança final (pedido do usuário, 2026-10-02: "não quero
+// vestígio de nada chinês"): KNOWN_PHRASES só cobre o que já vimos na
+// prática — um código/frase NOVO que a API mande em mandarim passaria
+// direto sem isso. Qualquer caractere Han remanescente depois das trocas
+// conhecidas vira um aviso genérico em PT-BR (com o código original, que é
+// sempre ASCII) em vez de deixar mandarim bruto chegar na tela.
+const HAN_CHARS = /[一-鿿㐀-䶿豈-﫿]/;
+
 function displayDescription(rec) {
   if (ERROR_LABELS[rec.error]) return ERROR_LABELS[rec.error];
   if (!rec.description) return rec.description;
   let text = rec.description;
   for (const [zh, pt] of KNOWN_PHRASES) {
     if (text.includes(zh)) text = text.split(zh).join(pt);
+  }
+  if (HAN_CHARS.test(text)) {
+    return 'Erro do robô' + (rec.error ? ' (' + rec.error + ')' : '') + ' — descrição não traduzida.';
   }
   return text;
 }

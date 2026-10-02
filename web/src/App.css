@@ -542,9 +542,29 @@
   align-items: center;
 }
 
-.closeup-status-banner__task-part {
+/* Cada lado (origem/destino) é uma pilha — ver closeup-status-banner__task-
+   stack-items abaixo. Com um ponto só (tarefa avulsa, ou Histórico) a
+   pilha tem 1 item, visualmente idêntico a antes. Com N (grupo de "Lotes
+   em sequência" visualizado por inteiro, ver MainApp.jsx) os pontos ficam
+   um embaixo do outro — pedido do usuário, 2026-10-02 (bug: antes só
+   mostrava o 1º par do grupo). */
+.closeup-status-banner__task-stack {
   display: flex;
   align-items: center;
+}
+
+.closeup-status-banner__task-stack-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Grupo com muitas tarefas: a pilha não cresce sem limite — rola em vez
+   de estourar a tela. */
+.closeup-status-banner__task--group .closeup-status-banner__task-stack-items {
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 2px;
 }
 
 .closeup-status-banner__arrow {
@@ -608,8 +628,6 @@
   padding: 12px 22px;
   border-radius: 12px;
   background: rgba(15, 17, 20, 0.7);
-  border: 1px solid var(--accent-amber);
-  color: var(--accent-amber);
   font-family: 'Arial Black', 'Helvetica Neue', Arial, sans-serif;
   font-size: 14px;
   font-weight: 700;
@@ -617,6 +635,22 @@
   text-align: center;
   white-space: normal;
   pointer-events: none;
+}
+
+.cancel-pending-banner--warning {
+  border: 1px solid var(--accent-amber);
+  color: var(--accent-amber);
+}
+
+/* "Alerta de robô parado" (ver server.py, robotStalledMessage) — anomalia
+   que pede ação do operador, não uma espera normal: vermelho pulsando
+   (mesmo padrão do emergency-toggle.is-active) pra chamar atenção de
+   verdade, diferente do âmbar discreto das esperas que o sistema resolve
+   sozinho. */
+.cancel-pending-banner--danger {
+  border: 1px solid var(--state-error);
+  color: var(--state-error);
+  animation: emergency-pulse 1.3s ease-in-out infinite;
 }
 
 .closeup-status-banner__rest {
@@ -714,6 +748,31 @@
   opacity: 1;
   border-color: var(--accent-amber);
   color: var(--accent-amber);
+}
+
+/* Pulso ao detectar tentativa de pinça (pedido do usuário, 2026-10-02) —
+   anel que nasce colado no botão e expande/some uma vez só (sem
+   `infinite`: o elemento é descartável, uma nova tentativa recria ele do
+   zero via `key`, ver FloorPlanCanvas.jsx). */
+.view-toggle__pinch-pulse {
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  border: 3px solid var(--accent-cyan);
+  pointer-events: none;
+  /* `forwards`: sem isso, ao terminar a animação o elemento voltava pro
+     opacity:1 "de repouso" (nunca declarado explicitamente fora do
+     keyframe) em vez de ficar sumido — o pulso "nunca sumia". */
+  animation: pinch-pulse-ring 700ms ease-out forwards;
+}
+
+@keyframes pinch-pulse-ring {
+  0% { opacity: 0.9; transform: scale(0.85); }
+  100% { opacity: 0; transform: scale(1.5); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .view-toggle__pinch-pulse { animation: none; opacity: 0.6; }
 }
 
 .mark-toggle {

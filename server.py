@@ -236,7 +236,7 @@ KANBANS_PATH = "/api/kanbans"  # lista de Close Ups elegíveis pra restringir us
 # inclusive a própria index.html — bug real, já aconteceu.
 STATIC_DIR = str(_bundle_dir() / "web" / "dist")
 CALIBRATION_FILE = _app_dir() / "calibration.json"
-EMPTY_CALIBRATION = b'{"top":{"points":[],"lots":[]},"iso":{"points":[],"lots":[]},"occupied":[],"palletHeights":{"blueBase":8,"blueTop":8}}'
+EMPTY_CALIBRATION = b'{"top":{"points":[],"lots":[]},"iso":{"points":[],"lots":[]},"occupied":[],"palletHeights":{"blueBase":7,"blueTop":8}}'
 CALIBRATION_LOCK = threading.Lock()  # protege leitura+escrita de calibration.json (full-snapshot E as mutações cirúrgicas de occupied abaixo)
 
 # Histórico de rotas (modo desenvolvedor, painel "Histórico" no app React) —
@@ -400,11 +400,14 @@ ROBOT_SUPPORT_TYPES = ["犀牛2.0"]
 #
 # Madeira: sem params, height 0 (não empilha — inalterado).
 # Azul, andar de baixo: layer 2, altura = palletHeights.blueBase (config,
-#   default 8) — "Altura do pallet azul padrão" no editor.
+#   default 7cm, pedido do usuário 2026-10-02 — era 8) — "Altura do pallet
+#   azul padrão" no editor.
 # Azul, "Pallet de cima" (checkbox no Ponto a Ponto): layer 3, altura =
 #   palletHeights.blueTop (config, sem padrão de fábrica fixo — persiste o
 #   último valor que o admin salvou). O 2º andar do pallet azul de 2 níveis.
-PALLET_BASE_HEIGHT_DEFAULT = 8
+#   Reaproveita a MESMA constante abaixo só como fallback de último recurso
+#   se o campo vier faltando (não é "o padrão do blueTop" de verdade).
+PALLET_BASE_HEIGHT_DEFAULT = 7
 PALLET_BASE_LAYER = 2
 PALLET_TOP_LAYER = 3
 
@@ -832,7 +835,22 @@ def _current_route_cancel_ready(current, pickup_cleared):
 # só a THREAD DE FUNDO escreve (um GET por tick, mesmo padrão de
 # _emergency_suppress), os handlers HTTP só leem — assim nenhum poll de
 # tablet bate no robô direto, e não têm N tablets multiplicando chamada.
-_robot_status_cache = {"charging": None, "battery": None, "returningToCharge": False}  # None = ainda não sabemos (1ª leitura não chegou ainda)
+# `stationarySince`: ver "Alerta de robô parado" abaixo.
+_robot_status_cache = {"charging": None, "battery": None, "returningToCharge": False, "stationarySince": None}  # None = ainda não sabemos (1ª leitura não chegou ainda)
+
+# --- Alerta de robô parado (pedido do usuário, 2026-10-02) -----------------
+# "Parado há 1 minuto + rota de verdade em andamento (taskName já disparado
+# -- reservada/esperando check-turn/esperando carga NÃO conta, o robô nem
+# devia estar se movendo ainda) + não carregando" -- sintoma de caminho
+# obstruído ou desvio de rota que o robô não resolve sozinho. `vx`/`vth`
+# (GET /reeman/speed) são a mesma leitura de velocidade que o resto do
+# sistema já usa pra girar (ver ROTATE_ERROR_NUDGE acima) -- "quase zero"
+# em vez de exatamente zero, por ruído normal de sensor até parado.
+STALL_VX_EPSILON_MPS = 0.02
+STALL_VTH_EPSILON_DEG_S = 1.0
+STALL_ALERT_SECONDS = 60
+ROBOT_STALLED_MESSAGE = ("Robô com caminho obstruído ou desviou da rota, por favor, "
+                          "utilize o modo manual para conduzi-lo à energia ou remova obstáculos próximos.")
 
 
 # `battery` em `/reeman/base_encode` (documentado, nunca lido até agora —
@@ -866,6 +884,41 @@ def _refresh_robot_status():
         _robot_status_cache["returningToCharge"] = _robot_returning_to_charge_now()
     except Exception:
         pass
+    # Rastreio de "parado há quanto tempo" (ver "Alerta de robô parado"
+    # acima) -- marca o instante em que ficou quase-zero; qualquer
+    # velocidade de verdade (ou falha de rede, tratada como "não sei")
+    # zera a marca na hora, o relógio só conta enquanto fica quieto sem
+    # interrupção.
+    try:
+        speed = _slam_call("GET", "/reeman/speed")
+        vx = float(speed.get("vx") or 0)
+        vth = float(speed.get("vth") or 0)
+        if abs(vx) < STALL_VX_EPSILON_MPS and abs(vth) < STALL_VTH_EPSILON_DEG_S:
+            if _robot_status_cache["stationarySince"] is None:
+                _robot_status_cache["stationarySince"] = time.monotonic()
+        else:
+            _robot_status_cache["stationarySince"] = None
+    except Exception:
+        _robot_status_cache["stationarySince"] = None
+
+
+# Condição final do alerta (ver "Alerta de robô parado" acima): combina o
+# rastreio de velocidade (stationarySince) com o estado da fila. QUALQUER
+# rota conta -- reservada esperando giro seguro pra começar (turnBlocked),
+# esperando terminar de voltar pra carga sozinho (awaitingCharge), ou já
+# disparada de verdade (normal, unloadOnly, ou esperando giro seguro pra
+# CANCELAR) -- obstrução por obstáculo pode travar o robô em qualquer uma
+# dessas situações, não só numa rota já em andamento (pedido explícito do
+# usuário, 2026-10-02 -- a 1ª versão só considerava `taskName` de verdade).
+def _robot_stalled_message(state):
+    since = _robot_status_cache.get("stationarySince")
+    if since is None or _robot_status_cache.get("charging"):
+        return None
+    if not state.get("currentRoute"):
+        return None
+    if time.monotonic() - since < STALL_ALERT_SECONDS:
+        return None
+    return ROBOT_STALLED_MESSAGE
 
 
 # O nome do template CODIFICA o "recipe" da rota (ver CONTEXT.md): rotas com
@@ -2992,6 +3045,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "robotCharging": _robot_status_cache.get("charging"),
             "robotBattery": _robot_status_cache.get("battery"),
             "robotReturningToCharge": bool(_robot_status_cache.get("returningToCharge")),
+            "robotStalledMessage": _robot_stalled_message(state),
             "limitBreaker": _limit_breaker_active(),
         }, ensure_ascii=False).encode("utf-8")
         self._relay(200, "application/json", body)

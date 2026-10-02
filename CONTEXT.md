@@ -4557,3 +4557,109 @@ o admin criar um usuário restrito de verdade e confirmar na prática
 (enviar de dentro do kanban funciona, de fora é recusado com a mensagem
 certa, Mestre cancela qualquer coisa, Mestre/usuário comum não veem
 Histórico/Usuários).
+
+## Correções diversas (2026-10-02)
+
+- **Pinça bloqueada no mapa**: pedido do usuário — zoom por pinça de dois
+  dedos não faz mais nada (`FloorPlanCanvas.jsx`, `handleTouchMove`/
+  `handleTouchEnd` simplificados, removida toda a lógica de escala/posição
+  do gesto). Ao detectar uma tentativa, pulsa um anel azul menta ao redor
+  do botão de Interação (lupa "+") uma vez por gesto (`pinchPulseId`,
+  reinicia via `key` no `<span>`). Bug corrigido no mesmo dia: faltava
+  `animation-fill-mode: forwards` — sem isso, ao terminar a animação de
+  700ms o anel voltava pro `opacity:1` de repouso em vez de ficar sumido
+  ("o pulso nunca sumia").
+- **Visualização de GRUPO no Ponto a Ponto**: clicar no grupo de "Lotes em
+  sequência" em si (não numa barrinha específica) só mostrava a 1ª tarefa
+  como se as outras não existissem. `viewTask.index: null` é o sentinela
+  "visualizando o grupo inteiro" — o banner "VISUALIZANDO" passou a
+  mostrar TODAS as N origens empilhadas e todos os N destinos empilhados
+  (`CloseUpStatusBanner.jsx`, `task.pickups`/`task.dropoffs` agora são
+  SEMPRE listas, mesmo com 1 item). Cada ponto continua clicável
+  individualmente. Clicar numa barrinha específica dentro do grupo
+  continua mostrando só aquele par, sem mudança.
+- **Mandarim residual nos erros/avisos**: `HistoryPanel.jsx`,
+  `displayDescription` já tinha um glossário (`KNOWN_PHRASES`) pra
+  traduzir frases conhecidas, mas um código/frase NOVO em mandarim passava
+  direto. Adicionado `HAN_CHARS` (regex de caracteres Han) como rede de
+  segurança final: se depois das trocas conhecidas ainda sobrar qualquer
+  caractere chinês, a mensagem inteira vira um aviso genérico em PT-BR com
+  o código original (sempre ASCII) — garante que nenhum mandarim bruto
+  chega na tela, mesmo de códigos nunca vistos. Não existe "histórico
+  salvo" pra limpar: erros/avisos vêm sempre em tempo real da API do robô
+  (`GET /error/records`), sem cache/arquivo nosso — a correção já cobre
+  tudo, passado e futuro, automaticamente.
+- **Altura padrão do pallet azul**: pedido do usuário, 7cm em vez de 8
+  (`PALLET_BASE_HEIGHT_DEFAULT` em `server.py`, `DEFAULT_PALLET_HEIGHTS`
+  em `useCalibration.js`, `EMPTY_CALIBRATION`) — só o `blueBase`
+  ("Altura do pallet azul padrão" no editor); `blueTop` ("Altura do
+  segundo pallet") não tem padrão de fábrica conceitual de verdade (ver
+  comentário em `server.py`) e ficou inalterado. O `calibration.json` real
+  já estava com `blueBase:7` configurado — essa mudança só ajusta o
+  FALLBACK de código pra quando o valor estiver faltando (fresh install),
+  sem efeito na configuração já salva.
+
+## Alerta de robô parado (IMPLEMENTADO 2026-10-02)
+
+**Pedido do usuário**: se o robô ficar parado por 1 minuto, com uma tarefa
+de verdade em andamento, e não estiver carregando — emitir alerta
+vermelho: "Robô com caminho obstruído ou desviou da rota, por favor,
+utilize o modo manual para conduzi-lo à energia ou remova obstáculos
+próximos."
+
+**Implementação** (`server.py`): `_refresh_robot_status` (mesmo ciclo da
+thread de fundo que já lê `base_encode` pra bateria/carga) agora também
+lê `GET /reeman/speed` (`{"vx","vth"}`, confirmado no doc da SLAM WEB API)
+e rastreia `_robot_status_cache["stationarySince"]` — marca o instante em
+que a velocidade fica abaixo de um épsilon (`STALL_VX_EPSILON_MPS=0.02`,
+`STALL_VTH_EPSILON_DEG_S=1.0`, tolerância a ruído de sensor parado) e zera
+na hora que detecta velocidade de verdade (ou falha de rede, tratada como
+"não sei" — zera por segurança, nunca acumula tempo errado).
+`_robot_stalled_message(state)` combina isso com o estado da fila: só
+alerta se `stationarySince` existe, já passou de
+`STALL_ALERT_SECONDS=60`, existe alguma `currentRoute` (QUALQUER uma —
+reservada esperando giro seguro pra começar/terminar de voltar pra carga,
+ou já disparada de verdade, inclusive `unloadOnly` — correção do mesmo dia
+a pedido do usuário: a 1ª versão só considerava rota com `taskName`,
+excluindo `turnBlocked`/`awaitingCharge` por engano; obstrução por
+obstáculo pode travar o robô em qualquer uma dessas situações), e não está
+carregando. Exposto em `/api/live-state` como `robotStalledMessage`.
+
+**Front**: `CancelPendingBanner.jsx` ganhou um `variant` ('warning' âmbar,
+já existia; 'danger' vermelho pulsando, novo — mesma animação do
+`emergency-toggle.is-active`). `robotStalledMessage` tem prioridade sobre
+as mensagens de espera normal (`cancelPending`/`turnBlocked`/
+`awaitingCharge`/`postPickupUnload`) no banner — é uma anomalia, nunca
+fica escondido por uma espera comum.
+
+**Testado isolado** (9 cenários, mockando `_robot_status_cache`/
+`_slam_call`, nunca fala com o robô de verdade): sem `stationarySince` não
+alerta; carregando nunca alerta mesmo parado há muito tempo; sem rota
+nenhuma não alerta; rota RESERVADA (sem `taskName`) TAMBÉM alerta; parado
+há menos de 60s ainda não alerta; parado ≥60s com rota ativa sem carregar
+alerta; `_refresh_robot_status` liga o relógio com velocidade quase-zero,
+zera com velocidade de verdade, e zera também se a chamada de rede falhar
+(trata como "não sei", nunca assume parado por engano).
+
+**AINDA NÃO VALIDADO EM CAMPO** — próximo teste real deve confirmar que o
+alerta aparece quando o robô trava de verdade (obstáculo/desvio) e some
+assim que ele volta a se mover ou termina de carregar.
+
+## Bug: clicar no ícone já ativo jogava pro Ponto a Ponto (CORRIGIDO 2026-10-02)
+
+**Sintoma relatado pelo usuário**: clicar no ícone de um menu que JÁ
+estava aberto (marcação, interação, ou fila) saía daquele modo e caía no
+Ponto a Ponto, mesmo sem o usuário ter pedido isso.
+
+**Causa**: `handleToggleMarkMode`/`handleTogglePtpMode`/
+`handleToggleInteractionMode`/`handleToggleQueueMode` (`MainApp.jsx`) eram
+todos TOGGLES de verdade: clicar no ícone já ativo chamava `baseMode()`
+("modo de repouso": 'ptp' pra quem não é dev, 'edit' pra quem é) em vez de
+simplesmente ficar onde estava. Isso também afetava o Ponto a Ponto pra
+usuário DEV: clicar no ícone de ptp estando já em ptp jogava pra 'edit'.
+
+**Correção**: os 4 handlers agora só TROCAM de modo quando o ícone
+clicado é de um modo DIFERENTE do atual — clicar no mesmo ícone de novo é
+no-op (o menu correspondente continua aberto, nada acontece). Sair de um
+desses modos exige clicar em outro ícone (inclusive o de Ponto a Ponto).
+`baseMode()` ficou sem uso depois disso e foi removida.

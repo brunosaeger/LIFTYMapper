@@ -5,9 +5,14 @@
 // ao visualizar uma tarefa da lista de envio; some ao sair do modo, resetar
 // o zoom ou sair da visualização.
 //
-// `task` ("Visualizar tarefa", ver MainApp.jsx): segunda linha com
-// ORIGEM → DESTINO, cada um clicável — tocar leva o mapa até o kanban onde
-// aquele ponto está. `active` destaca qual das duas pontas está sendo vista.
+// `task` ("Visualizar tarefa", ver MainApp.jsx): `pickups`/`dropoffs` SÃO
+// LISTAS (mesmo quando só existe um par — o chamador sempre empacota em
+// lista de 1) — origem(ns) → destino(s), cada ponto clicável, tocar leva o
+// mapa até o kanban onde ele está. Empilhado em duas colunas (origens,
+// depois destinos) em vez de lado a lado quando há mais de um — caso do
+// GRUPO de "Lotes em sequência" visualizado por inteiro (bug corrigido
+// 2026-10-02: antes só mostrava o 1º par, como se o resto não existisse).
+// `active` ({kind, index}) destaca qual ponto específico está sendo visto.
 export default function CloseUpStatusBanner({ name, task, onFocusEndpoint, wide }) {
   if (!name && !task) return null;
 
@@ -24,22 +29,27 @@ export default function CloseUpStatusBanner({ name, task, onFocusEndpoint, wide 
         {name && <span className="closeup-status-banner__rest">: KANBAN {name}</span>}
       </div>
       {task && (
-        <div className="closeup-status-banner__task">
+        <div className={'closeup-status-banner__task' + (task.pickups.length > 1 || task.dropoffs.length > 1 ? ' closeup-status-banner__task--group' : '')}>
           {['pickup', 'dropoff'].map((kind, i) => {
-            const label = kind === 'pickup' ? task.pickupLabel : task.dropoffLabel;
+            const labels = kind === 'pickup' ? task.pickups : task.dropoffs;
             return (
-              <span key={kind} className="closeup-status-banner__task-part">
+              <span key={kind} className="closeup-status-banner__task-stack">
                 {i === 1 && <span className="closeup-status-banner__arrow">→</span>}
-                <button
-                  type="button"
-                  className={'closeup-status-banner__endpoint closeup-status-banner__endpoint--' + kind
-                    + (task.active === kind ? ' is-active' : '')}
-                  disabled={!label}
-                  onClick={() => onFocusEndpoint(kind)}
-                  title={kind === 'pickup' ? 'Ver origem no mapa' : 'Ver destino no mapa'}
-                >
-                  {label || '—'}
-                </button>
+                <span className="closeup-status-banner__task-stack-items">
+                  {labels.map((label, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      className={'closeup-status-banner__endpoint closeup-status-banner__endpoint--' + kind
+                        + (task.active.kind === kind && task.active.index === idx ? ' is-active' : '')}
+                      disabled={!label}
+                      onClick={() => onFocusEndpoint(kind, idx)}
+                      title={kind === 'pickup' ? 'Ver origem no mapa' : 'Ver destino no mapa'}
+                    >
+                      {label || '—'}
+                    </button>
+                  ))}
+                </span>
               </span>
             );
           })}

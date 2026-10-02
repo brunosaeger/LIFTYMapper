@@ -7,7 +7,7 @@ const EMPTY_VIEW_DATA = { points: [], lots: [], closeUps: [] };
 // pallet azul (o valor que o azul já recebia, 8); blueTop = 2º andar do
 // "pallet de cima" (sem padrão de fábrica — persiste o último salvo).
 // Madeira não empilha, não usa nada disso.
-const DEFAULT_PALLET_HEIGHTS = { blueBase: 8, blueTop: 8 };
+const DEFAULT_PALLET_HEIGHTS = { blueBase: 7, blueTop: 8 }; // blueBase: 7cm, pedido do usuário 2026-10-02 (era 8)
 
 function normalizePalletHeights(raw) {
   const r = raw && typeof raw === 'object' ? raw : {};

@@ -24,7 +24,7 @@ async function jsonRequest(path, options) {
 // dispositivos nunca "decidem" a mesma coisa duas vezes (ver server.py,
 // QUEUE_LOCK).
 export function useLiveState() {
-  const [state, setState] = useState({ currentRoute: null, pendingRoute: null, routeQueue: [], occupied: [], emergency: false, cancelPending: false, cancelPendingMessage: null, turnBlocked: false, turnBlockedMessage: null, awaitingCharge: false, awaitingChargeMessage: null, postPickupUnloadMessage: null, robotCharging: null, robotBattery: null, robotReturningToCharge: false });
+  const [state, setState] = useState({ currentRoute: null, pendingRoute: null, routeQueue: [], occupied: [], emergency: false, cancelPending: false, cancelPendingMessage: null, turnBlocked: false, turnBlockedMessage: null, awaitingCharge: false, awaitingChargeMessage: null, postPickupUnloadMessage: null, robotCharging: null, robotBattery: null, robotReturningToCharge: false, robotStalledMessage: null });
   const [status, setStatus] = useState('loading'); // loading | idle | error
 
   const refresh = useCallback(() => {
@@ -186,6 +186,11 @@ export function useLiveState() {
     // chegou/começou a carregar de verdade — só faz sentido quando
     // robotCharging é false (ver server.py, _robot_returning_to_charge_now).
     robotReturningToCharge: state.robotReturningToCharge,
+    // Alerta de robô parado (ver server.py, _robot_stalled_message) — não
+    // nulo quando o robô fica ~1min sem se mover com uma rota de verdade
+    // em andamento e sem estar carregando (caminho obstruído/desvio de
+    // rota que ele não resolve sozinho).
+    robotStalledMessage: state.robotStalledMessage,
     // null = ainda não sabemos, OU o robô não manda `battery` nesse formato
     // (ver _normalize_battery em server.py — 0-100 assumido, não confirmado
     // em campo ainda); 0-100 caso contrário.
