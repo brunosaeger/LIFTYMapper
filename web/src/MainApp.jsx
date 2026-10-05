@@ -502,14 +502,16 @@ export default function MainApp({ user, onLogout }) {
   }
 
   // Lista preparada achatada na ordem de execução, uma entrada por tarefa —
-  // é exatamente o que vai pro servidor no "Iniciar tarefas".
+  // é exatamente o que vai pro servidor no "Iniciar tarefas". palletType é
+  // POR TAREFA (pedido do usuário, 2026-10-05 — cada perna de uma
+  // sequência pode ter um pallet diferente), não da unidade/grupo inteiro.
   function flattenUnits(units) {
     return units.flatMap((u) => u.tasks.map((t) => ({
       taskId: t.id,
       pickup: t.pickup,
       dropoff: t.dropoff,
-      palletType: u.palletType,
-      palletTop: u.palletType === 'blue' && !!u.palletTop,
+      palletType: t.palletType,
+      palletTop: t.palletType === 'blue' && !!u.palletTop,
       group: u.groupKey,
     })));
   }
@@ -851,7 +853,10 @@ export default function MainApp({ user, onLogout }) {
       handleSaveEdit();
       return;
     }
-    const tasks = pickupNames.map((pickup, i) => ({ id: newStagedId('t'), pickup, dropoff: dropoffNames[i] }));
+    // palletType vai POR TAREFA (pedido do usuário, 2026-10-05) — o valor
+    // escolhido agora na barra vira só o ponto de partida de cada uma,
+    // editável depois individualmente (ver PalletSwatch/handleChangeStagedPallet).
+    const tasks = pickupNames.map((pickup, i) => ({ id: newStagedId('t'), pickup, dropoff: dropoffNames[i], palletType }));
     const unitId = newStagedId('u');
     const unit = {
       id: unitId,
@@ -919,7 +924,10 @@ export default function MainApp({ user, onLogout }) {
     setPickupNames(unit.tasks.map((t) => t.pickup));
     setDropoffNames(unit.tasks.map((t) => t.dropoff));
     setActiveSlot('pickup');
-    setPalletType(unit.palletType);
+    // Carrega o pallet da tarefa ESPECÍFICA sendo vista (índice 0 na
+    // visualização de grupo inteiro) — cada uma pode ter um tipo
+    // diferente agora (pedido do usuário, 2026-10-05).
+    setPalletType(unit.tasks[index ?? 0].palletType);
     setPalletTop(!!unit.palletTop);
   }
 
@@ -999,11 +1007,16 @@ export default function MainApp({ user, onLogout }) {
       return;
     }
     // Reaproveita o id das tarefas que já existiam (não reanima a barrinha à
-    // toa); só as novas de um grupo que cresceu ganham id novo.
+    // toa); só as novas de um grupo que cresceu ganham id novo. Mesma
+    // lógica pro palletType: reeditar origem/destino não deve apagar o
+    // pallet que cada tarefa já tinha individualmente (pedido do usuário,
+    // 2026-10-05) — só tarefa NOVA (grupo que cresceu) herda o valor
+    // escolhido agora na barra.
     const tasks = pickupNames.map((pickup, i) => ({
       id: editingUnit.tasks[i]?.id || newStagedId('t'),
       pickup,
       dropoff: dropoffNames[i],
+      palletType: editingUnit.tasks[i]?.palletType || palletType,
     }));
     const edited = {
       ...editingUnit,
@@ -1054,13 +1067,15 @@ export default function MainApp({ user, onLogout }) {
     setStagedUnits(next);
   }
 
-  function handleChangeStagedPallet(unitId, type, top) {
-    const cleanTop = type === 'blue' && !!top;
-    setStagedUnits((units) => units.map((u) => (u.id === unitId ? { ...u, palletType: type, palletTop: cleanTop } : u)));
-    if (unitId === editingUnitId) {
-      setPalletType(type);
-      setPalletTop(cleanTop);
-    }
+  // Troca o pallet de UMA tarefa só dentro da unidade (pedido do usuário,
+  // 2026-10-05: num grupo de "Lotes em sequência", cada tarefa pode ter um
+  // pallet diferente — trocar o ícone de uma barrinha não mexe nas outras).
+  function handleChangeStagedPallet(unitId, taskId, type) {
+    setStagedUnits((units) => units.map((u) => (
+      u.id === unitId
+        ? { ...u, tasks: u.tasks.map((t) => (t.id === taskId ? { ...t, palletType: type } : t)) }
+        : u
+    )));
   }
 
   // Disparo/avanço/sondagem de verdade (falar com o robô, decidir

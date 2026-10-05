@@ -36,6 +36,10 @@ function PalletSwatch({ palletType, palletTop, onOpen }) {
 
 // Uma barrinha (uma tarefa). `order` é a posição GLOBAL na lista (o que o
 // robô vai fazer em 1º, 2º...), não a posição dentro do grupo.
+//
+// Pallet por TAREFA (pedido do usuário, 2026-10-05): mesmo numa sequência,
+// cada barrinha tem seu próprio tipo de pallet (task.palletType) — trocar
+// numa não mexe nas outras do grupo. Ver MainApp.jsx, handleChangeStagedPallet.
 function TaskBar({ task, unit, order, lots, points, invalid, delay, onOpenPallet, onRemove }) {
   return (
     <div className="staged-task__row" data-task-id={task.id}>
@@ -48,9 +52,9 @@ function TaskBar({ task, unit, order, lots, points, invalid, delay, onOpenPallet
           {displayCellName(task.pickup, lots, points)} → {displayCellName(task.dropoff, lots, points)}
         </span>
         <PalletSwatch
-          palletType={unit.palletType}
-          palletTop={unit.palletTop}
-          onOpen={(anchor) => onOpenPallet(unit.id, anchor)}
+          palletType={task.palletType}
+          palletTop={false}
+          onOpen={(anchor) => onOpenPallet(unit.id, task.id, anchor)}
         />
       </div>
       <button
@@ -94,8 +98,10 @@ function UnitContent({ unit, startOrder, lots, points, invalidTaskId, onOpenPall
   );
 }
 
-function PalletPopover({ popover, unit, onChoose, onClose }) {
-  if (!popover || !unit) return null;
+// Edita o pallet de UMA tarefa só (`task`), não da unidade/grupo inteiro
+// (pedido do usuário, 2026-10-05) — `onChoose(unitId, taskId, type)`.
+function PalletPopover({ popover, task, onChoose, onClose }) {
+  if (!popover || !task) return null;
   const width = 220;
   const left = Math.min(Math.max(8, popover.left - width + popover.width), window.innerWidth - width - 8);
   const top = Math.min(popover.top, window.innerHeight - 190);
@@ -114,8 +120,8 @@ function PalletPopover({ popover, unit, onChoose, onClose }) {
             <button
               key={type}
               type="button"
-              className={'ptp-bar__pallet-option' + (unit.palletType === type ? ' is-selected' : '')}
-              onClick={() => { onChoose(unit.id, type, type === 'blue' && unit.palletTop); onClose(); }}
+              className={'ptp-bar__pallet-option' + (task.palletType === type ? ' is-selected' : '')}
+              onClick={() => { onChoose(popover.unitId, task.id, type); onClose(); }}
             >
               <span className="ptp-bar__pallet-swatch" style={{ backgroundImage: `url(${TEXTURE[type]})` }} />
               <span className="ptp-bar__pallet-label">{type === 'blue' ? 'Azul' : 'Madeira'}</span>
@@ -354,9 +360,9 @@ export default function StagedTasksPanel({
     return 0;
   }
 
-  function openPallet(unitId, anchor) {
+  function openPallet(unitId, taskId, anchor) {
     const r = anchor.getBoundingClientRect();
-    setPopover({ unitId, top: r.bottom + 6, left: r.left, width: r.width });
+    setPopover({ unitId, taskId, top: r.bottom + 6, left: r.left, width: r.width });
   }
 
   const draggedUnit = drag ? units[drag.index] : null;
@@ -436,8 +442,8 @@ export default function StagedTasksPanel({
 
       <PalletPopover
         popover={popover}
-        unit={popover ? units.find((u) => u.id === popover.unitId) : null}
-        onChoose={(unitId, type, top) => { onChangePallet(unitId, type, top); }}
+        task={popover ? units.find((u) => u.id === popover.unitId)?.tasks.find((t) => t.id === popover.taskId) : null}
+        onChoose={onChangePallet}
         onClose={() => setPopover(null)}
       />
     </section>

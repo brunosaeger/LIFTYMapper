@@ -4699,3 +4699,42 @@ pro servidor permanece intacta — backend (`server.py`,
 `PALLET_TOP_LAYER`/`blueTop`) não foi tocado, só a forma do usuário
 conseguir ativar isso pela UI. Reativar no futuro é só devolver os dois
 checkboxes removidos.
+
+## Bug: pallet por TAREFA num lote em sequência, não por grupo inteiro (CORRIGIDO 2026-10-05)
+
+**Sintoma relatado pelo usuário**: num grupo de "Lotes em sequência" já
+montado em "Tarefas aguardando envio", trocar o modelo de pallet pelo
+ícone de uma barrinha trocava o de TODAS as tarefas do grupo junto, em vez
+de só daquela.
+
+**Causa**: `palletType` vivia só no nível da UNIDADE (`unit.palletType`),
+nunca por tarefa individual (`unit.tasks[i]`) — `flattenUnits` (o que
+monta a lista que vai pro servidor) lia `u.palletType` pra toda tarefa do
+grupo, e o popover de troca (`handleChangeStagedPallet`) escrevia
+`u.palletType` direto, afetando a unidade inteira. O servidor em si JÁ
+aceitava `palletType` diferente por item desde sempre (`pair.get(
+"palletType", pallet_type)` em `_queue_enqueue_batch`) — o bug era 100%
+do lado do cliente, nunca chegava a mandar valores diferentes.
+
+**Correção** (`MainApp.jsx`/`StagedTasksPanel.jsx`): `palletType` passou
+a viver em cada `task` (`unit.tasks[i].palletType`), não mais só na
+unidade:
+- `handleStageSelection`/`handleSaveEdit`: cada tarefa nasce/mantém seu
+  próprio `palletType` — reeditar origem/destino do grupo (reabrir pra
+  mexer no mapa) NÃO reseta o pallet que cada uma já tinha
+  individualmente; só tarefa NOVA (grupo que cresceu) herda o valor
+  escolhido na hora na barra.
+- `flattenUnits`: lê `t.palletType` (por tarefa), não mais `u.palletType`.
+- `handleChangeStagedPallet(unitId, taskId, type)`: ganhou o parâmetro
+  `taskId` — só escreve na tarefa clicada.
+- `StagedTasksPanel.jsx`: `TaskBar`/`PalletSwatch` leem `task.palletType`;
+  `openPallet`/`PalletPopover` carregam junto QUAL tarefa está sendo
+  editada (`popover.taskId`), não só a unidade.
+- `handleSelectStagedUnit`: ao abrir "Visualizar tarefa", carrega na barra
+  o pallet da tarefa ESPECÍFICA sendo vista (`unit.tasks[index].
+  palletType`), não mais um valor único da unidade.
+
+`unit.palletType`/`unit.palletTop` continuam existindo como "valor de
+partida" (usados só na criação da unidade e como fallback pra tarefa nova
+que entra num grupo reeditado) — não são mais a fonte de verdade de
+nenhuma tarefa já existente.
