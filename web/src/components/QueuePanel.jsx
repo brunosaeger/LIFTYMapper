@@ -1,5 +1,23 @@
 import { displayCellName } from '../hooks/useCalibration';
 
+// Agrupa rotas consecutivas do mesmo "Lotes em sequência" (mesmo groupId)
+// pra desenhar o tracejado laranja ao redor, igual ao painel "Tarefas
+// aguardando envio" (pedido do usuário, 2026-10-05). Rotas de um grupo
+// sempre ficam adjacentes na fila — nascem juntas no envio, nunca se
+// intercalam com uma rota independente no meio.
+function groupWaitingRoutes(routes) {
+  const segments = [];
+  for (const route of routes) {
+    const last = segments[segments.length - 1];
+    if (route.groupId && last && last.groupId === route.groupId) {
+      last.routes.push(route);
+    } else {
+      segments.push({ groupId: route.groupId || null, routes: [route] });
+    }
+  }
+  return segments;
+}
+
 function QueueRoute({ pickup, dropoff, unloadOnly, user, lots, points, variant, selected, onSelect, onCancel, cancelLabel, cancelPending }) {
   // Cancelamento adiado (ver CONTEXT.md, "Cancelamento adiado até giro
   // seguro") — só existe pra rota EM ANDAMENTO (variant "current"); as
@@ -104,21 +122,38 @@ export default function QueuePanel({ currentRoute, waitingRoutes, lots, points, 
           <p className="points-panel__empty">Fila vazia.</p>
         ) : (
           <ul className="queue-panel__list queue-panel__list--scroll">
-            {waitingRoutes.map((route, i) => (
-              <QueueRoute
-                key={route.id}
-                pickup={route.pickup}
-                dropoff={route.dropoff}
-                user={route.user}
-                lots={lots}
-                points={points}
-                variant="waiting"
-                selected={selectedRouteId === route.id}
-                onSelect={() => onSelectRoute(selectedRouteId === route.id ? null : route.id)}
-                onCancel={() => onRemoveQueued(route.id)}
-                cancelLabel={i === 0 ? 'Cancelar próxima rota' : 'Remover da fila'}
-              />
-            ))}
+            {(() => {
+              let globalIdx = 0;
+              return groupWaitingRoutes(waitingRoutes).map((seg) => {
+                const items = seg.routes.map((route) => {
+                  const i = globalIdx++;
+                  return (
+                    <QueueRoute
+                      key={route.id}
+                      pickup={route.pickup}
+                      dropoff={route.dropoff}
+                      user={route.user}
+                      lots={lots}
+                      points={points}
+                      variant="waiting"
+                      selected={selectedRouteId === route.id}
+                      onSelect={() => onSelectRoute(selectedRouteId === route.id ? null : route.id)}
+                      onCancel={() => onRemoveQueued(route.id)}
+                      cancelLabel={i === 0 ? 'Cancelar próxima rota' : 'Remover da fila'}
+                    />
+                  );
+                });
+                if (!seg.groupId) return items;
+                return (
+                  <li key={'group-' + seg.groupId} className="queue-panel__group">
+                    <div className="staged-group">
+                      <span className="staged-group__label">Lotes em sequência</span>
+                      <ul className="queue-panel__list">{items}</ul>
+                    </div>
+                  </li>
+                );
+              });
+            })()}
           </ul>
         )}
       </section>

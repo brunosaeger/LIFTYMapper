@@ -1193,30 +1193,35 @@ export default function MainApp({ user, onLogout }) {
   const selectedQueueRoute = selectedQueueRouteId
     ? waitingRoutes.find((r) => r.id === selectedQueueRouteId)
     : null;
-  // "Lotes em sequência" (ver CONTEXT.md): rotas da mesma sequência
-  // compartilham groupId. Selecionar uma delas "isola" o grupo inteiro no
-  // mapa — sem groupId (rota avulsa), isola só ela mesma.
-  const selectedQueueGroup = selectedQueueRoute
-    ? (selectedQueueRoute.groupId
-      ? waitingRoutes.filter((r) => r.groupId === selectedQueueRoute.groupId)
-      : [selectedQueueRoute])
+  // Painel Fila (pedido do usuário, 2026-10-05): clicar numa rota mostra
+  // SÓ ela (origem/destino individuais), mesmo quando é parte de um lote
+  // em sequência — antes "isolava" o grupo inteiro junto, o que confundia
+  // mais do que ajudava. `queueSeqOverride` é a posição dela dentro do
+  // grupo (1-based, na ordem da fila) — só existe pra rota COM groupId;
+  // uma avulsa não mostra número nenhum, igual já era.
+  const queueSeqOverride = selectedQueueRoute && selectedQueueRoute.groupId
+    ? waitingRoutes.filter((r) => r.groupId === selectedQueueRoute.groupId).findIndex((r) => r.id === selectedQueueRoute.id) + 1
     : null;
 
   // O que o mapa destaca, em ordem de prioridade:
   // 1. Seleção sendo montada no Ponto a Ponto (com a numeração da sequência);
-  // 2. Rota (ou grupo) selecionada no painel Fila;
+  // 2. Rota selecionada no painel Fila (individual, ver queueSeqOverride);
   // 3. Entrada selecionada no painel Histórico (pickup pode ser null — ver
   //    HistoryPanel, UNLOAD isolado pós-cancelamento — por isso o filter);
   // 4. A ROTA ATUAL, um par só, sem número — o padrão de repouso, o que o
   //    robô está fazendo AGORA.
   const mapPickupNames = pickupNames.length ? pickupNames
-    : selectedQueueGroup ? selectedQueueGroup.map((r) => r.pickup)
+    : selectedQueueRoute ? [selectedQueueRoute.pickup].filter(Boolean)
     : selectedHistoryRoute ? [selectedHistoryRoute.pickup].filter(Boolean)
     : currentRoute ? [currentRoute.pickup] : EMPTY_SELECTION;
   const mapDropoffNames = dropoffNames.length ? dropoffNames
-    : selectedQueueGroup ? selectedQueueGroup.map((r) => r.dropoff)
+    : selectedQueueRoute ? [selectedQueueRoute.dropoff].filter(Boolean)
     : selectedHistoryRoute ? [selectedHistoryRoute.dropoff].filter(Boolean)
     : currentRoute ? [currentRoute.dropoff] : EMPTY_SELECTION;
+  // Só vale quando a Fila é de fato quem está decidindo o destaque (ver
+  // prioridades acima) — senão vazaria um número errado pro Ponto a Ponto
+  // ou Histórico, que nunca usam isso.
+  const mapSeqOverride = !pickupNames.length && selectedQueueRoute ? queueSeqOverride : null;
 
   return (
     <div className="app">
@@ -1312,6 +1317,7 @@ export default function MainApp({ user, onLogout }) {
           closeUpFocusRequest={closeUpFocusRequest}
           pickupNames={mapPickupNames}
           dropoffNames={mapDropoffNames}
+          seqOverride={mapSeqOverride}
           onPointToPointClick={handlePointToPointClick}
           view={view}
           occupiedNames={occupied}

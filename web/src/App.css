@@ -1944,6 +1944,13 @@
   gap: 6px;
 }
 
+/* Lote em sequência na Fila (pedido do usuário, 2026-10-05) — mesmo
+   tracejado laranja do painel "Tarefas aguardando envio" (.staged-group,
+   reaproveitado aqui sem alteração nenhuma, ver QueuePanel.jsx). */
+.queue-panel__group {
+  list-style: none;
+}
+
 /* Rolagem própria (mouse ou dedo) quando a fila não cabe mais — o resto da
    sidebar (rota em andamento) fica fixo. */
 .queue-panel__list--scroll {

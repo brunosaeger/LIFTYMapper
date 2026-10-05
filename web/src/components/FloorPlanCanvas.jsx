@@ -536,8 +536,12 @@ function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames,
           // Só numera quando existe sequência de verdade (2+): com um par
           // simples — e principalmente com a ROTA ATUAL destacada depois do
           // envio — o número não acrescenta nada e só poluiria o mapa.
+          // `seqOverride` (ver MainApp.jsx, painel Fila): clicar numa rota
+          // ESPECÍFICA de um lote em sequência mostra só aquele par (listas
+          // de 1), mas com o número DELA na sequência original — não "1".
           const seqNumber = isPickup && pickupNames.length > 1 ? pickupIdx + 1
             : isDropoff && dropoffNames.length > 1 ? dropoffIdx + 1
+            : (isPickup || isDropoff) && seqOverride != null ? seqOverride
             : null;
           const { fill, stroke } = lotCellColors(mode, lot, { isSelected, isPickup, isDropoff });
           const xColor = occupiedColor(mode, lot, { isSelected, isPickup, isDropoff });
@@ -694,6 +698,12 @@ export default function FloorPlanCanvas({
   // vários de uma vez — ver MainApp.jsx. No modo normal vêm com 0 ou 1 nome.
   pickupNames,
   dropoffNames,
+  // Painel Fila (pedido do usuário, 2026-10-05): ao ver UMA rota específica
+  // de um lote em sequência (pickupNames/dropoffNames com 1 nome só), o
+  // número exibido é a posição DELA na sequência original, não "1" (que
+  // seria o padrão pra uma lista de 1 item) — ver MainApp.jsx,
+  // mapSeqOverride. null = sem override, comportamento de sempre.
+  seqOverride,
   onPointToPointClick,
   view,
   occupiedNames,
@@ -1455,6 +1465,7 @@ export default function FloorPlanCanvas({
                 seqNumber={
                   pickupNames.length > 1 && pickupNames.includes(p.name) ? pickupNames.indexOf(p.name) + 1
                     : dropoffNames.length > 1 && dropoffNames.includes(p.name) ? dropoffNames.indexOf(p.name) + 1
+                    : (pickupNames.includes(p.name) || dropoffNames.includes(p.name)) && seqOverride != null ? seqOverride
                     : null
                 }
                 isHovered={hoveredName === p.name}

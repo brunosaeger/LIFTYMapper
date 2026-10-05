@@ -4738,3 +4738,37 @@ unidade:
 partida" (usados só na criação da unidade e como fallback pra tarefa nova
 que entra num grupo reeditado) — não são mais a fonte de verdade de
 nenhuma tarefa já existente.
+
+## Fila: visualização individual + delimitação laranja de lotes em sequência (IMPLEMENTADO 2026-10-05)
+
+**Pedido do usuário**: no painel Fila, clicar numa rota que faz parte de
+um "Lote em sequência" mostrava TODO o grupo destacado/numerado no mapa —
+deveria mostrar só a origem/destino DAQUELA rota, com o número DELA na
+sequência (não "1"). Também pediu o mesmo tracejado laranja do painel
+"Tarefas aguardando envio" ao redor dos grupos na lista da Fila.
+
+**Visualização individual** (`MainApp.jsx`): `selectedQueueGroup`
+(expandia pra todo o grupo via `.filter(groupId)`) foi removida —
+`mapPickupNames`/`mapDropoffNames` agora usam só `[selectedQueueRoute.
+pickup]`/`[selectedQueueRoute.dropoff]` (listas de 1, igual uma rota
+avulsa). Como listas de 1 item normalmente NÃO mostram número (ver
+`FloorPlanCanvas.jsx`, regra "só numera com 2+"), foi preciso um
+mecanismo novo pra ainda mostrar a posição certa: `queueSeqOverride` =
+posição da rota dentro do SEU grupo (`waitingRoutes.filter(groupId).
+findIndex(...) + 1`), passado como prop `seqOverride` pro
+`FloorPlanCanvas`. Os dois pontos que calculam `seqNumber` (dentro de
+lote — `LotCell` — e ponto avulso — `PointMarker`) ganharam um 3º ramo:
+se não há sequência de verdade (array de 1) mas existe `seqOverride`,
+usa ele em vez de `null`. Só a Fila passa isso (`mapSeqOverride` só é
+não-nulo quando é ELA quem está decidindo o destaque, não Ponto a
+Ponto/Histórico).
+
+**Delimitação laranja** (`QueuePanel.jsx`): `groupWaitingRoutes(routes)`
+agrupa rotas CONSECUTIVAS do mesmo `groupId` (sempre adjacentes — nascem
+juntas no envio, nunca se intercalam com rota independente) e envolve
+cada grupo num `<li><div className="staged-group">...` — reaproveita
+exatamente a classe CSS já usada em `StagedTasksPanel.jsx`
+(`.staged-group`/`.staged-group__label`, tracejado laranja + rótulo "LOTES
+EM SEQUÊNCIA"), sem CSS novo pro visual em si. O índice global (`i === 0 ?
+'Cancelar próxima rota' : 'Remover da fila'`) continua contando a
+POSIÇÃO REAL na fila, não a posição dentro do segmento/grupo.
