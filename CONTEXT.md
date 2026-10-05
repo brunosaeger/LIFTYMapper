@@ -4772,3 +4772,31 @@ exatamente a classe CSS já usada em `StagedTasksPanel.jsx`
 EM SEQUÊNCIA"), sem CSS novo pro visual em si. O índice global (`i === 0 ?
 'Cancelar próxima rota' : 'Remover da fila'`) continua contando a
 POSIÇÃO REAL na fila, não a posição dentro do segmento/grupo.
+
+## Fila: zoom + banner "VISUALIZANDO" ao clicar numa rota (IMPLEMENTADO 2026-10-05)
+
+**Pedido do usuário**: clicar numa tarefa individual na Fila deve dar o
+mesmo zoom de perto + banner "VISUALIZANDO: origem → destino" clicável
+que já existe no Ponto a Ponto ("Visualizar tarefa") e no Histórico.
+
+**Implementação** (`MainApp.jsx`) — mesmo padrão já usado pro Histórico,
+replicado pra Fila: `queueFocusedEndpoint` (estado novo, espelha
+`historyFocusedEndpoint`); `handleSelectQueueRoute` ganhou a mesma lógica
+de `handleSelectHistoryEntry` (ao selecionar, `requestFocus` na origem —
+ou destino se não houver origem — e liga o endpoint ativo); terceiro
+ramo em `handleFocusEndpoint` pra `mode === 'queue'`; terceiro ramo no
+`task` do `CloseUpStatusBanner`. Clicar na rota EM ANDAMENTO (sempre
+manda `id=null`) continua só voltando pro padrão sem banner, como já era
+— a mudança é só pras rotas de "Próximas rotas".
+
+Como a seleção na Fila já virou "só aquela rota" (não mais o grupo
+inteiro, ver seção acima), isso já reaproveita o `seqOverride` existente
+sem nada extra — zoom, banner E o número certo da posição no grupo
+aparecem juntos automaticamente.
+
+**Testado ao vivo** (Playwright contra o servidor real, dados reais de
+fila — não um mock): clicar numa rota avulsa dá zoom no kanban certo +
+banner com origem/destino clicáveis; clicar no botão de destino do banner
+foca lá; clicar numa rota DENTRO de um grupo tracejado mostra só aquele
+par com a numeração certa (ex. "1"), zoom e banner — tudo junto, sem
+conflito. Confirmado por screenshot, sem erros no console.

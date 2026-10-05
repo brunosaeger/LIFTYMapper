@@ -176,6 +176,10 @@ export default function MainApp({ user, onLogout }) {
   // `viewTask.active` do Ponto a Ponto, só que pro Histórico.
   const [selectedHistoryRoute, setSelectedHistoryRoute] = useState(null);
   const [historyFocusedEndpoint, setHistoryFocusedEndpoint] = useState(null);
+  // Mesma ideia, pro painel Fila (pedido do usuário, 2026-10-05): qual
+  // ponta está sendo vista da rota selecionada em "Próximas rotas" — ver
+  // handleSelectQueueRoute/handleFocusEndpoint.
+  const [queueFocusedEndpoint, setQueueFocusedEndpoint] = useState(null);
   // Banner "VISUALIZANDO: KANBAN X" (CloseUpStatusBanner.jsx): qual Close Up
   // o operador tocou por último no modo Interação. Zerado em qualquer troca
   // de modo (ver resetSelection abaixo, SEM keepRoute — não é seleção de
@@ -352,6 +356,7 @@ export default function MainApp({ user, onLogout }) {
     setSelectedLotId(null);
     setSelectedCloseUpId(null);
     setSelectedQueueRouteId(null);
+    setQueueFocusedEndpoint(null);
     setSelectedHistoryRoute(null);
     setHistoryFocusedEndpoint(null);
     setActiveCloseUpId(null); // banner "VISUALIZANDO: KANBAN X" — nunca sobrevive a uma troca de modo, nem entrando/saindo de Interação
@@ -432,8 +437,24 @@ export default function MainApp({ user, onLogout }) {
 
   // Clique numa rota do painel Fila: alterna a seleção (clicar na mesma
   // desfaz). null = volta a mostrar a rota em andamento no mapa (padrão).
+  // Clicar numa rota de "Próximas rotas": seleciona (QueuePanel já decide
+  // null vs o id, inclusive alternando ao clicar na mesma de novo) e, ao
+  // SELECIONAR, dá zoom de perto na origem (ou destino, se não houver
+  // origem) e liga o banner "VISUALIZANDO" com origem/destino clicáveis —
+  // mesmo espírito do Histórico/"Visualizar tarefa" (pedido do usuário,
+  // 2026-10-05). Clicar na rota EM ANDAMENTO (sempre manda null) só volta
+  // pro padrão, sem banner — igual já era.
   function handleSelectQueueRoute(id) {
     setSelectedQueueRouteId(id);
+    if (!id) {
+      setQueueFocusedEndpoint(null);
+      return;
+    }
+    const route = waitingRoutes.find((r) => r.id === id);
+    if (!route) return;
+    const startKind = route.pickup ? 'pickup' : 'dropoff';
+    setQueueFocusedEndpoint(startKind);
+    requestFocus(route.pickup || route.dropoff);
   }
 
   // "{ }" no canto do Toolbar: entra pedindo senha (ver DevModeModal);
@@ -940,6 +961,14 @@ export default function MainApp({ user, onLogout }) {
   // empilhadas foi tocada; nos outros casos (uma tarefa só, ou Histórico)
   // é sempre 0, já que só existe um par.
   function handleFocusEndpoint(kind, index = 0) {
+    if (mode === 'queue') {
+      if (!selectedQueueRoute) return;
+      const name = kind === 'pickup' ? selectedQueueRoute.pickup : selectedQueueRoute.dropoff;
+      if (!name) return;
+      setQueueFocusedEndpoint(kind);
+      requestFocus(name);
+      return;
+    }
     if (mode === 'history') {
       if (!selectedHistoryRoute) return;
       const name = kind === 'pickup' ? selectedHistoryRoute.pickup : selectedHistoryRoute.dropoff;
@@ -1261,6 +1290,10 @@ export default function MainApp({ user, onLogout }) {
           dropoffs: (viewTask.index === null ? dropoffNames : [dropoffNames[viewTask.index]])
             .map((n) => (n ? displayCellName(n, lots, points) : null)),
           active: { kind: viewTask.active, index: viewTask.activeIndex },
+        } : mode === 'queue' && selectedQueueRoute ? {
+          pickups: [selectedQueueRoute.pickup ? displayCellName(selectedQueueRoute.pickup, lots, points) : null],
+          dropoffs: [selectedQueueRoute.dropoff ? displayCellName(selectedQueueRoute.dropoff, lots, points) : null],
+          active: { kind: queueFocusedEndpoint, index: 0 },
         } : mode === 'history' && selectedHistoryRoute ? {
           pickups: [selectedHistoryRoute.pickup ? displayCellName(selectedHistoryRoute.pickup, lots, points) : null],
           dropoffs: [selectedHistoryRoute.dropoff ? displayCellName(selectedHistoryRoute.dropoff, lots, points) : null],
