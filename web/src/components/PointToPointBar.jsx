@@ -13,7 +13,7 @@ import { displayCellName } from '../hooks/useCalibration';
 // checkbox de sequência trava (avulsa não vira grupo e vice-versa).
 export default function PointToPointBar({
   pickupNames, dropoffNames, lots, points, onClear, onSend, editing,
-  palletType, onPalletTypeChange, palletTop, onPalletTopChange,
+  palletType, onPalletTypeChange,
   sequenceMode, onToggleSequenceMode, activeSlot, onActiveSlotChange,
 }) {
   const countsMatch = pickupNames.length === dropoffNames.length;
@@ -101,18 +101,6 @@ export default function PointToPointBar({
             <span className="ptp-bar__pallet-label">Azul</span>
           </button>
         </div>
-        {/* Só pro azul: o pallet de dois níveis. Marcado = pega o 2º andar
-            (layer 3, altura configurada no editor). Madeira não empilha. */}
-        {palletType === 'blue' && (
-          <label className="ptp-bar__pallet-top">
-            <input
-              type="checkbox"
-              checked={!!palletTop}
-              onChange={(e) => onPalletTopChange(e.target.checked)}
-            />
-            Pallet de cima
-          </label>
-        )}
       </div>
 
       <div className="ptp-bar__actions">

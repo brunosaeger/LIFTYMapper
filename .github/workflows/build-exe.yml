@@ -3,6 +3,9 @@ name: Build LIFTY.exe
 # PyInstaller não faz cross-compile Linux->Windows, então o .exe é gerado
 # aqui num runner Windows de verdade. Dispara na mão (aba Actions ->
 # "Build LIFTY.exe" -> "Run workflow") ou empurrando uma tag v*.
+# Gera DOIS artefatos: LIFTY-windows (GUI, uso manual numa máquina com
+# alguém na frente) e LIFTY-SERVICE-windows (sem interface, sobe sozinho —
+# pensado pra virar Serviço do Windows numa VM, ver MIGRACAO_VM.md).
 on:
   workflow_dispatch:
   push:
@@ -38,12 +41,26 @@ jobs:
       - name: Instala PyInstaller
         run: pip install "pyinstaller==6.11.1"
 
-      - name: Gera o .exe
+      - name: Gera o .exe (GUI, uso manual)
         run: pyinstaller packaging/lifty.spec
 
-      - name: Publica o artefato
+      - name: Publica o artefato (GUI)
         uses: actions/upload-artifact@v4
         with:
           name: LIFTY-windows
           path: dist/LIFTY.exe
+          if-no-files-found: error
+
+      # Versão sem interface (ver packaging/lifty_headless.spec e
+      # MIGRACAO_VM.md) — pensada pra rodar como Serviço do Windows numa
+      # VM, subindo sozinha no boot sem precisar de ninguém clicando em
+      # nada.
+      - name: Gera o .exe (sem interface, pra Serviço do Windows)
+        run: pyinstaller packaging/lifty_headless.spec
+
+      - name: Publica o artefato (serviço)
+        uses: actions/upload-artifact@v4
+        with:
+          name: LIFTY-SERVICE-windows
+          path: dist/LIFTY-SERVICE.exe
           if-no-files-found: error

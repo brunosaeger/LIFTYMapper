@@ -4663,3 +4663,39 @@ clicado é de um modo DIFERENTE do atual — clicar no mesmo ícone de novo é
 no-op (o menu correspondente continua aberto, nada acontece). Sair de um
 desses modos exige clicar em outro ícone (inclusive o de Ponto a Ponto).
 `baseMode()` ficou sem uso depois disso e foi removida.
+
+## `.exe` sem interface pra rodar como Serviço do Windows (IMPLEMENTADO 2026-10-05)
+
+**Contexto**: migração do `server.py` pra uma VM Windows Server 2019 da
+empresa (`aplsrv`, IP fixo `192.168.5.252`, ver `MIGRACAO_VM.md`). O `.exe`
+que já existia (`packaging/lifty.spec` → `LIFTY.exe`) é uma GUI com botão
+"LIGAR SERVIDOR" pensada pra alguém com a tela na frente — não serve pra
+uma VM, que precisa subir SOZINHA no boot, sem ninguém clicando em nada.
+
+**Solução**: `packaging/lifty_headless.spec` — novo spec do PyInstaller
+que empacota o PRÓPRIO `server.py` como entrypoint (não a GUI). O bloco
+`if __name__ == "__main__"` no fim de `server.py` já faz exatamente o que
+precisa — `start_server()` sem argumento (descoberta automática do IP do
+robô na rede local, sem precisar digitar nada) + fica rodando até
+`Ctrl+C`/encerrado — é o MESMO comportamento já validado a sessão
+inteira rodando `python3 server.py` direto em dev. Gera `LIFTY-SERVICE.exe`
+— esse é o artefato pra registrar como Serviço do Windows (ex. via NSSM),
+não a GUI.
+
+**CI**: `.github/workflows/build-exe.yml` (builda num runner Windows de
+verdade — PyInstaller não compila Windows a partir de Linux) agora gera
+os DOIS artefatos na mesma run: `LIFTY-windows` (GUI, como já era) e
+`LIFTY-SERVICE-windows` (novo, sem interface).
+
+## Opção "Pallet de cima" removida da versão final (2026-10-05)
+
+Pedido do usuário: a opção de marcar o 2º andar do pallet azul (checkbox
+"Pallet de cima") não vai ser entregue na versão final. Removida de dois
+lugares onde era editável: `PointToPointBar.jsx` (montagem inicial da
+tarefa) e `StagedTasksPanel.jsx`/`PalletPopover` (editar uma tarefa já
+preparada). O estado `palletTop` em `MainApp.jsx` continua existindo (fica
+sempre `false` agora, dormente) e toda a canalização até o payload que vai
+pro servidor permanece intacta — backend (`server.py`,
+`PALLET_TOP_LAYER`/`blueTop`) não foi tocado, só a forma do usuário
+conseguir ativar isso pela UI. Reativar no futuro é só devolver os dois
+checkboxes removidos.

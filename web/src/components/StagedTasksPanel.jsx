@@ -122,16 +122,6 @@ function PalletPopover({ popover, unit, onChoose, onClose }) {
             </button>
           ))}
         </div>
-        {unit.palletType === 'blue' && (
-          <label className="ptp-bar__pallet-top">
-            <input
-              type="checkbox"
-              checked={!!unit.palletTop}
-              onChange={(e) => onChoose(unit.id, 'blue', e.target.checked)}
-            />
-            Pallet de cima
-          </label>
-        )}
       </div>
     </div>,
     document.body,

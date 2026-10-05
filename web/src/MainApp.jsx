@@ -270,6 +270,11 @@ export default function MainApp({ user, onLogout }) {
   // "Pallet de cima": 2º andar do pallet azul de dois níveis (layer 3,
   // altura configurável no editor). Só faz sentido com azul. Também NÃO é
   // resetado por resetSelection — é preferência de sessão, igual palletType.
+  // Pedido do usuário (2026-10-05): a opção de marcar isso ficou fora da
+  // versão final (removida de PointToPointBar/StagedTasksPanel) — este
+  // estado fica sempre false agora, dormente, mas o restante da
+  // canalização (payload pro servidor, StagedTasksPanel) continua intacto
+  // caso a feature volte depois.
   const [palletTop, setPalletTop] = useState(false);
 
   // "Tarefas aguardando envio" (ver StagedTasksPanel.jsx e CONTEXT.md):
@@ -1366,8 +1371,6 @@ export default function MainApp({ user, onLogout }) {
               editing={editingUnit ? (editingUnit.groupKey ? 'group' : 'single') : null}
               palletType={palletType}
               onPalletTypeChange={setPalletType}
-              palletTop={palletTop}
-              onPalletTopChange={setPalletTop}
               sequenceMode={sequenceMode}
               onToggleSequenceMode={handleToggleSequenceMode}
               activeSlot={activeSlot}
