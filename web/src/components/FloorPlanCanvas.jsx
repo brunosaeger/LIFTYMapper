@@ -480,7 +480,7 @@ function LotCell({ name, displayName, index, cellSize, fill, stroke, xColor, sho
 // única unidade arrastável/rotacionável/redimensionável. Em Ponto a Ponto,
 // cada célula tem sua própria animação de hover (ver LotCell) — a seleção em
 // si acontece ao soltar o mouse/dedo, tratada no Stage.
-function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames, hoverName, occupiedNames, previewingNames, invalidPulseName, invalidPulseId, onSelectLot, onHoverEnter, onHoverLeave, onPressStart, onChange, isPreview }) {
+function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames, seqOverride, hoverName, occupiedNames, previewingNames, invalidPulseName, invalidPulseId, onSelectLot, onHoverEnter, onHoverLeave, onPressStart, onChange, isPreview }) {
   const groupRef = useRef(null);
   const trRef = useRef(null);
   const editable = mode === 'edit' && !isPreview;
@@ -1436,6 +1436,7 @@ export default function FloorPlanCanvas({
                 isSelected={l.id === selectedLotId}
                 pickupNames={pickupNames}
                 dropoffNames={dropoffNames}
+                seqOverride={seqOverride}
                 hoverName={hoveredName}
                 occupiedNames={effectiveOccupied}
                 previewingNames={previewingNames}
