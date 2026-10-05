@@ -69,7 +69,7 @@ export default function MainApp({ user, onLogout }) {
   // verdade é sempre o server.py, nunca o navegador).
   const {
     currentRoute, pendingRoute, routeQueue, occupied, emergency, cancelPending, cancelPendingMessage, turnBlockedMessage, awaitingChargeMessage, postPickupUnloadMessage, robotCharging, robotBattery, robotReturningToCharge, robotStalledMessage,
-    enqueueRoutes, cancelCurrent, removeQueued, setOccupiedMany, toggleOccupied, setEmergency, setLimitBreakerLease,
+    enqueueRoutes, cancelCurrent, removeQueued, reorderQueue, setOccupiedMany, toggleOccupied, setEmergency, setLimitBreakerLease,
   } = useLiveState();
   const [toast, showToast] = useToast();
 
@@ -1212,6 +1212,19 @@ export default function MainApp({ user, onLogout }) {
     }
   }
 
+  // Arrastar-e-soltar em "Próximas rotas" (pedido do usuário, 2026-10-05) —
+  // dispara a troca no servidor em segundo plano (não espera a resposta
+  // pra "assentar" a prévia, mesma sensação de resposta rápida do modo
+  // preparação) e, se o servidor recusar (fora do kanban do usuário,
+  // tentativa de mexer na pendingRoute, ou quebraria a ordem de ocupação),
+  // avisa por toast — a lista em si sempre reflete o que o servidor
+  // confirmou no próximo refresh, nunca fica presa num estado só local.
+  function handleReorderQueueRoute(taskId, toIndex) {
+    reorderQueue(taskId, toIndex).catch((err) => {
+      showToast('Não deu pra reordenar: ' + err.message, 'error');
+    });
+  }
+
   // Painel Fila: rotas "de espera" na ordem em que o robô as verá — a
   // pendingRoute (se houver) já foi disparada pro dispatch como "próxima",
   // o resto é fila local (ver CONTEXT.md, "Fila de rotas compartilhada").
@@ -1463,7 +1476,10 @@ export default function MainApp({ user, onLogout }) {
               onSelectRoute={handleSelectQueueRoute}
               onCancelCurrent={handleCancelCurrent}
               onRemoveQueued={handleRemoveQueued}
+              onReorder={handleReorderQueueRoute}
+              hasPendingRoute={!!pendingRoute}
               cancelPending={cancelPending}
+              showToast={showToast}
             />
           </aside>
         )}

@@ -121,6 +121,22 @@ export function useLiveState() {
     await refresh();
   }, [refresh]);
 
+  // Arrastar-e-soltar em "Próximas rotas" (pedido do usuário, 2026-10-05) —
+  // `toIndex` é em nível de UNIDADE (lote inteiro conta como 1), não de
+  // tarefa achatada. O servidor é quem decide de verdade (trava de
+  // kanban, nunca a pendingRoute, validação de cadeia de ocupação) — quem
+  // chama precisa capturar o erro (ex: 403/400) e mostrar pro operador; a
+  // lista sempre reflete o que o servidor confirmou no próximo refresh,
+  // nunca um estado otimista local.
+  const reorderQueue = useCallback(async (taskId, toIndex) => {
+    await jsonRequest('/api/queue/reorder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ taskId, toIndex }),
+    });
+    await refresh();
+  }, [refresh]);
+
   const setOccupied = useCallback(async (name, isOccupied) => {
     await jsonRequest('/api/occupied/set', {
       method: 'POST',
@@ -200,6 +216,7 @@ export function useLiveState() {
     setLimitBreakerLease,
     cancelCurrent,
     removeQueued,
+    reorderQueue,
     setEmergency,
     setOccupied,
     setOccupiedMany,

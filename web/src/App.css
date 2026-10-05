@@ -1987,6 +1987,7 @@
 }
 
 .queue-route {
+  position: relative;
   display: flex;
   align-items: stretch;
   gap: 8px;
@@ -1994,7 +1995,43 @@
   border-radius: 6px;
   background: var(--panel-base);
   border: 1px solid var(--panel-line);
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.18s ease;
+  /* Arrastar-e-soltar em "Próximas rotas" (pedido do usuário, 2026-10-05)
+     — mesmo padrão de toque do StagedTasksPanel: pan-y deixa a rolagem
+     vertical nativa funcionar normalmente até SEGURAR parado virar
+     arrasto (ver QueuePanel.jsx, handlePointerDown/activateDrag). */
+  touch-action: pan-y;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.queue-panel__group {
+  position: relative;
+  transition: transform 0.18s ease;
+  touch-action: pan-y;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* Logo depois de soltar numa posição nova: sem transição nesse frame,
+   senão as vizinhas "voltariam" do deslocamento temporário em vez de já
+   estarem no lugar novo (mesmo motivo do StagedTasksPanel). */
+.queue-panel__list--scroll.is-settling .queue-route,
+.queue-panel__list--scroll.is-settling .queue-panel__group {
+  transition: none;
+}
+
+/* Lugar de origem da unidade sendo arrastada — ocupa espaço, invisível (a
+   "fantasma" segue o dedo, ver .staged-ghost, reaproveitado aqui). */
+.queue-route.is-placeholder,
+.queue-panel__group.is-placeholder {
+  visibility: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .queue-route, .queue-panel__group { transition: none; }
 }
 
 /* Anel de seleção: qual rota está sendo mostrada no mapa agora — a atual por

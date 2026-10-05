@@ -379,6 +379,7 @@ LIVE_STATE_PATH = "/api/live-state"
 QUEUE_ENQUEUE_BATCH_PATH = "/api/queue/enqueue-batch"
 QUEUE_CANCEL_CURRENT_PATH = "/api/queue/cancel-current"
 QUEUE_REMOVE_QUEUED_PATH = "/api/queue/remove-queued"
+QUEUE_REORDER_PATH = "/api/queue/reorder"  # arrastar-e-soltar em "Próximas rotas" (ver _queue_reorder)
 QUEUE_EMERGENCY_PATH = "/api/queue/emergency"
 DEV_LIMIT_BREAKER_PATH = "/api/dev/limit-breaker"
 OCCUPIED_SET_PATH = "/api/occupied/set"
@@ -1542,6 +1543,21 @@ def _drop_group_from_queue(state, group_id):
     state["routeQueue"] = [r for r in (state.get("routeQueue") or []) if r.get("groupId") != group_id]
 
 
+# Agrupa rotas CONSECUTIVAS do mesmo groupId em "unidades" — mesmo
+# espírito de groupWaitingRoutes em QueuePanel.jsx (porta Python, usado
+# por _queue_reorder). Rotas de um grupo sempre ficam adjacentes (nascem
+# juntas no envio, nunca se intercalam com rota independente no meio).
+def _group_queue_units(route_queue):
+    units = []
+    for route in route_queue:
+        group_id = route.get("groupId")
+        if group_id and units and units[-1]["groupId"] == group_id:
+            units[-1]["routes"].append(route)
+        else:
+            units.append({"groupId": group_id, "routes": [route]})
+    return units
+
+
 # --- disparo/avanço da fila (chamado com QUEUE_LOCK já adquirido) ---------
 # Dispara de verdade no robô e devolve a rota "disparada" (com taskName
 # preenchido). NÃO atualiza state[...] sozinho, quem chama decide onde ela
@@ -2576,6 +2592,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not user:
                 return
             self._queue_remove_queued(user)
+        elif self.path == QUEUE_REORDER_PATH:
+            user = self._require_auth()
+            if not user:
+                return
+            self._queue_reorder(user)
         elif self.path == QUEUE_EMERGENCY_PATH:
             if not self._require_auth():
                 return
@@ -3431,6 +3452,71 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if q:
                     state["pendingRoute"] = q[0]
                     state["routeQueue"] = q[1:]
+            _write_queue_state(state)
+        self._relay(200, "application/json", b'{"ok":true}')
+
+    # Arrastar-e-soltar em "Próximas rotas" (pedido do usuário, 2026-10-05)
+    # — reordena `routeQueue`, NUNCA `pendingRoute` (ela já está "reservada"
+    # pro próximo disparo, igual a rota EM ANDAMENTO já é intocável — ver
+    # CONTEXT.md). `taskId` identifica QUALQUER tarefa da unidade sendo
+    # arrastada (uma rota avulsa, ou qualquer uma das pernas de um lote em
+    # sequência — a unidade inteira se move junto, mesmo espírito do
+    # StagedTasksPanel); `toIndex` é a posição de destino em nível de
+    # UNIDADE (não de tarefa achatada), mesma indexação que o cliente já
+    # usa pra montar a prévia do arrasto.
+    def _queue_reorder(self, requester):
+        try:
+            payload = self._read_json_body()
+            task_id = payload["taskId"]
+            to_index = int(payload["toIndex"])
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError) as err:
+            self._relay(400, "application/json", json.dumps({"error": str(err)}, ensure_ascii=False).encode("utf-8"))
+            return
+        # Lido ANTES do QUEUE_LOCK de propósito — ver mesmo comentário em
+        # _queue_cancel_current/_queue_remove_queued.
+        with CALIBRATION_LOCK:
+            cal = _read_calibration()
+        with QUEUE_LOCK:
+            state = _read_queue_state()
+            pending = state.get("pendingRoute")
+            if pending and pending.get("id") == task_id:
+                self._relay(400, "application/json", json.dumps(
+                    {"error": "Essa rota já está reservada como a próxima a rodar — não dá pra reordenar ela."},
+                    ensure_ascii=False).encode("utf-8"))
+                return
+            queue = state.get("routeQueue") or []
+            units = _group_queue_units(queue)
+            from_index = next((i for i, u in enumerate(units) if any(r["id"] == task_id for r in u["routes"])), None)
+            if from_index is None:
+                # Já saiu da fila local por outro motivo nesse meio-tempo
+                # (outro operador cancelou/removeu, ou já virou pendingRoute
+                # sozinha) — idempotente, não é erro: devolve o estado atual
+                # pro cliente conferir no próximo refresh.
+                self._relay(200, "application/json", b'{"ok":true}')
+                return
+            unit = units[from_index]
+            # Restrição por kanban (ver "Kanbans" acima) — vale pra TODAS as
+            # pernas da unidade (nunca arrasta um grupo parcialmente fora do
+            # kanban do usuário).
+            for route in unit["routes"]:
+                if route.get("pickup") and not _user_can_pick_up_from(requester, route["pickup"], cal):
+                    self._relay(403, "application/json", json.dumps(
+                        {"error": "Sua conta não tem permissão pra mover uma rota com origem em %s — fora do seu kanban." % route["pickup"]},
+                        ensure_ascii=False).encode("utf-8"))
+                    return
+            units.pop(from_index)
+            units.insert(max(0, min(to_index, len(units))), unit)
+            new_queue = [route for u in units for route in u["routes"]]
+            # Mesma validação de cadeia de ocupação do enfileiramento (ver
+            # _queue_enqueue_batch) — reordenar não pode criar uma sequência
+            # fisicamente impossível (ex: pegar num ponto que só ficaria
+            # livre depois, na ordem nova).
+            pairs = [{"pickup": r["pickup"], "dropoff": r["dropoff"]} for r in new_queue]
+            error = validate_route_chain(cal["top"]["lots"], cal.get("occupied") or [], pairs)
+            if error:
+                self._relay(400, "application/json", json.dumps({"error": error}, ensure_ascii=False).encode("utf-8"))
+                return
+            state["routeQueue"] = new_queue
             _write_queue_state(state)
         self._relay(200, "application/json", b'{"ok":true}')
 

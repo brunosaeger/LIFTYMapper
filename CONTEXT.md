@@ -4816,3 +4816,76 @@ nas de espera) em vez de mandar sempre `null`. Testado ao vivo
 (Playwright): clique mostra zoom/banner, clique de novo esconde, e
 trocar pra uma rota de espera e voltar pra "em andamento" funciona sem
 ficar preso num estado errado.
+
+## Fila: arrastar pra reordenar "Próximas rotas" (IMPLEMENTADO 2026-10-05)
+
+**Pedido do usuário**: no painel Fila, segurar e arrastar uma rota em
+"Próximas rotas" (igual já dava pra fazer em "Tarefas aguardando
+envio") pra mudar a ordem de execução. Lotes em sequência arrastam
+juntos em bloco, igual lá. E só pode mudar de posição uma rota cuja
+origem esteja dentro do kanban alocado ao usuário (ou livre). Pedido
+explícito: a pendingRoute (1ª de "Próximas rotas", já reservada como
+próxima a disparar pro robô) NÃO pode ser reordenada — tentar arrastar
+dá um aviso em vez de mover.
+
+**Servidor** (`server.py`) — endpoint novo `POST /api/queue/reorder`
+(`_queue_reorder`), recebe `{taskId, toIndex}`:
+- Rejeita (400) se `taskId` é a `pendingRoute` — mensagem explicando que
+  ela já está reservada.
+- Rejeita (403) se o usuário não tem permissão de kanban pra pegar a
+  origem de QUALQUER rota da unidade arrastada (`_user_can_pick_up_from`,
+  já usado no envio de rotas — admin/Mestre e usuário sem kanban
+  continuam irrestritos).
+- Agrupa `routeQueue` em unidades (`_group_queue_units`, mesmo
+  algoritmo do `groupWaitingRoutes` do frontend) — a unidade inteira
+  (rota avulsa ou grupo todo de sequência) se move de uma vez.
+  Novo `routeQueue` é simulado primeiro; `validate_route_chain` (já
+  existente, mesma regra de fronteira/FIFO por lote usada no envio)
+  decide se a nova ordem é fisicamente possível — rejeita (400) se não.
+  Só então grava de verdade, sob `QUEUE_LOCK` (lido com
+  `CALIBRATION_LOCK` primeiro, nunca aninhado — padrão de sempre).
+- Idempotente: se a tarefa já saiu da fila (cancelada/concluída) entre o
+  usuário segurar e soltar, responde 200 sem fazer nada, em vez de erro.
+- Testado isoladamente (fora do repo, suíte própria com servidor
+  fake/mocks) cobrindo os 8 cenários acima (reordena, recusa
+  pendingRoute, recusa sem kanban, permite com kanban certo/livre,
+  recusa cadeia quebrada, grupo move junto, idempotente).
+
+**Frontend** (`QueuePanel.jsx`) — gesto de arrasto idêntico ao
+`StagedTasksPanel.jsx` (hold de 280ms antes de "levantar", tolerância de
+8px pra não confundir com rolagem, `setPointerCapture`, rolagem
+automática perto da borda, prévia flutuante via portal, lista local
+reordena na hora — otimista — e o servidor é quem decide de verdade; se
+recusar, o `onReorder` mostra erro por toast e a lista volta ao normal
+no próximo refresh). `groupWaitingRoutes` (já existente) define as
+unidades arrastáveis; a pendingRoute nunca entra numa unidade — segurar
+nela só mostra o aviso (toast) sem ativar arrasto nenhum.
+`useLiveState.js` ganhou `reorderQueue(taskId, toIndex)` (mesmo padrão
+de `removeQueued`); `MainApp.jsx` ganhou `handleReorderQueueRoute`
+(mostra toast de erro se o servidor recusar) e passa
+`hasPendingRoute`/`showToast` novos pro `QueuePanel`.
+
+**Bug pego ANTES de ir pro ar** (achado testando com Playwright contra
+dados mockados, nunca a fila real): o mesmo `setPointerCapture` que
+viabiliza o arrasto QUEBROU o clique normal (selecionar pra zoom/banner,
+feature da seção anterior) — um ancestral com captura de ponteiro ativa
+faz o clique sintetizado não alcançar de forma confiável um elemento
+DESCENDENTE nesse WebView (nem um `<button onClick>` interno, nem o
+próprio `<li>` de uma rota dentro de um grupo). A correção: mover TODO
+o clique de seleção pro MESMO `<li>` que já tem `setPointerCapture` (a
+raiz da unidade — pra uma rota avulsa, o próprio `<li>`; pra um grupo, o
+`<li>` externo do bloco tracejado inteiro), com delegação por
+`data-route-id` + `closest()` pra achar qual rota exata foi tocada —
+exatamente o padrão já usado e comprovado em
+`StagedTasksPanel.jsx`/`handleClickUnit`. O botão de cancelar (✕), que
+agora é irmão de um `<li>` que escuta clique, ganhou `e.stopPropagation()`
+no seu `onClick` pra não alternar a seleção junto ao cancelar.
+
+**Testado com Playwright** (sempre contra `/api/live-state` e
+`/api/queue/reorder` MOCKADOS via `page.route()` — nunca tocou a fila
+real): arrastar a pendingRoute não manda nada pro servidor e mostra o
+aviso; arrastar a última rota avulta pra cima de um grupo manda
+`{taskId, toIndex}` certo; clicar numa rota avulsa, na pendingRoute e
+num membro de grupo (depois da correção acima) mostra o banner de
+seleção normalmente; clicar no ✕ de cancelar não aciona seleção junto.
+Sem erros no console em nenhum cenário.
