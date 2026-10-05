@@ -4800,3 +4800,19 @@ banner com origem/destino clicáveis; clicar no botão de destino do banner
 foca lá; clicar numa rota DENTRO de um grupo tracejado mostra só aquele
 par com a numeração certa (ex. "1"), zoom e banner — tudo junto, sem
 conflito. Confirmado por screenshot, sem erros no console.
+
+**Complemento no mesmo dia**: a feature acima só cobria "Próximas
+rotas" — clicar na "Rota em andamento" continuava só voltando pro
+padrão (mapPickupNames mostra ela por padrão, mas sem zoom/banner), sem
+o mesmo tratamento. `selectedQueueRouteId` ganhou um 3º estado — além de
+`null` (nada selecionado, mostra a atual por padrão sem banner) e um id
+de verdade (rota de espera), agora aceita o sentinela `'current'` (rota
+em andamento selecionada EXPLICITAMENTE, com zoom/banner).
+`selectedQueueRoute` resolve pra `currentRoute` nesse caso;
+`handleSelectQueueRoute` busca em `currentRoute` em vez de
+`waitingRoutes` quando `id === 'current'`. `QueuePanel.jsx`: o clique na
+linha "Rota em andamento" alterna `null`/`'current'` (igual já alternava
+nas de espera) em vez de mandar sempre `null`. Testado ao vivo
+(Playwright): clique mostra zoom/banner, clique de novo esconde, e
+trocar pra uma rota de espera e voltar pra "em andamento" funciona sem
+ficar preso num estado errado.

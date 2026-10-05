@@ -437,20 +437,21 @@ export default function MainApp({ user, onLogout }) {
 
   // Clique numa rota do painel Fila: alterna a seleção (clicar na mesma
   // desfaz). null = volta a mostrar a rota em andamento no mapa (padrão).
-  // Clicar numa rota de "Próximas rotas": seleciona (QueuePanel já decide
-  // null vs o id, inclusive alternando ao clicar na mesma de novo) e, ao
-  // SELECIONAR, dá zoom de perto na origem (ou destino, se não houver
-  // origem) e liga o banner "VISUALIZANDO" com origem/destino clicáveis —
-  // mesmo espírito do Histórico/"Visualizar tarefa" (pedido do usuário,
-  // 2026-10-05). Clicar na rota EM ANDAMENTO (sempre manda null) só volta
-  // pro padrão, sem banner — igual já era.
+  // Clicar numa rota da Fila: seleciona e dá zoom de perto na origem (ou
+  // destino, se não houver origem) + liga o banner "VISUALIZANDO" com
+  // origem/destino clicáveis — mesmo espírito do Histórico/"Visualizar
+  // tarefa". `id` pode ser null (volta pro padrão, sem banner — clicar de
+  // novo na mesma rota já selecionada, ver QueuePanel), 'current' (rota
+  // EM ANDAMENTO selecionada explicitamente — pedido do usuário,
+  // 2026-10-05: antes só "Próximas rotas" tinha zoom/banner, a em
+  // andamento só resetava), ou um id de verdade (rota de espera).
   function handleSelectQueueRoute(id) {
     setSelectedQueueRouteId(id);
     if (!id) {
       setQueueFocusedEndpoint(null);
       return;
     }
-    const route = waitingRoutes.find((r) => r.id === id);
+    const route = id === 'current' ? currentRoute : waitingRoutes.find((r) => r.id === id);
     if (!route) return;
     const startKind = route.pickup ? 'pickup' : 'dropoff';
     setQueueFocusedEndpoint(startKind);
@@ -1216,12 +1217,17 @@ export default function MainApp({ user, onLogout }) {
   // o resto é fila local (ver CONTEXT.md, "Fila de rotas compartilhada").
   const waitingRoutes = pendingRoute ? [pendingRoute, ...routeQueue] : routeQueue;
 
-  // Rota selecionada no painel Fila (clique numa das "próximas rotas") — só
-  // procura nas de espera; clicar na rota em andamento manda null (ver
-  // QueuePanel/handleSelectQueueRoute), que já é o padrão abaixo.
-  const selectedQueueRoute = selectedQueueRouteId
-    ? waitingRoutes.find((r) => r.id === selectedQueueRouteId)
-    : null;
+  // Rota selecionada no painel Fila — `selectedQueueRouteId` tem 3 estados:
+  // null (nada selecionado explicitamente — mapa mostra a rota em
+  // andamento por padrão, sem banner), 'current' (rota em andamento
+  // selecionada EXPLICITAMENTE — com zoom/banner, ver handleSelectQueueRoute
+  // abaixo, pedido do usuário 2026-10-05: antes só "Próximas rotas" tinha
+  // isso), ou um id de verdade (rota de "Próximas rotas").
+  const selectedQueueRoute = selectedQueueRouteId === 'current'
+    ? currentRoute
+    : selectedQueueRouteId
+      ? waitingRoutes.find((r) => r.id === selectedQueueRouteId)
+      : null;
   // Painel Fila (pedido do usuário, 2026-10-05): clicar numa rota mostra
   // SÓ ela (origem/destino individuais), mesmo quando é parte de um lote
   // em sequência — antes "isolava" o grupo inteiro junto, o que confundia

@@ -80,10 +80,12 @@ function QueueRoute({ pickup, dropoff, unloadOnly, user, lots, points, variant, 
 // (pendingRoute) e o resto é fila local; cancelar qualquer uma não afeta a
 // rota em andamento.
 //
-// selectedRouteId: qual rota da lista de espera está "isolada" no mapa agora
-// (null = mostrando a rota em andamento, o padrão). Clicar numa rota alterna
-// a seleção; clicar na rota em andamento sempre volta pro padrão (ver
-// MainApp.jsx, handleSelectQueueRoute/mapPickupNames).
+// selectedRouteId: qual rota está "isolada" no mapa com zoom/banner agora —
+// null (padrão, mostra a rota em andamento sem banner), 'current' (rota em
+// andamento isolada EXPLICITAMENTE, com zoom/banner — pedido do usuário,
+// 2026-10-05) ou um id de "Próximas rotas". Clicar em qualquer uma alterna
+// a seleção, inclusive a em andamento (ver MainApp.jsx,
+// handleSelectQueueRoute/mapPickupNames).
 export default function QueuePanel({ currentRoute, waitingRoutes, lots, points, selectedRouteId, onSelectRoute, onCancelCurrent, onRemoveQueued, cancelPending }) {
   return (
     <div className="queue-panel">
@@ -99,8 +101,8 @@ export default function QueuePanel({ currentRoute, waitingRoutes, lots, points, 
               lots={lots}
               points={points}
               variant="current"
-              selected={!selectedRouteId}
-              onSelect={() => onSelectRoute(null)}
+              selected={!selectedRouteId || selectedRouteId === 'current'}
+              onSelect={() => onSelectRoute(selectedRouteId === 'current' ? null : 'current')}
               // Tarefa isolada de descarregar (ver CONTEXT.md, "Cancelamento
               // pós-pickup") não pode ser cancelada pela UI: cancelar ela de
               // novo só recriaria o mesmo problema que ela existe pra
