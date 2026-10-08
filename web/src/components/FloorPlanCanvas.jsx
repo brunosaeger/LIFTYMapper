@@ -237,8 +237,16 @@ function useInvalidPulse(ringRef, active, pulseId) {
   useEffect(() => {
     const node = ringRef.current;
     if (!node || !active || !pulseId) return;
+    // O anel fica `visible={false}` em repouso (ver os <Circle> de LotCell/
+    // PointMarker): com só opacity 0 o Konva ainda o percorre e desenha a
+    // cada quadro — eram 237 círculos invisíveis no mapa. Aqui ele aparece
+    // só durante o pulso e some de novo no fim.
     function pulse(timesLeft) {
-      if (timesLeft <= 0) return;
+      if (timesLeft <= 0) {
+        node.visible(false);
+        return;
+      }
+      node.visible(true);
       node.scale({ x: 0.55, y: 0.55 });
       node.opacity(0.9);
       node.to({
@@ -384,7 +392,7 @@ function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNu
         {/* Anel de pulso vermelho (ver useInvalidPulse acima) — começa
             invisível (opacity 0), só a animação imperativa acorda ele. Por
             cima de tudo (último filho do Group = desenhado por último). */}
-        <Circle ref={pulseRingRef} radius={size * 0.75} stroke={COLORS.stateError} strokeWidth={3} opacity={0} listening={false} />
+        <Circle ref={pulseRingRef} radius={size * 0.75} stroke={COLORS.stateError} strokeWidth={3} opacity={0} visible={false} listening={false} />
       </Group>
       {editable && isSelected && (
         <Transformer
@@ -471,7 +479,7 @@ function LotCell({ name, displayName, index, cellSize, fill, stroke, xColor, sho
       )}
       {/* Anel de pulso vermelho (ver useInvalidPulse/PointMarker acima) —
           mesmo padrão: começa invisível, só a animação imperativa acorda. */}
-      <Circle ref={pulseRingRef} radius={cellSize * 0.75} stroke={COLORS.stateError} strokeWidth={3} opacity={0} listening={false} />
+      <Circle ref={pulseRingRef} radius={cellSize * 0.75} stroke={COLORS.stateError} strokeWidth={3} opacity={0} visible={false} listening={false} />
     </Group>
   );
 }

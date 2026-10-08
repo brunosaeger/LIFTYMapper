@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 const POLL_INTERVAL_MS = 4000; // mesmo intervalo que a sondagem client-side usava antes
 
@@ -27,14 +27,25 @@ export function useLiveState() {
   const [state, setState] = useState({ currentRoute: null, pendingRoute: null, routeQueue: [], occupied: [], emergency: false, cancelPending: false, cancelPendingMessage: null, turnBlocked: false, turnBlockedMessage: null, awaitingCharge: false, awaitingChargeMessage: null, postPickupUnloadMessage: null, robotCharging: null, robotBattery: null, robotReturningToCharge: false, robotStalledMessage: null });
   const [status, setStatus] = useState('loading'); // loading | idle | error
 
+  // Assinatura (JSON) da última resposta aplicada. O poll roda a cada 4s e,
+  // na maior parte do tempo, o servidor devolve EXATAMENTE o mesmo estado —
+  // mas `setState(data)` com um objeto novo (mesmo igual) re-renderiza o app
+  // inteiro, inclusive as 218 células do mapa. Se nada mudou, não troca o
+  // estado. Qualquer diferença (rota nova, cancelamento, ocupação, bateria...)
+  // muda o JSON e passa normalmente — nada é filtrado por campo.
+  const lastSigRef = useRef(null);
+
   const refresh = useCallback(() => {
     return fetch('/api/live-state')
       .then((res) => {
         if (!res.ok) throw new Error('Falha HTTP ' + res.status);
-        return res.json();
+        return res.text();
       })
-      .then((data) => {
-        setState(data);
+      .then((text) => {
+        if (text !== lastSigRef.current) {
+          lastSigRef.current = text;
+          setState(JSON.parse(text));
+        }
         setStatus('idle');
       })
       .catch(() => setStatus('error'));
