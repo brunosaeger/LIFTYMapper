@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { displayCellName } from '../hooks/useCalibration';
+import ManualInfoButton from './ManualInfoButton';
+import woodTexture from '../assets/pallet-wood.png';
+import blueTexture from '../assets/pallet-blue.png';
+
+const PALLET_TEXTURE = { wood: woodTexture, blue: blueTexture };
 
 // Mesmos tempos/tolerâncias do StagedTasksPanel (arrasto já validado lá) —
 // ver esse arquivo pros comentários completos do porquê de cada valor.
@@ -42,7 +47,7 @@ function groupWaitingRoutes(routes) {
 // Dentro de um grupo, cada rota NÃO recebe `onClick` própria — quem
 // escuta é o <li> externo do grupo (ver QueueUnit), por delegação via
 // `data-route-id` (sempre presente aqui, com ou sem onClick direto).
-function QueueRoute({ id, pickup, dropoff, unloadOnly, user, lots, points, variant, selected, onClick, onCancel, cancelLabel, cancelPending, dragHandlers, extraClassName = '', dragStyle, innerRef }) {
+function QueueRoute({ id, pickup, dropoff, unloadOnly, user, palletType, lots, points, variant, selected, onClick, onCancel, cancelLabel, cancelPending, dragHandlers, extraClassName = '', dragStyle, innerRef }) {
   // Cancelamento adiado (ver CONTEXT.md, "Cancelamento adiado até giro
   // seguro") — só existe pra rota EM ANDAMENTO (variant "current"); as
   // outras (pending/queued na fila) não têm essa espera, cancelam na hora
@@ -83,6 +88,17 @@ function QueueRoute({ id, pickup, dropoff, unloadOnly, user, lots, points, varia
           </span>
         )}
       </div>
+      {/* Só leitura (não editável nem clicável): confirma o tipo de pallet
+          que consta na tarefa — mesma textura do StagedTasksPanel. */}
+      {palletType && (
+        <span
+          className="queue-route__pallet"
+          style={{ backgroundImage: `url(${PALLET_TEXTURE[palletType] || woodTexture})` }}
+          role="img"
+          aria-label={'Pallet ' + (palletType === 'blue' ? 'azul' : 'de madeira')}
+          title={'Pallet ' + (palletType === 'blue' ? 'azul' : 'de madeira')}
+        />
+      )}
       {onCancel && (
         <button
           type="button"
@@ -125,6 +141,7 @@ function QueueUnit({ unit, lots, points, selectedRouteId, onUnitClick, onRemoveQ
         pickup={route.pickup}
         dropoff={route.dropoff}
         user={route.user}
+        palletType={route.palletType}
         lots={lots}
         points={points}
         variant="waiting"
@@ -151,6 +168,7 @@ function QueueUnit({ unit, lots, points, selectedRouteId, onUnitClick, onRemoveQ
               pickup={route.pickup}
               dropoff={route.dropoff}
               user={route.user}
+        palletType={route.palletType}
               lots={lots}
               points={points}
               variant="waiting"
@@ -192,7 +210,7 @@ function QueueUnit({ unit, lots, points, selectedRouteId, onUnitClick, onRemoveQ
 // SERVIDOR (ver server.py, _queue_reorder) — aqui só o gesto; se o
 // servidor recusar, o `onReorder` (MainApp.jsx) mostra o erro por toast e
 // a lista volta pro estado real no próximo refresh.
-export default function QueuePanel({ currentRoute, waitingRoutes, lots, points, selectedRouteId, onSelectRoute, onCancelCurrent, onRemoveQueued, onReorder, hasPendingRoute, cancelPending, showToast }) {
+export default function QueuePanel({ currentRoute, waitingRoutes, lots, points, selectedRouteId, onSelectRoute, onCancelCurrent, onRemoveQueued, onReorder, onClearAll, onOpenManual, hasPendingRoute, cancelPending, showToast }) {
   const listRef = useRef(null);
   const unitRefs = useRef(new Map());
   const pressRef = useRef(null);
@@ -398,7 +416,22 @@ export default function QueuePanel({ currentRoute, waitingRoutes, lots, points, 
   return (
     <div className="queue-panel">
       <section className="queue-panel__section">
-        <h2 className="points-panel__title">Rota em andamento</h2>
+        <div className="queue-panel__title-row">
+          <h2 className="points-panel__title">Rota em andamento<ManualInfoButton page={28} onOpen={onOpenManual} /></h2>
+          {onClearAll && (
+            <button
+              type="button"
+              className="queue-panel__clear"
+              aria-label="Limpar toda a fila (modo desenvolvedor)"
+              title="Limpar toda a fila (modo desenvolvedor)"
+              onClick={onClearAll}
+            >
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v6M14 11v6" />
+              </svg>
+            </button>
+          )}
+        </div>
         {currentRoute ? (
           <ul className="queue-panel__list">
             <QueueRoute
@@ -407,6 +440,7 @@ export default function QueuePanel({ currentRoute, waitingRoutes, lots, points, 
               dropoff={currentRoute.dropoff}
               unloadOnly={currentRoute.unloadOnly}
               user={currentRoute.user}
+        palletType={currentRoute.palletType}
               lots={lots}
               points={points}
               variant="current"
@@ -443,6 +477,7 @@ export default function QueuePanel({ currentRoute, waitingRoutes, lots, points, 
                   pickup={pendingEntry.pickup}
                   dropoff={pendingEntry.dropoff}
                   user={pendingEntry.user}
+        palletType={pendingEntry.palletType}
                   lots={lots}
                   points={points}
                   variant="waiting"

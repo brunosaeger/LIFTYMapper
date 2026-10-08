@@ -4889,3 +4889,56 @@ aviso; arrastar a última rota avulta pra cima de um grupo manda
 num membro de grupo (depois da correção acima) mostra o banner de
 seleção normalmente; clicar no ✕ de cancelar não aciona seleção junto.
 Sem erros no console em nenhum cenário.
+
+## Checkpoint 2026-10-09 — pacote de mudanças da sessão (ponto de retorno antes de otimizações de desempenho)
+
+Estado da plataforma que o usuário considera "muito boa"; qualquer otimização
+futura deve ser comparável a este commit. Tudo abaixo foi IMPLEMENTADO, build
+do frontend passando; a maior parte NÃO foi validada em campo ainda.
+
+**Servidor (`server.py`)**
+- Altura do pallet aceita UMA casa decimal (ex. 6.5): `_coerce_height`
+  mantém int pra valores inteiros; `_height_tag` troca "." por "_" no nome do
+  template (`...MT6_5`). Dispatch aceitou e guardou 6.5 em teste; se o robô
+  levanta 6,5cm de verdade NÃO foi medido.
+- Ao subir, `_clear_stale_queue_on_startup` descarta fila, próxima rota
+  (cancelando no robô), rota só reservada e descarregamento pendente. A rota
+  EM ANDAMENTO já disparada é mantida (a conferência existente limpa se já
+  acabou). Emergência e ocupação ficam.
+- Aviso vermelho de robô parado encurtado: "ROBÔ PARADO! Remova obstáculos ou
+  use o modo manual."
+- Cancelamento pós-pickup SEM devolver o pallet: só com limit breaker
+  (`skip_unload = force`; flag `skipPostPickupUnload` persiste se o cancelamento
+  ficar adiado; `_execute_cancel_current_locked` também olha
+  `_limit_breaker_active()`). O modo desenvolvedor sozinho NÃO muda como a
+  tarefa executa.
+- `POST /api/queue/clear-all` (só admin): zera a fila e cancela no robô o que
+  já foi despachado, sem giro seguro nem devolução de pallet.
+
+**Frontend**
+- Sons (`web/public/sounds/`, `src/sounds.js`): `notiftrue` 1x nos avisos
+  amarelos; `warningtrue` em loop no vermelho até sumir; `chargeready` + brilho
+  verde na barra de status quando o robô começa a carregar; `failedtrue`
+  (volume 0.6) em clique inválido de ponto a ponto; `opoveshchenie` + brilho
+  azul no ÍCONE DA FILA quando uma tarefa da fila começa (não ao sair da energia).
+- Aviso vermelho menor e centralizado, pulsando; amarelos levemente maiores.
+- Painel Fila: ícone do material do pallet (só leitura) em cada rota; lixeira
+  (modo desenvolvedor) ao lado de "Rota em andamento".
+- Modo desenvolvedor persiste por conta no localStorage (`lifty.devMode.<user>`).
+- Fluxo de zoom: tocar num kanban com ZOOM + abre o Ponto a Ponto; ZOOM -
+  (reset) volta pro menu do ZOOM + (modo Interação). Só a partir de
+  ptp/marcação/fila.
+- Manuais: ícone "i" ao lado dos títulos abre `ManualViewer` (páginas
+  pré-renderizadas em JPEG, não PDF). Operador: ptp→18, ocupação→26,
+  fila→28 (`public/manual/`, 31 págs). Admin: Usuários→2, Novo usuário→4,
+  Histórico→3 (`public/manual-admin/`, 8 págs). Se os PDFs mudarem, regenerar
+  com `pdftoppm -jpeg -scale-to-x 1400` e conferir o padding do nome
+  (`p-01.jpg`, 2 dígitos sempre).
+- Ícones do app (`public/`, `manifest.json`) a partir do `LiftyIcon.png`;
+  atalho precisa ser recriado no tablet pra pegar o ícone.
+
+**Investigação aberta (robô, não código)**: opção "background music" do app
+do robô diz carregar mas a pasta está vazia. O Ubuntu do robô (`rbot55f`) não
+tem placa de som (`aplay -l`) nem arquivo de áudio nenhum; o serviço de
+dispatch roda de `/mnt/reeman-dispatch-cloud/deploy-service/`. Provável que a
+pasta/saída de áudio seja do tablet Android da tela do robô. Sem conclusão.

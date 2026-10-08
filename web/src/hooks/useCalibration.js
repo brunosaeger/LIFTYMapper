@@ -11,7 +11,7 @@ const DEFAULT_PALLET_HEIGHTS = { blueBase: 7, blueTop: 8 }; // blueBase: 7cm, pe
 
 function normalizePalletHeights(raw) {
   const r = raw && typeof raw === 'object' ? raw : {};
-  const num = (v, d) => (Number.isFinite(Number(v)) ? Math.max(0, Math.round(Number(v))) : d);
+  const num = (v, d) => (Number.isFinite(Number(v)) ? Math.max(0, Math.round(Number(v) * 10) / 10) : d);
   return {
     blueBase: num(r.blueBase, DEFAULT_PALLET_HEIGHTS.blueBase),
     blueTop: num(r.blueTop, DEFAULT_PALLET_HEIGHTS.blueTop),

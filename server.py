@@ -379,6 +379,7 @@ LIVE_STATE_PATH = "/api/live-state"
 QUEUE_ENQUEUE_BATCH_PATH = "/api/queue/enqueue-batch"
 QUEUE_CANCEL_CURRENT_PATH = "/api/queue/cancel-current"
 QUEUE_REMOVE_QUEUED_PATH = "/api/queue/remove-queued"
+QUEUE_CLEAR_ALL_PATH = "/api/queue/clear-all"
 QUEUE_REORDER_PATH = "/api/queue/reorder"  # arrastar-e-soltar em "Próximas rotas" (ver _queue_reorder)
 QUEUE_EMERGENCY_PATH = "/api/queue/emergency"
 DEV_LIMIT_BREAKER_PATH = "/api/dev/limit-breaker"
@@ -414,11 +415,21 @@ PALLET_TOP_LAYER = 3
 
 
 def _coerce_height(value, fallback):
+    # Aceita uma casa decimal (ex. 6.5). Valor inteiro continua saindo como
+    # int (7, não 7.0) pra não mudar o JSON nem o nome de template já usados.
     try:
-        h = int(round(float(value)))
+        h = round(float(value), 1)
     except (TypeError, ValueError):
         return fallback
-    return max(0, h)
+    if h != h or h in (float("inf"), float("-inf")):
+        return fallback
+    h = max(0, h)
+    return int(h) if h == int(h) else h
+
+
+def _height_tag(h):
+    # Nome de template: 6.5 -> "6_5" (sem ponto), 7 -> "7".
+    return str(h).replace(".", "_")
 
 
 def _pallet_heights(cal):
@@ -850,8 +861,7 @@ _robot_status_cache = {"charging": None, "battery": None, "returningToCharge": F
 STALL_VX_EPSILON_MPS = 0.02
 STALL_VTH_EPSILON_DEG_S = 1.0
 STALL_ALERT_SECONDS = 60
-ROBOT_STALLED_MESSAGE = ("Robô com caminho obstruído ou desviou da rota, por favor, "
-                          "utilize o modo manual para conduzi-lo à energia ou remova obstáculos próximos.")
+ROBOT_STALLED_MESSAGE = "ROBÔ PARADO! Remova obstáculos ou use o modo manual."
 
 
 # `battery` em `/reeman/base_encode` (documentado, nunca lido até agora —
@@ -935,8 +945,8 @@ def robot_route_task_name(pickup, dropoff, pallet_type, pallet_top=False, height
         return base
     h = heights or {}
     if pallet_top:
-        return base + "MT" + str(_coerce_height(h.get("blueTop"), PALLET_BASE_HEIGHT_DEFAULT)) + "C"
-    return base + "MT" + str(_coerce_height(h.get("blueBase"), PALLET_BASE_HEIGHT_DEFAULT))
+        return base + "MT" + _height_tag(_coerce_height(h.get("blueTop"), PALLET_BASE_HEIGHT_DEFAULT)) + "C"
+    return base + "MT" + _height_tag(_coerce_height(h.get("blueBase"), PALLET_BASE_HEIGHT_DEFAULT))
 
 
 def robot_find_task_template_id(name):
@@ -1861,6 +1871,14 @@ def _execute_cancel_current_locked(state, current):
 
     log_route_completed(current["id"], "cancelled")
     state["cancelPending"] = False
+    # Limit breaker (pedido do usuário, 2026-10-07): cancelar após o pickup
+    # NÃO devolve o pallet à origem — segue como cancelamento comum. Vale se o
+    # pedido de cancelar já veio com limit breaker (flag persistida em state,
+    # porque o cancelamento pode ter ficado adiado e ser executado depois pela
+    # thread de fundo) ou se a licença do limit breaker está ativa agora.
+    skip_unload = bool(state.pop("skipPostPickupUnload", False)) or _limit_breaker_active()
+    if skip_unload and state.get("pickupCleared"):
+        print("Pós-pickup: cancelamento SEM devolver o pallet (limit breaker).")
 
     # Sequência ("Lotes em sequência"): o resto do grupo assumia que esta
     # rota rodaria antes (ocupação projetada), então cai junto — inclusive
@@ -1870,7 +1888,7 @@ def _execute_cancel_current_locked(state, current):
     # independente de quando (ou se) o descarregar isolado abaixo terminar.
     _drop_group_from_queue(state, current.get("groupId"))
 
-    if state.get("pickupCleared"):
+    if state.get("pickupCleared") and not skip_unload:
         # Pós-pickup (ver CONTEXT.md, "Cancelamento pós-pickup"): o robô
         # está com o pallet no garfo, e acabou de cancelar bem no giro de
         # alinhamento com o DESTINO (mesmo mecanismo do pré-pickup, ver
@@ -2231,6 +2249,50 @@ def _queue_tick():
     return _cancel_poll_interval(cancel_pending_now) if fast else QUEUE_POLL_INTERVAL_SECONDS
 
 
+def _clear_stale_queue_on_startup(state):
+    """Ao subir, descarta tudo que ficou ESPERANDO de uma sessão anterior
+    (pedido do usuário, 2026-10-07): fila, próxima rota e descarregamento
+    pós-pickup pendente — pra ligar o robô de manhã sem ele começar tarefas
+    que ninguém concluiu no dia anterior. A próxima rota (pendingRoute) já
+    foi despachada pro robô, então também é cancelada lá (melhor esforço).
+    Uma rota EM ANDAMENTO já disparada (currentRoute com taskName) NÃO é
+    descartada aqui: é o que o robô está fazendo de verdade, e perder o
+    rastro dela seria pior — a conferência logo abaixo limpa se já acabou.
+    A rota só RESERVADA (sem taskName, nunca foi pro robô) é descartada.
+    Parada de emergência e ocupação (calibration.json) ficam como estão."""
+    dropped = []
+    pending = state.get("pendingRoute")
+    if pending:
+        if pending.get("taskName"):
+            try:
+                _robot_try_cancel(pending["taskName"])
+            except Exception as err:
+                print("Aviso: não deu pra cancelar no robô a próxima rota '%s' ao subir (%s) — ela pode continuar lá." % (pending["taskName"], err))
+        log_route_completed(pending["id"], "cancelled")
+        dropped.append(pending)
+        state["pendingRoute"] = None
+    for route in state.get("routeQueue") or []:
+        log_route_completed(route["id"], "cancelled")
+        dropped.append(route)
+    state["routeQueue"] = []
+    current = state.get("currentRoute")
+    if current and not current.get("taskName"):
+        log_route_completed(current["id"], "cancelled")
+        dropped.append(current)
+        state["currentRoute"] = None
+        current = None
+    if state.get("pendingPostPickupUnload"):
+        state["pendingPostPickupUnload"] = None
+        dropped.append({})
+    if not current:
+        state["cancelPending"] = False
+        state["turnBlocked"] = False
+        state["awaitingCharge"] = False
+    if dropped:
+        _write_queue_state(state)
+        print("Fila limpa ao subir: %d tarefa(s) de antes descartada(s)." % len(dropped))
+
+
 def _reconcile_queue_state_on_startup():
     """Ao subir, não confia cegamente no que sobrou em queue_state.json —
     o robô pode ter terminado/cancelado a rota enquanto o processo estava
@@ -2239,6 +2301,7 @@ def _reconcile_queue_state_on_startup():
     mostrar pra todo mundo um "em andamento" que já acabou faz tempo."""
     with QUEUE_LOCK:
         state = _read_queue_state()
+        _clear_stale_queue_on_startup(state)
         if state.get("emergency"):
             print("Parada de emergência estava ATIVA quando o servidor caiu — continua ativa, reprimindo a task de carga. Libere pelo botão no app quando for seguro.")
             return
@@ -2592,6 +2655,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not user:
                 return
             self._queue_remove_queued(user)
+        elif self.path == QUEUE_CLEAR_ALL_PATH:
+            user = self._require_auth()
+            if not user:
+                return
+            self._queue_clear_all(user)
         elif self.path == QUEUE_REORDER_PATH:
             user = self._require_auth()
             if not user:
@@ -3282,6 +3350,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except json.JSONDecodeError:
             payload = {}
         force = (bool(payload.get("force")) and bool(requester.get("isAdmin"))) or _limit_breaker_active()
+        # Limit breaker (e só ele — o modo desenvolvedor em si não muda como as
+        # tarefas rodam): cancelar depois do pickup NÃO devolve o pallet à
+        # origem. `force` já só vale pra admin ou licença ativa.
+        skip_unload = force
         if force:
             print("LIMIT BREAKER: cancelamento forçado por %s (sem espera de giro seguro)." % requester["username"])
         # Lido ANTES do QUEUE_LOCK de propósito — CALIBRATION_LOCK e
@@ -3349,6 +3421,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 # terminou por conta própria enquanto perguntávamos.
                 self._relay(200, "application/json", b'{"ok":true}')
                 return
+            if skip_unload:
+                state["skipPostPickupUnload"] = True
             # Propaga a checagem fresca acima pro estado que
             # _execute_cancel_current_locked vai ler daqui a pouco — ela
             # decide pré/pós-pickup direto de `state["pickupCleared"]`.
@@ -3389,6 +3463,43 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # estiver seguro (mesma otimização do fim de rota normal).
         _try_dispatch_current()
         self._relay(200, "application/json", b'{"ok":true}')
+
+    # Modo desenvolvedor (lixeira no painel Fila): zera TODA a fila e
+    # cancela no robô tudo que já tinha sido despachado (rota em andamento e
+    # próxima), mas SEM o tratamento robusto de cancelamento: não espera giro
+    # seguro, não alinha em docking, não devolve pallet ao ponto de origem.
+    # Só admin. Parada de emergência e ocupação ficam como estão.
+    def _queue_clear_all(self, requester):
+        if not requester.get("isAdmin"):
+            self._relay(403, "application/json", json.dumps({"error": "só admin"}, ensure_ascii=False).encode("utf-8"))
+            return
+        with QUEUE_LOCK:
+            state = _read_queue_state()
+            routes = [r for r in [state.get("currentRoute"), state.get("pendingRoute")] + list(state.get("routeQueue") or []) if r]
+            for route in routes:
+                log_route_completed(route["id"], "cancelled")
+            emergency = state.get("emergency")
+            new_state = _empty_queue_state()
+            new_state["emergency"] = emergency
+            _write_queue_state(new_state)
+        # Rede FORA do lock. Só rotas que de fato foram pro robô (taskName).
+        failed = []
+        for route in routes:
+            if route.get("taskName"):
+                try:
+                    _robot_try_cancel(route["taskName"])
+                except Exception as err:
+                    failed.append(route["taskName"])
+                    print("clear-all: não deu pra cancelar '%s' no robô: %s" % (route["taskName"], err))
+        try:
+            robot_stop_navigation()
+        except Exception as err:
+            print("clear-all: cancel_goal falhou: %s" % err)
+        print("FILA LIMPA por %s (%d rota(s) descartada(s))." % (requester["username"], len(routes)))
+        body = {"ok": True}
+        if failed:
+            body["warning"] = "Fila limpa, mas o robô não confirmou o cancelamento de: " + ", ".join(failed)
+        self._relay(200, "application/json", json.dumps(body, ensure_ascii=False).encode("utf-8"))
 
     # Cancela uma rota que ainda NÃO está em andamento: pendingRoute ou uma da
     # routeQueue — nenhuma das duas chegou a ser disparada pro robô (ver

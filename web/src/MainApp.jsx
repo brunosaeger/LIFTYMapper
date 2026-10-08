@@ -15,11 +15,13 @@ import UsersPanel from './components/UsersPanel';
 import FloorPlanCanvas from './components/FloorPlanCanvas';
 import Toast from './components/Toast';
 import DevModeModal from './components/DevModeModal';
+import ManualViewer from './components/ManualViewer';
 import { useCalibration, lotCellName, displayCellName } from './hooks/useCalibration';
 import { useLiveState } from './hooks/useLiveState';
 import { useToast } from './hooks/useToast';
 import { saveTheme, saveFullscreen } from './api/auth';
 import { applyTheme } from './theme';
+import { playOnce, SOUND_FAILED_ROUTE, SOUND_FAILED_ROUTE_VOLUME, SOUND_ROBOT_NOTICE } from './sounds';
 // App.css já é carregado pelo App.jsx (raiz) — precisa estar disponível
 // mesmo antes de MainApp montar, pra estilizar a LoginScreen.
 
@@ -68,10 +70,29 @@ export default function MainApp({ user, onLogout }) {
   // pra ele em vez de mudar estado local direto (quem decide/dispara de
   // verdade é sempre o server.py, nunca o navegador).
   const {
-    currentRoute, pendingRoute, routeQueue, occupied, emergency, cancelPending, cancelPendingMessage, turnBlockedMessage, awaitingChargeMessage, postPickupUnloadMessage, robotCharging, robotBattery, robotReturningToCharge, robotStalledMessage,
-    enqueueRoutes, cancelCurrent, removeQueued, reorderQueue, setOccupiedMany, toggleOccupied, setEmergency, setLimitBreakerLease,
+    currentRoute, pendingRoute, routeQueue, occupied, emergency, cancelPending, cancelPendingMessage, turnBlockedMessage, awaitingChargeMessage, postPickupUnloadMessage, robotCharging, robotBattery, robotReturningToCharge, robotStalledMessage, status: liveStatus,
+    enqueueRoutes, cancelCurrent, clearQueue, removeQueued, reorderQueue, setOccupiedMany, toggleOccupied, setEmergency, setLimitBreakerLease,
   } = useLiveState();
   const [toast, showToast] = useToast();
+
+  // Aviso sonoro (opoveshchenie) + brilho azul no ícone do modo Fila: quando
+  // COMEÇA uma tarefa da fila (uma rota nova passa a estar disparada de
+  // verdade, com taskName). Não toca no 1º dado lido (abrir o app no meio de
+  // uma operação não é um evento), nem pro descarregamento isolado do
+  // cancelamento pós-pickup. Sair da energia NÃO dispara nada (a barrinha de
+  // status não brilha nem toca — pedido do usuário, 2026-10-07: redundante).
+  const prevStartedRouteRef = useRef(undefined); // undefined = ainda não leu
+  const [queuePulseId, setQueuePulseId] = useState(0); // cada incremento = um brilho
+  useEffect(() => {
+    if (liveStatus === 'loading') return; // espera a 1ª leitura do servidor
+    const startedId = currentRoute && currentRoute.taskName && !currentRoute.unloadOnly ? currentRoute.id : null;
+    const taskStarted = prevStartedRouteRef.current !== undefined && startedId && startedId !== prevStartedRouteRef.current;
+    prevStartedRouteRef.current = startedId;
+    if (taskStarted) {
+      setQueuePulseId((n) => n + 1);
+      playOnce(SOUND_ROBOT_NOTICE);
+    }
+  }, [currentRoute, liveStatus]);
 
   // Tema claro/escuro (botão lua/sol no Toolbar) — preferência da CONTA,
   // guardada em users.json e entregue junto da sessão (ver server.py). Era
@@ -198,7 +219,8 @@ export default function MainApp({ user, onLogout }) {
   const [invalidPulse, setInvalidPulse] = useState(null); // { name, id }
   const pulseIdRef = useRef(0);
 
-  function triggerInvalidPulse(name) {
+  function triggerInvalidPulse(name, { silent = false } = {}) {
+    if (!silent) playOnce(SOUND_FAILED_ROUTE, SOUND_FAILED_ROUTE_VOLUME);
     pulseIdRef.current += 1;
     setInvalidPulse({ name, id: pulseIdRef.current });
   }
@@ -206,10 +228,25 @@ export default function MainApp({ user, onLogout }) {
   // Modo desenvolvedor: libera a aba "Editar pontos" e os botões "+ Ponto"/
   // "+ Lote" no Toolbar (ver Toolbar.jsx) — sem ele, mode nunca chega a
   // 'edit' por nenhum caminho alcançável da UI (ver baseMode/
-  // handleDevButtonClick). Não persiste entre reloads de propósito — é uma
-  // trava de sessão, não uma preferência salva.
-  const [devMode, setDevMode] = useState(false);
+  // handleDevButtonClick). Persiste (pedido do usuário, 2026-10-07) até o
+  // ícone ser clicado de novo: guardado no navegador deste aparelho, POR
+  // conta (outra pessoa logando no mesmo tablet não herda). Continua sendo
+  // só uma trava de UI — o servidor exige admin pras ações perigosas.
+  const devModeKey = 'lifty.devMode.' + user.username;
+  const [devMode, setDevModeState] = useState(() => {
+    try { return localStorage.getItem(devModeKey) === '1'; } catch { return false; }
+  });
+  function setDevMode(on) {
+    setDevModeState(on);
+    try {
+      if (on) localStorage.setItem(devModeKey, '1');
+      else localStorage.removeItem(devModeKey);
+    } catch { /* sem storage: vale só até recarregar */ }
+  }
   const [devModalOpen, setDevModalOpen] = useState(false);
+  // Manual (ícone "i" ao lado do título de cada menu): { manual, page } a
+  // abrir ('user' ou 'admin'), ou null = fechado. Ver ManualViewer.jsx.
+  const [manualPage, setManualPage] = useState(null);
   // "Limit breaker" (botão do Doomguy, só em modo desenvolvedor): enquanto
   // ligado, cancelar a rota em andamento pula TODO o tratamento de
   // cancelamento seguro (espera de giro/alinhamento de docking) — pra testar
@@ -680,8 +717,33 @@ export default function MainApp({ user, onLogout }) {
   // Modo Interação: tocar um Close Up (ou resetar o zoom, que manda null —
   // ver FloorPlanCanvas.jsx/handleResetView) liga/desliga o banner
   // "VISUALIZANDO: KANBAN X" (CloseUpStatusBanner.jsx).
+  //
+  // Pedido do usuário (2026-10-07): ao tocar num Close Up em modo Interação
+  // (botão ZOOM +), o app já abre o menu Ponto a Ponto — o operador dá o
+  // zoom e já pode escolher origem/destino, sem outro toque. A seleção de
+  // ptp é preservada (keepRoute, mesmo padrão do "peek mode"). resetSelection
+  // zera o banner, então ele é religado logo depois, pro mesmo Close Up.
+  // Só em Interação: o preview do Close Up no modo desenvolvedor (editar
+  // closes) e o reset de zoom (closeUp nulo) não trocam de modo.
   function handleCloseUpActivate(closeUp) {
+    if (closeUp && mode === 'interaction') {
+      setMode('ptp');
+      resetSelection({ keepRoute: true });
+    }
     setActiveCloseUpId(closeUp ? closeUp.id : null);
+  }
+
+  // Pedido do usuário (2026-10-07): clicar em ZOOM - (reset de zoom) afasta o
+  // mapa E volta pro menu do ZOOM + (modo Interação, "selecione o kanban que
+  // você deseja ampliar") — clicou, afastou, já pode escolher outro kanban.
+  // Só a partir de ptp/marcação/fila (os modos de operador); modos de
+  // desenvolvedor (editar pontos/closes, histórico, usuários) não trocam.
+  // keepRoute: mesma regra do botão ZOOM + (handleToggleInteractionMode).
+  function handleResetViewClick() {
+    if (mode === 'ptp' || mode === 'mark' || mode === 'queue') {
+      setMode('interaction');
+      resetSelection({ keepRoute: true });
+    }
   }
 
   function handleRename(id, name) {
@@ -822,7 +884,7 @@ export default function MainApp({ user, onLogout }) {
     const idx = dropoffNames.length;
     if (idx >= pickupNames.length) {
       showToast('Já tem um destino pra cada origem — selecione mais origens antes.', 'info');
-      triggerInvalidPulse(name);
+      triggerInvalidPulse(name, { silent: true }); // não é violação de ordem
       return;
     }
     const proj = projectedOccupancy(pickupNames.slice(0, idx + 1), dropoffNames);
@@ -1177,6 +1239,18 @@ export default function MainApp({ user, onLogout }) {
     }
   }
 
+  // Modo desenvolvedor: lixeira da Fila — limpa tudo e cancela no robô, sem o tratamento robusto.
+  async function handleClearQueue() {
+    if (!window.confirm('Limpar TODA a fila e cancelar no robô? Sem giro seguro nem devolução de pallet.')) return;
+    try {
+      const result = await clearQueue();
+      if (result && result.warning) showToast(result.warning, 'error');
+      else showToast('Fila limpa.', 'success');
+    } catch (err) {
+      showToast('Erro ao limpar a fila: ' + err.message, 'error');
+    }
+  }
+
   // Parada de emergência: liga/desliga. Ligada, o servidor cancela tudo e
   // mantém o robô parado (reprimindo a task de carga). É melhor esforço,
   // não substitui o E-stop físico — ver CONTEXT.md.
@@ -1365,6 +1439,7 @@ export default function MainApp({ user, onLogout }) {
           selectedCloseUpId={selectedCloseUpId}
           onSelectCloseUp={handleSelectCloseUp}
           onCloseUpActivate={handleCloseUpActivate}
+          onResetViewClick={handleResetViewClick}
           focusRequest={focusRequest}
           closeUpFocusRequest={closeUpFocusRequest}
           pickupNames={mapPickupNames}
@@ -1383,6 +1458,7 @@ export default function MainApp({ user, onLogout }) {
           queueModeActive={mode === 'queue'}
           onToggleQueueMode={handleToggleQueueMode}
           queueNotifCount={queueNotifCount}
+          queuePulseId={queuePulseId}
           invalidPulseName={invalidPulse?.name ?? null}
           invalidPulseId={invalidPulse?.id ?? null}
           emergencyActive={emergency}
@@ -1435,6 +1511,7 @@ export default function MainApp({ user, onLogout }) {
         {mode === 'ptp' && (
           <aside className="sidebar sidebar--wide">
             <PointToPointBar
+              onOpenManual={setManualPage}
               pickupNames={pickupNames}
               dropoffNames={dropoffNames}
               lots={lots}
@@ -1475,6 +1552,8 @@ export default function MainApp({ user, onLogout }) {
               selectedRouteId={selectedQueueRouteId}
               onSelectRoute={handleSelectQueueRoute}
               onCancelCurrent={handleCancelCurrent}
+              onClearAll={devMode ? handleClearQueue : null}
+              onOpenManual={setManualPage}
               onRemoveQueued={handleRemoveQueued}
               onReorder={handleReorderQueueRoute}
               hasPendingRoute={!!pendingRoute}
@@ -1485,12 +1564,13 @@ export default function MainApp({ user, onLogout }) {
         )}
         {mode === 'mark' && (
           <aside className="sidebar">
-            <OccupancyPanel occupied={occupied} lots={lots} points={points} onToggle={toggleOccupied} />
+            <OccupancyPanel onOpenManual={setManualPage} occupied={occupied} lots={lots} points={points} onToggle={toggleOccupied} />
           </aside>
         )}
         {mode === 'history' && (
           <aside className="sidebar sidebar--history">
             <HistoryPanel
+              onOpenManual={setManualPage}
               lots={lots}
               points={points}
               selectedEntryId={selectedHistoryRoute ? selectedHistoryRoute.id : null}
@@ -1501,6 +1581,7 @@ export default function MainApp({ user, onLogout }) {
         {mode === 'users' && (
           <aside className="sidebar sidebar--wide">
             <UsersPanel
+              onOpenManual={setManualPage}
               currentUsername={user.username}
               showToast={showToast}
               onFocusKanban={requestCloseUpFocus}
@@ -1510,6 +1591,7 @@ export default function MainApp({ user, onLogout }) {
       </div>
 
       <Toast toast={toast} />
+      <ManualViewer target={manualPage} onClose={() => setManualPage(null)} />
       <DevModeModal open={devModalOpen} onSubmit={handleDevModalSubmit} onClose={handleDevModalClose} />
     </div>
   );

@@ -1,9 +1,11 @@
 import { displayCellName } from '../hooks/useCalibration';
 
-export default function OccupancyPanel({ occupied, lots, points, onToggle }) {
+import ManualInfoButton from './ManualInfoButton';
+
+export default function OccupancyPanel({ onOpenManual, occupied, lots, points, onToggle }) {
   return (
     <div className="points-panel">
-      <h2 className="points-panel__title">Ocupação ({occupied.length})</h2>
+      <h2 className="points-panel__title">Ocupação ({occupied.length})<ManualInfoButton page={26} onOpen={onOpenManual} /></h2>
       <p className="ptp-bar__hint">
         Clique num quadrado no mapa pra marcar (tem pallet ali agora) ou desmarcar (vazio). O X aparece na
         mesma cor do quadrado.

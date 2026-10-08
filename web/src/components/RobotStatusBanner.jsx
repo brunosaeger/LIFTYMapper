@@ -1,3 +1,6 @@
+import { useEffect, useRef, useState } from 'react';
+import { playOnce, SOUND_CHARGE_READY } from '../sounds';
+
 // Ícone de pilha (4 "pauzinhos") — quantos acendem e a cor mudam com o
 // nível: <20% vermelho (crítico), <50% âmbar (atenção), senão mint (bom).
 // Barras que não acendem ficam num traço fraco só pra dar a forma da pilha
@@ -52,12 +55,30 @@ function BatteryIcon({ pct }) {
 // isso, mas checar aqui de novo evita depender só do backend pra nunca
 // mostrar os dois rótulos ao mesmo tempo).
 export default function RobotStatusBanner({ charging, battery, returningToCharge }) {
+  // Carga detectada (transição "não carregando" -> "carregando"): pulsa
+  // verde e toca o aviso UMA vez. Não dispara no 1º dado lido (abrir o app
+  // com o robô já carregando não é uma "detecção").
+  const prevCharging = useRef(null);
+  const [chargePulse, setChargePulse] = useState(false);
+  useEffect(() => {
+    const prev = prevCharging.current;
+    if (charging === null || charging === undefined) return undefined;
+    prevCharging.current = charging;
+    if (prev === false && charging === true) {
+      playOnce(SOUND_CHARGE_READY);
+      setChargePulse(true);
+      const t = setTimeout(() => setChargePulse(false), 1400);
+      return () => clearTimeout(t);
+    }
+    return undefined;
+  }, [charging]);
+
   if (charging === null || charging === undefined) return null;
   const hasBattery = typeof battery === 'number';
   const label = charging ? 'Recarregando' : (returningToCharge ? 'Voltando à Energia' : 'Em Operação');
 
   return (
-    <div className={'robot-status-banner' + (charging ? ' is-charging' : returningToCharge ? ' is-returning' : '')} aria-hidden="true">
+    <div className={'robot-status-banner' + (charging ? ' is-charging' : returningToCharge ? ' is-returning' : '') + (chargePulse ? ' is-charge-pulse' : '')} aria-hidden="true">
       <span className="robot-status-banner__dot" />
       {/* "ROBÔ" na cor neutra das abas do header (Editar pontos/Histórico/
           Usuários); o status em si (mint = operando, âmbar = recarregando

@@ -32,7 +32,7 @@ export default function PalletHeightsPanel({ heights, onSave }) {
       rawEl.value = String(serverVal); // valor inválido — volta pro do servidor
       return;
     }
-    const rounded = Math.round(n);
+    const rounded = Math.round(n * 10) / 10; // uma casa decimal (ex. 6.5)
     rawEl.value = String(rounded);
     if (rounded === serverVal) return; // nada mudou
     onSave({ [key]: rounded }).then(() => showFlash('saved')).catch(() => showFlash('error'));
@@ -44,7 +44,7 @@ export default function PalletHeightsPanel({ heights, onSave }) {
         <span className="pallet-heights__label">{label}</span>
         <input
           key={key + '-' + serverVal}
-          type="number" min="0" step="1" inputMode="numeric"
+          type="number" min="0" step="0.1" inputMode="decimal"
           className="pallet-heights__input"
           defaultValue={serverVal}
           onBlur={(e) => commit(key, e.currentTarget, serverVal)}

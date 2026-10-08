@@ -88,6 +88,18 @@ export function useLiveState() {
     return result; // { ok, pending?, message? }
   }, [refresh]);
 
+  // Modo desenvolvedor (lixeira da Fila): limpa tudo no servidor, sem
+  // o tratamento robusto de cancelamento (mas cancela no robô). Só admin.
+  const clearQueue = useCallback(async () => {
+    const result = await jsonRequest('/api/queue/clear-all', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    await refresh();
+    return result; // { ok, warning? }
+  }, [refresh]);
+
   // "Limit breaker" (modo desenvolvedor): liga/renova ou desliga a licença no
   // servidor — ela expira sozinha se não for renovada (ver server.py,
   // LIMIT_BREAKER_LEASE_SECONDS), por isso quem liga chama isso repetido.
@@ -215,6 +227,7 @@ export function useLiveState() {
     enqueueRoutes,
     setLimitBreakerLease,
     cancelCurrent,
+    clearQueue,
     removeQueued,
     reorderQueue,
     setEmergency,

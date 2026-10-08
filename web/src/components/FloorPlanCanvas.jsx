@@ -683,6 +683,7 @@ export default function FloorPlanCanvas({
   selectedCloseUpId,
   onSelectCloseUp,
   onCloseUpActivate,
+  onResetViewClick,
   // "Visualizar tarefa" (ver MainApp.jsx): { name, id } — `id` muda a cada
   // pedido (mesmo repetindo o nome), é ele que dispara o zoom até o kanban
   // onde o ponto `name` está.
@@ -717,6 +718,7 @@ export default function FloorPlanCanvas({
   queueModeActive,
   onToggleQueueMode,
   queueNotifCount,
+  queuePulseId = 0,
   invalidPulseName,
   invalidPulseId,
   emergencyActive,
@@ -725,6 +727,17 @@ export default function FloorPlanCanvas({
   const containerRef = useRef(null);
   const { width: containerWidth, height: containerHeight } = useContainerSize(containerRef);
   const [image] = useImage(VIEW_URLS[view]);
+
+  // Brilho azul do ícone da Fila quando uma tarefa da fila COMEÇA (junto do
+  // som — ver MainApp.jsx). Não brilha na montagem.
+  const [queuePulse, setQueuePulse] = useState(false);
+  const firstQueuePulseId = useRef(queuePulseId);
+  useEffect(() => {
+    if (queuePulseId === firstQueuePulseId.current) return undefined;
+    setQueuePulse(true);
+    const t = setTimeout(() => setQueuePulse(false), 1400);
+    return () => clearTimeout(t);
+  }, [queuePulseId]);
 
   // Zoom/pan: o Stage cobre o container inteiro; scaleX/scaleY+x/y aplicam
   // zoom+pan a TODO o conteúdo (imagem e marcadores) de uma vez. Pontos/lotes
@@ -760,6 +773,7 @@ export default function FloorPlanCanvas({
   // precisar do caminho imperativo do Konva.
   function handleResetView() {
     if (!baseScale) return;
+    onResetViewClick?.(); // só o clique no botão ZOOM - (ver MainApp.jsx)
     // Voltar pro enquadramento geral não é mais "olhar de perto" nenhum
     // Close Up específico — some o banner "VISUALIZANDO: KANBAN X" (ver
     // handleCloseUpActivate em MainApp.jsx).
@@ -1377,7 +1391,7 @@ export default function FloorPlanCanvas({
       </button>
       <button
         type="button"
-        className={'view-toggle queue-toggle' + (queueModeActive ? ' is-active' : '')}
+        className={'view-toggle queue-toggle' + (queueModeActive ? ' is-active' : '') + (queuePulse ? ' is-task-pulse' : '')}
         onClick={onToggleQueueMode}
         aria-label={queueModeActive ? 'Sair do painel Fila' : 'Abrir painel Fila'}
         title="Fila"

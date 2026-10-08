@@ -1,3 +1,4 @@
+import ManualInfoButton from './ManualInfoButton';
 import { useEffect, useState } from 'react';
 import { fetchUsers, createUser, updateUser, deleteUser, fetchKanbans } from '../api/auth';
 
@@ -16,7 +17,7 @@ import { fetchUsers, createUser, updateUser, deleteUser, fetchKanbans } from '..
 // KanbanPicker tanto na criação quanto em cada linha existente.
 // `onFocusKanban(kanbanId)` (vem de MainApp.jsx): zoom + contorno tracejado
 // no mapa, pro admin confirmar visualmente qual área é cada kanban.
-export default function UsersPanel({ currentUsername, showToast, onFocusKanban }) {
+export default function UsersPanel({ onOpenManual, currentUsername, showToast, onFocusKanban }) {
   const [users, setUsers] = useState([]);
   const [status, setStatus] = useState('loading'); // loading | idle | error
   const [kanbans, setKanbans] = useState([]);
@@ -112,7 +113,7 @@ export default function UsersPanel({ currentUsername, showToast, onFocusKanban }
   return (
     <div className="users-panel">
       <div className="users-panel__head">
-        <h2 className="points-panel__title">Usuários</h2>
+        <h2 className="points-panel__title">Usuários<ManualInfoButton manual="admin" page={2} onOpen={onOpenManual} /></h2>
         <div className="users-panel__search">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <circle cx="11" cy="11" r="7" />
@@ -163,7 +164,7 @@ export default function UsersPanel({ currentUsername, showToast, onFocusKanban }
           ))}
         </ul>
       )}
-      <NewUserForm onCreate={handleCreate} kanbans={kanbans} onFocusKanban={onFocusKanban} />
+      <NewUserForm onCreate={handleCreate} kanbans={kanbans} onFocusKanban={onFocusKanban} onOpenManual={onOpenManual} />
     </div>
   );
 }
@@ -304,7 +305,7 @@ function UserRow({ user, isSelf, kanbans, onFocusKanban, onToggleAdmin, onToggle
   );
 }
 
-function NewUserForm({ onCreate, kanbans, onFocusKanban }) {
+function NewUserForm({ onCreate, kanbans, onFocusKanban, onOpenManual }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [isAdmin, setIsAdmin] = useState(false);
@@ -340,7 +341,7 @@ function NewUserForm({ onCreate, kanbans, onFocusKanban }) {
 
   return (
     <form className="users-panel__new" onSubmit={handleSubmit}>
-      <h3 className="users-panel__new-title">Novo usuário</h3>
+      <h3 className="users-panel__new-title">Novo usuário<ManualInfoButton manual="admin" page={4} onOpen={onOpenManual} /></h3>
       <input
         type="text"
         className="points-panel__input"

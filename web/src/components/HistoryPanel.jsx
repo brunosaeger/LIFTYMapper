@@ -1,3 +1,4 @@
+import ManualInfoButton from './ManualInfoButton';
 import { useEffect, useMemo, useState } from 'react';
 import { fetchRouteLog, fetchErrorRecords } from '../api/lifty';
 import { displayCellName } from '../hooks/useCalibration';
@@ -87,7 +88,7 @@ const STATUS_TAG_LABEL = { cancelled: 'CANCELADA', failed: 'FALHOU' };
 // `onSelectEntry`: clicar numa rota destaca origem/destino no mapa (ver
 // MainApp.jsx, selectedHistoryRoute/mapPickupNames) — clicar de novo na
 // mesma desseleciona (alternado em MainApp, não aqui).
-export default function HistoryPanel({ lots, points, selectedEntryId, onSelectEntry }) {
+export default function HistoryPanel({ onOpenManual, lots, points, selectedEntryId, onSelectEntry }) {
   const [routes, setRoutes] = useState([]);
   const [routesStatus, setRoutesStatus] = useState('loading'); // loading | idle | error
   const [errors, setErrors] = useState([]);
@@ -175,7 +176,7 @@ export default function HistoryPanel({ lots, points, selectedEntryId, onSelectEn
     <div className="history-panel">
       <section className="history-panel__section">
         <div className="history-panel__section-head">
-          <h2 className="points-panel__title">Histórico de rotas</h2>
+          <h2 className="points-panel__title">Histórico de rotas<ManualInfoButton manual="admin" page={3} onOpen={onOpenManual} /></h2>
           <button type="button" className="history-panel__refresh" onClick={loadRoutes} aria-label="Atualizar histórico de rotas" title="Atualizar">↻</button>
         </div>
 

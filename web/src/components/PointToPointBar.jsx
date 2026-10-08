@@ -11,7 +11,9 @@ import { displayCellName } from '../hooks/useCalibration';
 // numa barrinha de "Tarefas aguardando envio" (ver StagedTasksPanel) e está
 // alterando ela. Enviar vira Salvar, Limpar vira Cancelar edição, e o
 // checkbox de sequência trava (avulsa não vira grupo e vice-versa).
-export default function PointToPointBar({
+import ManualInfoButton from './ManualInfoButton';
+
+export default function PointToPointBar({ onOpenManual,
   pickupNames, dropoffNames, lots, points, onClear, onSend, editing,
   palletType, onPalletTypeChange,
   sequenceMode, onToggleSequenceMode, activeSlot, onActiveSlotChange,
@@ -59,6 +61,7 @@ export default function PointToPointBar({
     <div className="ptp-bar">
       <h2 className="points-panel__title">
         {editing === 'group' ? 'Editando sequência' : editing ? 'Editando tarefa' : 'Ponto a Ponto'}
+        <ManualInfoButton page={18} onOpen={onOpenManual} />
       </h2>
       <p className={'ptp-bar__hint' + (editing ? ' ptp-bar__hint--editing' : '')}>
         {editing

@@ -1,0 +1,16 @@
+{
+  "name": "LIFTY Mapper",
+  "short_name": "LIFTY",
+  "description": "Painel de controle da empilhadeira autônoma LIFTY",
+  "start_url": "/",
+  "scope": "/",
+  "display": "fullscreen",
+  "orientation": "any",
+  "background_color": "#58595b",
+  "theme_color": "#0e1116",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

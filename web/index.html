@@ -10,6 +10,16 @@
          `translate="no"` acima + a meta abaixo bloqueiam a oferta mesmo
          que o Chrome ainda ache necessário. -->
     <meta name="google" content="notranslate" />
+    <!-- Ícone do atalho/aba (pedido do usuário): sem isso o Chrome do tablet
+         não tinha o que mostrar ao criar o atalho na tela inicial. O Chrome
+         usa o apple-touch-icon/manifest pra atalho e o favicon pra aba. -->
+    <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#0e1116" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="LIFTY" />
     <title>LIFTY Mapper</title>
   </head>
   <body>
