@@ -59,6 +59,19 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+# Saída SEMPRE em UTF-8 (com `replace` pra nunca estourar). Rodando como
+# serviço no Windows (ex. NSSM redirecionando pra arquivo), o Python usa a
+# codepage local (cp1252) pra stdout/stderr — e as mensagens de erro do
+# dispatch vêm com ideogramas chineses (ex. "任务模版名称已存在"). Um print()
+# disso levantaria UnicodeEncodeError DENTRO de um handler de erro, e podia
+# derrubar a thread da fila. Só muda o encoding do log, nada de lógica.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        if _stream is not None:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 — stream sem reconfigure (ex. sem console): segue como está
+        pass
+
 
 # --- onde ficam os arquivos ------------------------------------------------
 # Quando empacotado com PyInstaller (--onefile), os recursos embutidos são
@@ -2578,6 +2591,19 @@ def _bootstrap_users_if_missing():
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
+    # Tipos MIME explícitos dos arquivos do app. Sem isso o Python consulta o
+    # registro do Windows (HKEY_CLASSES_ROOT) pra descobrir o tipo — e numa
+    # máquina com o registro "sujo" um `.js` pode sair como text/plain, o que
+    # faz o navegador RECUSAR o bundle do React (tela em branco, sem erro no
+    # servidor). No Linux isso nunca aparece; no Windows/VM, é um clássico.
+    extensions_map = {
+        **http.server.SimpleHTTPRequestHandler.extensions_map,
+        ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript",
+        ".css": "text/css", ".json": "application/json",
+        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".svg": "image/svg+xml",
+        ".ico": "image/x-icon", ".webm": "audio/webm", ".mp3": "audio/mpeg",
+    }
+
     # Arquivos estáticos (index.html, bundle JS/CSS, imagens) continuam
     # públicos de propósito: é o SPA React que decide mostrar a tela de
     # login ou não, então ele precisa carregar SEM sessão pra poder mostrar

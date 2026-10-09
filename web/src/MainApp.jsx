@@ -100,6 +100,12 @@ export default function MainApp({ user, onLogout }) {
   // tinha que reconfigurar toda vez. Como o `user` já chega resolvido do
   // App.jsx, o app monta direto no tema certo, sem piscar no outro.
   const [theme, setTheme] = useState(user.theme === 'light' ? 'light' : 'dark');
+  // Aplica as cores do tema NA RENDERIZAÇÃO (idempotente: só copia valores pro
+  // objeto COLORS), antes dos filhos renderizarem. Só no useEffect abaixo as
+  // células do mapa liam as cores do tema ANTERIOR no render da troca e só
+  // corrigiam no próximo re-render qualquer (antes: o poll de 4s; agora que o
+  // poll não re-renderiza sem mudança, ficariam velhas pra sempre).
+  applyTheme(theme);
 
   // Aplica o tema nos dois lugares que precisam saber: o atributo no
   // <html> (pro CSS via :root[data-theme='light'], index.css) e o
@@ -175,7 +181,9 @@ export default function MainApp({ user, onLogout }) {
   // 'edit' só é alcançável em modo desenvolvedor (ver handleDevButtonClick e
   // baseMode abaixo) — o padrão pra quem não desbloqueou é 'ptp', o modo
   // operacional do dia a dia.
-  const [mode, setMode] = useState('ptp'); // 'edit' | 'ptp' | 'mark' | 'queue'
+  const [mode, setMode] = useState('ptp');
+  const modeRef = useRef(mode); // lido por handlers assíncronos (ver handleCloseUpZoomEnd)
+  modeRef.current = mode; // 'edit' | 'ptp' | 'mark' | 'queue'
   const [addTool, setAddTool] = useState(null); // null | 'point' | 'lot'
   const [pendingLotPrefix, setPendingLotPrefix] = useState('');
   const [selectedId, setSelectedId] = useState(null);
@@ -719,18 +727,26 @@ export default function MainApp({ user, onLogout }) {
   // "VISUALIZANDO: KANBAN X" (CloseUpStatusBanner.jsx).
   //
   // Pedido do usuário (2026-10-07): ao tocar num Close Up em modo Interação
-  // (botão ZOOM +), o app já abre o menu Ponto a Ponto — o operador dá o
-  // zoom e já pode escolher origem/destino, sem outro toque. A seleção de
-  // ptp é preservada (keepRoute, mesmo padrão do "peek mode"). resetSelection
-  // zera o banner, então ele é religado logo depois, pro mesmo Close Up.
-  // Só em Interação: o preview do Close Up no modo desenvolvedor (editar
-  // closes) e o reset de zoom (closeUp nulo) não trocam de modo.
+  // (botão ZOOM +), o app abre o menu Ponto a Ponto — mas SÓ QUANDO O ZOOM
+  // TERMINA (handleCloseUpZoomEnd, abaixo). Trocar de modo no toque fazia o
+  // re-render pesado do mapa (e a troca de largura do menu lateral) cair no
+  // meio da animação de 0,35s, deixando-a truncada. Aqui só liga o banner
+  // "VISUALIZANDO: KANBAN X" (leve), imediatamente.
   function handleCloseUpActivate(closeUp) {
-    if (closeUp && mode === 'interaction') {
-      setMode('ptp');
-      resetSelection({ keepRoute: true });
-    }
     setActiveCloseUpId(closeUp ? closeUp.id : null);
+  }
+
+  // O zoom até o Close Up acabou: agora sim abre o Ponto a Ponto, mantendo a
+  // seleção de ptp em andamento (keepRoute — mesmo padrão do "peek mode").
+  // Só em Interação: o preview do Close Up no modo desenvolvedor e os zooms de
+  // "Visualizar tarefa" não trocam de modo. Idempotente (se o modo já mudou
+  // por outro caminho nesse meio-tempo, não faz nada) — por isso lê o modo
+  // pelo ref, não pelo valor do render que criou o handler.
+  function handleCloseUpZoomEnd(closeUp) {
+    if (!closeUp || modeRef.current !== 'interaction') return;
+    setMode('ptp');
+    resetSelection({ keepRoute: true });
+    setActiveCloseUpId(closeUp.id); // resetSelection zera o banner; religa pro mesmo Close Up
   }
 
   // Pedido do usuário (2026-10-07): clicar em ZOOM - (reset de zoom) afasta o
@@ -1439,6 +1455,7 @@ export default function MainApp({ user, onLogout }) {
           selectedCloseUpId={selectedCloseUpId}
           onSelectCloseUp={handleSelectCloseUp}
           onCloseUpActivate={handleCloseUpActivate}
+          onCloseUpZoomEnd={handleCloseUpZoomEnd}
           onResetViewClick={handleResetViewClick}
           focusRequest={focusRequest}
           closeUpFocusRequest={closeUpFocusRequest}

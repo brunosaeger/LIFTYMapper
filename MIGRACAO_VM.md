@@ -1,92 +1,182 @@
-# Migração do `server.py` pra uma VM — checklist
+# Migração do LIFTY Mapper pra VM Windows — guia e checklist
 
-Contexto: hoje o `server.py` roda num computador local, ligado na mesma
-rede wifi do robô (ex. `PALMARES_ADM`). A ideia é mudar pra uma VM do
-servidor da empresa, com os tablets sempre apontando pro mesmo IP fixo —
-sem depender de inicializar nada numa máquina local.
+**Situação**: hoje o `server.py` roda numa máquina local ligada na wifi do
+robô. O destino é uma VM **Windows Server 2019** da empresa (`aplsrv`, IP fixo
+combinado: `192.168.5.252`), rodando um executável **sem interface**
+(`LIFTY-SERVICE.exe`) registrado como **Serviço do Windows**. Os tablets passam
+a abrir sempre o mesmo endereço: **`http://192.168.5.252:8000`** (confirmar o IP
+na seção 4 antes de configurar qualquer atalho).
 
-Esse documento responde três perguntas: o que passar pro técnico de
-infra, o que você precisa saber dele, e quais cuidados extras pesam nessa
-migração.
+Tudo é um programa só: o `LIFTY-SERVICE.exe` serve o app dos tablets, guarda os
+dados e fala com o robô. Não precisa instalar Python, Node nem nada na VM.
 
-## 1. O que passar pro técnico da infra
+---
 
-**Material**:
-- O código: `server.py` (a aplicação em si) e a pasta `web/dist/` (o
-  frontend já compilado/pronto pra servir — ver abaixo, não precisa
-  compilar de novo na VM).
-- Os arquivos de **dados já existentes** da máquina atual — isso é tão
-  importante quanto o código:
-  - `calibration.json` (o mapa calibrado: pontos, lotes, kanbans)
-  - `users.json` (as contas e senhas já cadastradas)
-  - `route_log.json` (histórico de rotas)
-  - `queue_state.json` (estado da fila — pode ir vazio/zerado, mas o ideal
-    é migrar com o robô parado e a fila vazia, pra não perder nada no meio)
-  - `session_secret.key` (chave que assina os cookies de sessão — se não
-    migrar, todo mundo loga de novo, sem problema real, mas é bom saber)
+## 1. Gerar o executável (você, uma vez, e a cada atualização)
 
-  **Se esses arquivos não forem copiados, o `server.py` simplesmente cria
-  tudo do zero (mapa vazio, sem usuários além do admin padrão)** — ele faz
-  isso sozinho, mas não é o que você quer numa migração.
+O `.exe` só pode ser compilado num Windows — o GitHub Actions faz isso de graça.
 
-**Requisitos de ambiente pra passar pro técnico**:
-- **Python 3** instalado na VM (testado com 3.12 nesta sessão; qualquer
-  3.10+ deve servir — o `server.py` só usa biblioteca padrão do Python,
-  nenhuma dependência externa pra instalar via pip).
-- **Não precisa de Node.js/npm na VM**, desde que a pasta `web/dist/` já
-  venha compilada (é só servir arquivo estático). Node só seria necessário
-  se quiserem recompilar o frontend diretamente na VM no futuro.
-- **Porta**: o servidor escuta na porta **8000** (`LISTEN_PORT` em
-  `server.py`). O técnico precisa garantir que essa porta está liberada no
-  firewall da VM.
-- **Processo persistente**: pedir que `server.py` rode como **serviço**
-  (systemd se a VM for Linux, ou Serviço do Windows / Tarefa Agendada no
-  boot se for Windows) — não como um `python3 server.py` manual numa
-  sessão de terminal, que morre ao desconectar. O serviço precisa:
-  - iniciar sozinho quando a VM ligar/reiniciar;
-  - reiniciar sozinho se o processo cair;
-  - redirecionar a saída (stdout/stderr) pra um arquivo de log.
+1. Garanta que o código está commitado e enviado: `git push origin main`.
+2. No GitHub: repositório `brunosaeger/LIFTYMapper` → aba **Actions** →
+   workflow **"Build LIFTY.exe"** → **Run workflow**.
+3. Quando terminar, baixe o artefato **`LIFTY-SERVICE-windows`** (é um zip com o
+   `LIFTY-SERVICE.exe`). O outro artefato (`LIFTY-windows`) é a versão com janela
+   e **não** é a que vai pra VM.
+4. Esse `.exe` já leva dentro o app compilado (`web/dist`), os manuais, os
+   ícones e os sons.
 
-## 2. O que você precisa saber da infra (pro IP do tablet)
+> Antivírus/SmartScreen podem estranhar um `.exe` sem assinatura digital. Peça
+> pra infra liberar o arquivo (exceção por caminho) antes de registrar o serviço.
 
-- **O IP fixo que a VM vai ter** dentro da rede acessível pelos tablets —
-  peça que seja uma **reserva de DHCP** pelo MAC da VM (ou IP estático
-  configurado nela), não um IP dinâmico qualquer. Esse é o endereço que
-  vai pro atalho de todo tablet.
-- **Confirmação de que os tablets alcançam essa VM**: pergunte
-  explicitamente "um dispositivo na rede wifi dos tablets consegue acessar
-  o IP da VM na porta 8000?" — isso não é garantido só por "estar na
-  mesma empresa". Veja o cuidado #1 abaixo, é o ponto mais arriscado dessa
-  migração.
-- **Confirmação de que a VM alcança o robô**: pergunte se a VM tem rota de
-  rede até o IP do robô (hoje algo como `192.168.5.195`, mas confirme o
-  atual). Sem isso, o `server.py` não despacha tarefa nenhuma, mesmo
-  rodando perfeitamente.
+## 2. O que entregar pro técnico de infra
 
-## 3. Cuidados que pesam nessa migração
+**Arquivos**
+- `LIFTY-SERVICE.exe` (artefato do passo 1).
+- `nssm.exe` (https://nssm.cc/ — o infra pode baixar; é quem transforma o `.exe`
+  em serviço).
+- Os **arquivos de dados desta máquina** (copiar pra mesma pasta do `.exe`) —
+  são tão importantes quanto o código, e **não estão no GitHub** (de propósito):
+  | Arquivo | O que é | Obrigatório? |
+  |---|---|---|
+  | `calibration.json` | o mapa calibrado: pontos, lotes, kanbans, ocupação | **sim** |
+  | `users.json` | contas e senhas já criadas | **sim** |
+  | `session_secret.key` | chave que assina os logins (sem ela todo mundo só loga de novo) | recomendado |
+  | `route_log.json` | histórico de rotas | opcional |
+  | `queue_state.json` | fila | **não levar** — o servidor limpa a fila toda vez que sobe |
+  | `robot_host.txt` | IP do robô (ver seção 3, item "robô") | opcional, recomendado |
 
-1. **VLAN/segmentação de rede entre a VM e a rede wifi do chão de
-   fábrica** — esse é o risco real, não o Python em si. VMs de servidor
-   corporativo costumam viver numa rede de datacenter SEPARADA da rede
-   wifi do chão de fábrica, por segurança. Se a VM não tiver rota
-   liberada até os tablets E até o robô, nada funciona, mesmo com tudo
-   configurado certo. Vale validar isso com a infra ANTES de desligar a
-   máquina atual.
-2. **Relógio da VM sincronizado (NTP)** — o histórico de rotas usa o
-   horário da máquina que roda o `server.py` pra carimbar cada registro.
-   Se o relógio da VM estiver errado, os horários no Histórico ficam
-   errados.
-3. **Não expor a porta 8000 pra internet** — o sistema foi desenhado pra
-   rede local fechada (ver conversa anterior sobre dependência de rede vs.
-   internet). Reforce com a infra que isso NÃO deve ter NAT/port-forward
-   pra fora, nem ficar acessível fora da rede local da empresa.
-4. **Testar ponta a ponta ANTES de trocar os atalhos de todos os
-   tablets** — com a VM de pé, confirme que ela consegue falar com o robô
-   (abrir o app, ver o status do robô ao vivo) antes de atualizar o
-   atalho em cada tablet. Só depois disso desligar/aposentar a máquina
-   antiga.
-5. **Backup antes de migrar** — tire uma cópia dos arquivos de dados
-   (item 1) e, se possível, um snapshot da VM recém-configurada, antes de
-   depender dela em produção.
-6. **Decidir o destino da máquina antiga** — mantê-la como standby por
-   um tempo (caso a VM dê problema) é mais seguro do que desligar na hora.
+  Sem `calibration.json`/`users.json`, o servidor cria tudo do zero (mapa
+  vazio e um admin com **senha aleatória impressa uma única vez no log**).
+  Evite: leve os arquivos.
+
+**Pedidos pra infra** (cada um tem um motivo):
+1. **Pasta própria com escrita**, por exemplo `C:\LIFTY\` — **não** em
+   `Program Files`. O serviço grava os arquivos de dados ao lado do `.exe`.
+2. **Serviço do Windows** via NSSM, iniciando sozinho no boot e reiniciando se
+   cair (comandos na seção 5).
+3. **IP fixo da VM**: reserva por MAC no DHCP **ou** IP estático configurado na
+   VM — não um IP dinâmico qualquer. É o endereço que vai no atalho dos tablets.
+4. **Firewall da VM**: liberar entrada **TCP 8000**.
+5. **Rotas de rede (o ponto mais arriscado)**:
+   - **tablets → VM**, porta 8000. Pergunte explicitamente: "um aparelho na
+     wifi dos tablets consegue abrir `http://192.168.5.252:8000`?".
+   - **VM → robô**, portas **80** (API do dispatch e SLAM) e **8091** (bridge de
+     "posso girar aqui?"). Sem isso o servidor roda, mas nenhuma tarefa é
+     despachada.
+   - VMs de datacenter costumam ficar em rede separada da wifi do chão de fábrica
+     por segurança: validar **antes** de desligar a máquina atual.
+6. **Relógio sincronizado (NTP)** — o histórico carimba horários com o relógio
+   da VM.
+7. **Não expor a porta 8000 pra internet** (sem NAT/port-forward). O sistema foi
+   desenhado pra rede local fechada, em HTTP simples.
+8. **Antivírus**: exceção pra `C:\LIFTY\LIFTY-SERVICE.exe`.
+9. **Backup**: snapshot da VM e cópia periódica dos arquivos de dados acima.
+10. **Acesso remoto** pra você (RDP) à VM, pra ver o log e reiniciar o serviço.
+
+## 3. Pontos de atenção (o que eu verifiquei no código)
+
+- **Executável sem interface**: o `lifty_headless.spec` empacota o próprio
+  `server.py`. Ao subir ele faz, sozinho: descoberta do IP do robô, limpeza da
+  fila antiga (cancelando no robô a "próxima rota" que tivesse sobrado), e fica
+  escutando em `0.0.0.0:8000`. Não precisa de ninguém clicando.
+- **Dados ficam ao lado do `.exe`** (não na pasta temporária), então reiniciar a
+  VM ou atualizar o `.exe` **não perde nada** — desde que a pasta seja mantida.
+- **Ao subir, a fila é descartada** de propósito: reiniciar o serviço (ou a VM)
+  cancela o que estava esperando, pra o robô não começar tarefa velha. Uma rota
+  **em andamento** já disparada é mantida e conferida contra o robô.
+- **IP do robô (`192.168.5.195` hoje)**: se `robot_host.txt` existir com o IP, o
+  servidor usa direto. Se o robô trocar de IP, ele varre a rede /24 da VM (254
+  endereços, ~3 s) procurando quem responde — **isso só funciona se a VM e o
+  robô estiverem na mesma faixa `192.168.5.x`**. Pra evitar essa varredura
+  (que alguns firewalls leem como "port scan"), peça uma **reserva de DHCP pro
+  robô** também e deixe o `robot_host.txt` com o IP dele.
+- **Bridge do robô (porta 8091)**: é o programa `robot-bridge/` rodando **no
+  computador do robô**, que responde se é seguro girar. Hoje ele sobe **na mão**
+  (via SSH) e **não volta sozinho** se o robô reiniciar. Sem ele, o sistema
+  segue funcionando no comportamento antigo (sem a checagem de giro seguro). É
+  uma decisão a tomar com a REEMAN/infra: deixar o bridge subir no boot do robô.
+- **Duas correções que fiz agora no `server.py`** (só pra rodar como serviço no
+  Windows, sem mexer em nada de fila/robô):
+  1. **Saída sempre em UTF-8**: as mensagens de erro do dispatch vêm em chinês; no
+     Windows, com a saída redirecionada pra arquivo, isso podia gerar erro dentro
+     de um tratamento de erro e derrubar a thread da fila.
+  2. **Tipos de arquivo (MIME) explícitos**: no Windows o Python consulta o
+     registro; em máquina com registro "sujo" um `.js` sai como `text/plain` e o
+     navegador **recusa o app (tela em branco)**.
+- **Primeira execução = o log mostra a senha do admin** só se `users.json` não
+  existir. Levando o `users.json`, isso não acontece.
+- **Log**: o serviço imprime uma linha por requisição (cada tablet consulta a
+  cada 4 s) — configure rotação de log no NSSM (seção 5), senão cresce sem parar.
+- **Executável "onefile"**: a cada início ele se extrai numa pasta temporária
+  (`_MEIxxxxx`, ~25 MB). Num reinício normal ele limpa; se o processo for
+  morto à força, a pasta fica. Irrelevante pra poucos reinícios; se virar
+  problema, dá pra gerar uma versão "onedir".
+- **Sem HTTPS**: de propósito (rede industrial local). Os tablets abrem
+  `http://IP:8000`. O Chrome mostra "não seguro" — é esperado.
+
+## 4. Checklist: descobrir/confirmar o IP que vai no atalho dos tablets
+
+O endereço é o IP da **VM** (não o do robô), porta 8000. Todos os tablets usam
+o **mesmo** endereço.
+
+- [ ] Infra confirmou **por escrito** o IP da VM e que é **fixo** (reserva por MAC
+      ou estático). IP previsto: `192.168.5.252`. ____________
+- [ ] Na VM (PowerShell): `ipconfig /all` → o "Endereço IPv4" bate com o
+      combinado, e em "DHCP habilitado" aparece **Não** (estático) — ou a infra
+      mostra a reserva por MAC.
+- [ ] Na VM: o serviço está rodando — `Get-Service LIFTY-SERVICE` → `Running`.
+- [ ] Na VM: `Test-NetConnection 192.168.5.195 -Port 80` → `TcpTestSucceeded: True`
+      (VM alcança o robô). Idem `-Port 8091` (bridge, se estiver no ar).
+- [ ] Na própria VM: abrir `http://localhost:8000` → aparece a tela de login.
+- [ ] **De um tablet, na wifi do chão de fábrica**: abrir
+      `http://192.168.5.252:8000` no Chrome → aparece a tela de login. **Este é o
+      teste que decide tudo** — se falhar aqui e funcionar na VM, é rede/firewall,
+      não o programa.
+- [ ] Logar com um usuário e ver o status do robô ao vivo (barra no topo mostra
+      carga/bateria) → prova que a VM está falando com o robô.
+- [ ] Só então: em **cada tablet**, no Chrome, abrir `http://192.168.5.252:8000` →
+      menu (⋮) → **Adicionar à tela inicial**. (Apague o atalho antigo antes —
+      o Chrome grava o ícone na criação.)
+- [ ] Testar uma tarefa de verdade, com o robô parado e acompanhado: enviar,
+      acompanhar na Fila, cancelar.
+- [ ] Só depois de tudo isso: desligar a máquina antiga (idealmente deixá-la um
+      tempo como reserva).
+
+Dica: se o IP um dia mudar, **todos os atalhos precisam ser refeitos**. Por isso
+a reserva fixa é tão importante. (Usar o nome `aplsrv` em vez do IP só funciona
+se o DNS da wifi dos tablets resolver esse nome — não conte com isso.)
+
+## 5. Registrar como serviço (PowerShell como administrador, na VM)
+
+```powershell
+# 1) copie LIFTY-SERVICE.exe, nssm.exe e os arquivos de dados pra C:\LIFTY\
+mkdir C:\LIFTY\logs
+
+# 2) firewall
+New-NetFirewallRule -DisplayName "LIFTY 8000" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow
+
+# 3) serviço
+C:\LIFTY\nssm.exe install LIFTY-SERVICE C:\LIFTY\LIFTY-SERVICE.exe
+C:\LIFTY\nssm.exe set LIFTY-SERVICE AppDirectory C:\LIFTY
+C:\LIFTY\nssm.exe set LIFTY-SERVICE Start SERVICE_AUTO_START
+C:\LIFTY\nssm.exe set LIFTY-SERVICE AppStdout C:\LIFTY\logs\lifty.log
+C:\LIFTY\nssm.exe set LIFTY-SERVICE AppStderr C:\LIFTY\logs\lifty.log
+C:\LIFTY\nssm.exe set LIFTY-SERVICE AppRotateFiles 1
+C:\LIFTY\nssm.exe set LIFTY-SERVICE AppRotateBytes 10485760
+C:\LIFTY\nssm.exe set LIFTY-SERVICE AppExit Default Restart
+C:\LIFTY\nssm.exe set LIFTY-SERVICE AppRestartDelay 5000
+C:\LIFTY\nssm.exe start LIFTY-SERVICE
+```
+
+Pra atualizar o programa depois: `nssm stop LIFTY-SERVICE`, trocar o `.exe`
+(mantendo os arquivos de dados), `nssm start LIFTY-SERVICE`. Parar/subir o
+serviço descarta a fila (ver seção 3) — faça com o robô ocioso.
+
+## 6. Pós-migração
+
+- Conferir o log (`C:\LIFTY\logs\lifty.log`): deve mostrar o IP do robô
+  encontrado e "Painel disponivel em http://localhost:8000".
+- Se um `users.json` novo foi criado (senha aleatória no log), trocar a senha do
+  `admin` pela tela de Usuários.
+- Guardar uma cópia dos arquivos de dados num lugar seguro depois do primeiro dia
+  de uso real.

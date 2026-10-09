@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { Stage, Layer, Image as KonvaImage, Rect, Text, Line, Circle, Group, Transformer } from 'react-konva';
 import useImage from 'use-image';
 import Konva from 'konva';
@@ -411,7 +411,16 @@ function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNu
 // Uma célula de lote — extraída em componente próprio (em vez de inline no
 // .map() de LotMarker) porque precisa da sua própria ref+efeito pra animar o
 // crescimento no modo Ponto a Ponto, e hooks não podem viver dentro de loop.
-function LotCell({ name, displayName, index, cellSize, fill, stroke, xColor, showName, isOccupied, isPreviewing, seqNumber, lotRotation, lotScaleX, lotScaleY, gestureActive, isHovered, isSelectedEndpoint, invalidPulseActive, invalidPulseId, onHoverEnter, onHoverLeave, onPressStart }) {
+//
+// Memoizada (React.memo, comparação rasa): num mapa com ~218 células, um
+// re-render do canvas (hover, polling, banner...) refazia TODAS elas e o
+// react-konva ainda reatribuía eventos/props de cada nó. Todas as props
+// abaixo são primitivas ou funções ESTÁVEIS (ver stableHoverEnter etc. em
+// FloorPlanCanvas), então a célula só re-renderiza quando algo que a afeta
+// muda de fato. `themeKey` não é usado no corpo: existe só pra invalidar o
+// memo quando o tema claro/escuro troca (COLORS é mutado em lugar — os
+// COLORS.* lidos aqui dentro não aparecem em nenhuma prop).
+const LotCell = memo(function LotCell({ name, displayName, index, cellSize, fill, stroke, xColor, showName, isOccupied, isPreviewing, seqNumber, lotRotation, lotScaleX, lotScaleY, gestureActive, isHovered, isSelectedEndpoint, invalidPulseActive, invalidPulseId, onHoverEnter, onHoverLeave, onPressStart, themeKey }) {
   const cellRef = useRef(null);
   const pulseRingRef = useRef(null);
   usePtpScale(cellRef, gestureActive ? ptpTargetScale(isHovered, isSelectedEndpoint) : 1);
@@ -482,7 +491,7 @@ function LotCell({ name, displayName, index, cellSize, fill, stroke, xColor, sho
       <Circle ref={pulseRingRef} radius={cellSize * 0.75} stroke={COLORS.stateError} strokeWidth={3} opacity={0} visible={false} listening={false} />
     </Group>
   );
-}
+});
 
 // Lote: linha ou coluna de células grudadas (mesmo passo = cellSize), uma
 // única unidade arrastável/rotacionável/redimensionável. Em Ponto a Ponto,
@@ -578,6 +587,7 @@ function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames,
               onHoverEnter={onHoverEnter}
               onHoverLeave={onHoverLeave}
               onPressStart={onPressStart}
+              themeKey={COLORS.textPrimary + '|' + COLORS.stateError + '|' + COLORS.panelBase}
             />
           );
         })}
@@ -691,6 +701,7 @@ export default function FloorPlanCanvas({
   selectedCloseUpId,
   onSelectCloseUp,
   onCloseUpActivate,
+  onCloseUpZoomEnd,
   onResetViewClick,
   // "Visualizar tarefa" (ver MainApp.jsx): { name, id } — `id` muda a cada
   // pedido (mesmo repetindo o nome), é ele que dispara o zoom até o kanban
@@ -755,6 +766,10 @@ export default function FloorPlanCanvas({
   const [stageScale, setStageScale] = useState(0); // 0 = ainda não inicializado
   const [stagePos, setStagePos] = useState({ x: 0, y: 0 });
   const stageRef = useRef(null);
+  // Handler mais recente de "o zoom até um Close Up terminou" (ver MainApp). Em
+  // ref porque é chamado ~0,35s depois do toque, de dentro do onFinish.
+  const zoomEndRef = useRef(onCloseUpZoomEnd);
+  zoomEndRef.current = onCloseUpZoomEnd;
   // Guarda PRA QUAL vista o zoom/pan já foi centralizado — trocar de vista
   // (imagem diferente, dimensões diferentes) precisa reinicializar o
   // enquadramento, não só na primeira vez que a Stage aparece.
@@ -839,6 +854,9 @@ export default function FloorPlanCanvas({
       onFinish: () => {
         setStageScale(newScale);
         setStagePos(newPos);
+        // Avisa o MainApp que o zoom ACABOU (ele troca de menu agora, e não
+        // no toque: o re-render pesado do mapa não cai no meio da animação).
+        zoomEndRef.current?.(closeUp);
       },
     });
   }
@@ -1088,6 +1106,18 @@ export default function FloorPlanCanvas({
   function handleHoverLeave(name) {
     setHoveredName((h) => (h === name ? null : h));
   }
+
+  // Versões ESTÁVEIS (identidade fixa entre renders) dos três handlers que as
+  // células recebem — senão o React.memo de LotCell nunca bateria (função nova
+  // a cada render = prop diferente). Sempre chamam a versão MAIS RECENTE
+  // (latestHandlersRef é atualizado a cada render), então não há valor
+  // "velho" de `mode` etc.: o comportamento é idêntico ao de passar a função
+  // direto, só sem trocar a identidade.
+  const latestHandlersRef = useRef(null);
+  latestHandlersRef.current = { handleHoverEnter, handleHoverLeave, handleMarkerPressStart };
+  const stableHoverEnter = useCallback((name) => latestHandlersRef.current.handleHoverEnter(name), []);
+  const stableHoverLeave = useCallback((name) => latestHandlersRef.current.handleHoverLeave(name), []);
+  const stablePressStart = useCallback((name) => latestHandlersRef.current.handleMarkerPressStart(name), []);
 
   function commitOnRelease() {
     finishLotDrag();
@@ -1465,9 +1495,9 @@ export default function FloorPlanCanvas({
                 invalidPulseName={invalidPulseName}
                 invalidPulseId={invalidPulseId}
                 onSelectLot={onSelectLot}
-                onHoverEnter={handleHoverEnter}
-                onHoverLeave={handleHoverLeave}
-                onPressStart={handleMarkerPressStart}
+                onHoverEnter={stableHoverEnter}
+                onHoverLeave={stableHoverLeave}
+                onPressStart={stablePressStart}
                 onChange={(id, patch) => {
                   const next = { ...patch };
                   if ('x' in next) next.x = next.x / image.width;
