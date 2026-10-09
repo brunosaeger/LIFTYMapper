@@ -4942,3 +4942,28 @@ do robô diz carregar mas a pasta está vazia. O Ubuntu do robô (`rbot55f`) nã
 tem placa de som (`aplay -l`) nem arquivo de áudio nenhum; o serviço de
 dispatch roda de `/mnt/reeman-dispatch-cloud/deploy-service/`. Provável que a
 pasta/saída de áudio seja do tablet Android da tela do robô. Sem conclusão.
+
+## Alerta de robô parado — variante "sensor do garfo" (IMPLEMENTADO 2026-10-09, AINDA NÃO VALIDADO EM CAMPO)
+
+Pedido do usuário: se o robô para tempo suficiente pro alerta vermelho (≥60s
+parado, não carregando, com rota) **perto da origem e alinhado com ela**, o
+texto muda pra: "Sensor do garfo detectou o pallet como objeto, use o modo
+manual para abaixar o garfo. Fique atento ao espaçamento correto entre
+pallets!" (`ROBOT_STALLED_AT_ORIGIN_MESSAGE`). O aviso genérico segue pra todo
+o resto.
+
+**Como decide** (`_refresh_stall_at_origin`, thread de fundo, chamada em todo
+`_queue_tick` logo depois de `_refresh_robot_status`; o `GET /api/live-state` só
+lê o resultado de `_robot_status_cache["stalledAtOrigin"]`, nunca fala com o
+robô): rota atual com `taskName`, `pickup` e SEM `unloadOnly`, `pickupCleared`
+falso (ainda não pegou o pallet) **e**:
+- "perto": distância robô↔ponto de origem OU robô↔docking `H<origem>` ≤
+  `STALL_AT_ORIGIN_RADIUS_METERS` (1,5 m);
+- "alinhado": diferença entre o `theta` do robô e o `theta` calibrado do ponto
+  de origem ≤ `STALL_AT_ORIGIN_MARGIN_DEGREES` (30°) — mesma referência e mesma
+  margem do cancelamento por alinhamento de docking (validadas em campo).
+Qualquer falha (pose indisponível, ponto não existe no mapa, rede) cai no aviso
+genérico. O resultado é guardado junto do id da rota, pra nunca valer pra outra.
+**Os 1,5 m / 30° foram escolhidos por coerência, não medidos neste caso** — se
+o aviso errar de tipo em campo, ajustar essas duas constantes. Só gasta
+chamadas ao robô enquanto o alerta está disparado.

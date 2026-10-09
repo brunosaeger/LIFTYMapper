@@ -861,7 +861,7 @@ def _current_route_cancel_ready(current, pickup_cleared):
 # _emergency_suppress), os handlers HTTP só leem — assim nenhum poll de
 # tablet bate no robô direto, e não têm N tablets multiplicando chamada.
 # `stationarySince`: ver "Alerta de robô parado" abaixo.
-_robot_status_cache = {"charging": None, "battery": None, "returningToCharge": False, "stationarySince": None}  # None = ainda não sabemos (1ª leitura não chegou ainda)
+_robot_status_cache = {"charging": None, "battery": None, "returningToCharge": False, "stationarySince": None, "stalledAtOrigin": None}  # None = ainda não sabemos (1ª leitura não chegou ainda)
 
 # --- Alerta de robô parado (pedido do usuário, 2026-10-02) -----------------
 # "Parado há 1 minuto + rota de verdade em andamento (taskName já disparado
@@ -875,6 +875,16 @@ STALL_VX_EPSILON_MPS = 0.02
 STALL_VTH_EPSILON_DEG_S = 1.0
 STALL_ALERT_SECONDS = 60
 ROBOT_STALLED_MESSAGE = "ROBÔ PARADO! Remova obstáculos ou use o modo manual."
+# Variante do alerta vermelho (pedido do usuário, 2026-10-09): robô parado
+# PERTO da origem da rota e ALINHADO com ela, antes de pegar o pallet — aí o
+# problema não é caminho obstruído, é o sensor do garfo enxergando o próprio
+# pallet como objeto (espaçamento entre pallets pequeno demais), e a ação
+# certa é abaixar o garfo no modo manual. Mesmas constantes de "perto" e
+# "alinhado" do cancelamento por alinhamento de docking (validadas em campo).
+ROBOT_STALLED_AT_ORIGIN_MESSAGE = ("Sensor do garfo detectou o pallet como objeto, use o modo manual "
+                                   "para abaixar o garfo. Fique atento ao espaçamento correto entre pallets!")
+STALL_AT_ORIGIN_RADIUS_METERS = 1.5
+STALL_AT_ORIGIN_MARGIN_DEGREES = 30.0
 
 
 # `battery` em `/reeman/base_encode` (documentado, nunca lido até agora —
@@ -926,6 +936,39 @@ def _refresh_robot_status():
         _robot_status_cache["stationarySince"] = None
 
 
+def _refresh_stall_at_origin():
+    """Roda na thread de fundo (mesmo ciclo de _refresh_robot_status): quando o
+    robô está parado há tempo suficiente pro alerta vermelho E a rota atual
+    ainda não pegou o pallet, confere se ele está perto da origem e alinhado
+    com ela. Guarda o resultado (e de QUAL rota) em _robot_status_cache — o
+    GET /api/live-state de cada tablet só lê isso, nunca fala com o robô. Só
+    gasta chamadas ao robô enquanto o alerta está de fato disparado (raro)."""
+    result, route_id = False, None
+    try:
+        since = _robot_status_cache.get("stationarySince")
+        if since is not None and not _robot_status_cache.get("charging") \
+                and time.monotonic() - since >= STALL_ALERT_SECONDS:
+            with QUEUE_LOCK:
+                state = _read_queue_state()
+            cur = state.get("currentRoute") or {}
+            pickup = cur.get("pickup")
+            if pickup and cur.get("taskName") and not cur.get("unloadOnly") and not state.get("pickupCleared"):
+                route_id = cur.get("id")
+                pose = robot_pose()
+                pallet = robot_find_point_position(pickup)
+                docking = robot_find_point_position("H" + pickup)
+                if pallet is not None:
+                    dists = [math.hypot(pose["x"] - pt["x"], pose["y"] - pt["y"]) for pt in (pallet, docking) if pt is not None]
+                    diff = abs(_normalize_angle_degrees(pallet["theta"] - pose["theta"]))
+                    result = min(dists) <= STALL_AT_ORIGIN_RADIUS_METERS and diff <= STALL_AT_ORIGIN_MARGIN_DEGREES
+                    print("robô parado: perto da origem '%s'=%s (dist=%.2fm, diff angular=%.1f°)" % (pickup, result, min(dists), diff))
+    except Exception as err:  # robô/rede indisponível: cai na mensagem genérica
+        print("robô parado: não deu pra checar a origem (%s) -- usa o aviso genérico." % err)
+        result, route_id = False, None
+    _robot_status_cache["stalledAtOrigin"] = result
+    _robot_status_cache["stalledAtOriginRouteId"] = route_id
+
+
 # Condição final do alerta (ver "Alerta de robô parado" acima): combina o
 # rastreio de velocidade (stationarySince) com o estado da fila. QUALQUER
 # rota conta -- reservada esperando giro seguro pra começar (turnBlocked),
@@ -942,6 +985,9 @@ def _robot_stalled_message(state):
         return None
     if time.monotonic() - since < STALL_ALERT_SECONDS:
         return None
+    current = state.get("currentRoute") or {}
+    if _robot_status_cache.get("stalledAtOrigin") and _robot_status_cache.get("stalledAtOriginRouteId") == current.get("id"):
+        return ROBOT_STALLED_AT_ORIGIN_MESSAGE
     return ROBOT_STALLED_MESSAGE
 
 
@@ -2099,6 +2145,7 @@ def _emergency_suppress():
 # de uma ação concluída com sucesso).
 def _queue_tick():
     _refresh_robot_status()  # sempre, independente de emergência/rota em andamento
+    _refresh_stall_at_origin()  # só gasta chamadas ao robô com o alerta de parado já disparado
 
     # Emergência tem precedência sobre tudo: a fila já foi esvaziada (ver
     # _queue_emergency), então aqui só se reprime a task de carga recriada.
