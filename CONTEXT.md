@@ -4967,3 +4967,41 @@ genérico. O resultado é guardado junto do id da rota, pra nunca valer pra outr
 **Os 1,5 m / 30° foram escolhidos por coerência, não medidos neste caso** — se
 o aviso errar de tipo em campo, ajustar essas duas constantes. Só gasta
 chamadas ao robô enquanto o alerta está disparado.
+
+## Investigação 2026-10-14 — demora de ~2 min pra INICIAR rota saindo dos docking points ligados ao P3 (ANÁLISE ENCERRADA, causa NÃO confirmada)
+
+**Sintoma (usuário)**: cancelando/redirecionando nos docking points HEXA, HD, HC,
+HB, HA, HMA–HMD, HNA–HND, HOA–HOD, o robô segue certo (chega no giro seguro,
+cancela, a próxima tarefa é atribuída), mas leva > 1 min pra INICIAR ("Initializing
+task information" no display do robô).
+
+**Medido** (leitura só-GET de `task-record`/`action-record`/`error/records`/pose; nada
+foi alterado no robô):
+- Nosso lado está limpo: a fila local dispara a próxima no MESMO segundo do
+  cancelamento, sem `cancelPending`/`turnBlocked`/`awaitingCharge`; a dispatch atribui
+  em 0–5 s. O atraso é do robô: do `ASSIGNED` até o PICKUP virar `RUNNING`.
+- `FB5toFB4MT6` saindo do mesmo lugar (HB/HC): **134 s** (#67950) e **135 s**
+  (#67954) — repetível, parece tempo fixo, não acaso. Já `BtoB2MT6` (rota curta na
+  mesma região) inicia em **12–14 s** nas 5 medições. Depois de `RUNNING` o robô se
+  move em ~1 s (gira ~65° e sai a 1 m/s) → a espera é TODA antes de iniciar.
+- Tendência: mediana criada→início era 1–2 s no começo de outubro; hoje o "normal" já
+  é ~13 s. Piora gradual (p90 de atribuída→início: 4 s em 02/10, 56 s em 10/10).
+- Mapa (`GET /map/list/details/13`, campo `edges`): **P3 é um hub com 23 ligações**,
+  incluindo TODOS os pontos citados acima (HEXA, HA–HD, HM*, HN*, HO*); HEXA/HA–HD
+  também ligam no P10. Caminho mais curto HB→HFB5 pelo grafo (cálculo nosso, o
+  planejador do robô pode escolher outro): ~80 m, curvas de 115° em P15 e 89° em P12.
+- `SELF_DISCOVERY_FINISHED` ("câmera não reconheceu o pallet") aparece também em coletas
+  normais SEM cancelamento (o robô alinhado em B procura pallet e repete a ~10 s) —
+  então a câmera NÃO explica esse atraso (hipótese anterior, enfraquecida).
+- Relógios: `task-record`/`action-record` estão em hora da dispatch (= hora local −
+  ~5h02m37s, ou seja local = dispatch + 5:02:37); `error/records` do robô vem em hora do
+  robô (= local + 11h); `CONNECTION_BROKEN` vem em hora da dispatch. Não misturar.
+
+**Hipótese em aberto (do usuário, coerente com os dados)**: o planejamento de rota a
+partir dessa região (hub P3 com muitas arestas longas e curvas fechadas no caminho)
+é caro/lento no robô. NÃO confirmada — só 2 medições do mesmo trajeto.
+
+**Testes que fechariam** (não feitos): (1) rota longa partindo de outro lugar (ex.
+HCAZ→F); (2) rota curta partindo do mesmo ponto (HB→destino perto); (3) o inverso
+(F→região). Se confirmar, a correção é na REEMAN (grafo/limite de cálculo de rota),
+não no `server.py`.
