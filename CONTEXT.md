@@ -5005,3 +5005,47 @@ partir dessa região (hub P3 com muitas arestas longas e curvas fechadas no cami
 HCAZ→F); (2) rota curta partindo do mesmo ponto (HB→destino perto); (3) o inverso
 (F→região). Se confirmar, a correção é na REEMAN (grafo/limite de cálculo de rota),
 não no `server.py`.
+
+### Atualização 2026-10-14 (tarde) — CAUSA ENCONTRADA no log do dispatch + aviso "Planejando a rota"
+
+**O atraso NÃO é do robô nem do ROS**: o ROS fica em silêncio (nenhum goal) e o app do
+robô reage ao cancelamento em ~0,1 s. A espera é o **planejador do dispatch**
+(`PathPlanningUtils`, contêiner Docker `dispatch-service` no próprio robô, porta 8080;
+junto rodam `mysql`, `redis`, `emqx`). Log: `sudo docker logs -t dispatch-service`
+(guarda dias; timestamps em UTC no prefixo do Docker, hora do robô no corpo = nossa hora
+− 5h03).
+- Cada planejamento roda N "ciclos" (`agv width`) de ~4,7 s; o dispatch avalia caminhos
+  candidatos saindo de cada aresta que passa pela posição do robô. Rota curta HB→HB:
+  53 ms; HB→FB5 (22 m): **28 ciclos = ~132 s**.
+- **Depende de ONDE o robô está**, não do cancelamento em si: depois de tarefa normal o
+  robô fica no nó do LOTE (C, C4, B…) e a mesma rota longa planeja em **~10 s / 2 ciclos**
+  (teste de campo 2026-10-14 13:38: 2ª tarefa da fila saiu "instantânea"). Parado num
+  docking do corredor (HB, HC, HD, HA, HEXA…, ou `virtual_*` ali perto) = 28–35 ciclos,
+  mesmo p/ destino curto (HC→HB, 1,2 m: 12 s).
+- Histórico no log (07→14/10): até 10/10 a maioria tinha 1–11 ciclos (docking do
+  corredor já chegava a 15–18, ~50 s); a partir de 14/10, 28–35. Usuário confirmou ter
+  **adicionado pontos no mapa depois de 10/10** — provável causa do salto. As ligações
+  diretas dos pontos H* com o P3 são NECESSÁRIAS (sem elas o dispatch dá erro de angulação /
+  "ponto muito distante"), então não dá pra só removê-las.
+- Config "Tratamento de falha de coleta" (10 tentativas, SKIP, espera 180 s) NÃO é a causa.
+- Fábrica avisou que ~140 s de espera "não é problema". Seguiu só o aviso na tela.
+- Possíveis otimizações futuras (NÃO feitas): remover arestas P10–{HEXA,HD,HC,HB} (mantendo
+  todas as do P3); perguntar à REEMAN por parâmetro que limite os candidatos.
+
+**Aviso "Planejando a rota" (IMPLEMENTADO 2026-10-14, AINDA NÃO VALIDADO EM CAMPO)** —
+só informa; não muda fila/disparo/cancelamento:
+- Server: `_refresh_route_planning_wait()` (thread de fundo, após `_refresh_stall_at_origin`)
+  + `_note_route_record()` (reaproveita o task-record que o `_queue_tick` já lê, status
+  RUNNING/terminal = começou). Só pergunta a pose (`/reeman/pose`) quando a rota atual foi
+  disparada, não está RUNNING, o robô está parado e não carrega. "No corredor" =
+  distância à reta **P3–P10** ≤ 1,2 m (docking das 2 colunas ≤ 0,8 m; nós de lote ≥ 1,7 m —
+  lotes ficam FORA, de propósito). Posições de P3/P10 vêm de `/map/point/list` (cache 10 min).
+- Menta (`variant='info'` no `CancelPendingBanner`, junto ao header, toca o aviso uma vez)
+  enquanto < 140 s: campo `routePlanningMessage` do `/api/live-state`. Passou de 140 s
+  (`ROUTE_PLANNING_LATE_SECONDS`): `robotStalledMessage` vira `ROUTE_PLANNING_LATE_MESSAGE`
+  (vermelho, centralizado, som em loop — o `danger` de sempre).
+- Durante a espera o alerta genérico de "robô parado" (`STALL_ALERT_SECONDS`, agora **40 s**, era 60 s — mudado a pedido do usuário em 2026-10-14; vale também pra variante "sensor do garfo") é SUPRIMIDO
+  (`_robot_stalled_message` retorna None) — senão apareceria o vermelho "ROBÔ PARADO!" no
+  meio da espera normal. Fora dessa condição o comportamento é o de antes.
+- Constantes pra ajustar: `ROUTE_PLANNING_CORRIDOR_HALF_WIDTH_METERS`,
+  `ROUTE_PLANNING_CORRIDOR_POINTS`, `ROUTE_PLANNING_LATE_SECONDS`.

@@ -864,7 +864,7 @@ def _current_route_cancel_ready(current, pickup_cleared):
 _robot_status_cache = {"charging": None, "battery": None, "returningToCharge": False, "stationarySince": None, "stalledAtOrigin": None}  # None = ainda não sabemos (1ª leitura não chegou ainda)
 
 # --- Alerta de robô parado (pedido do usuário, 2026-10-02) -----------------
-# "Parado há 1 minuto + rota de verdade em andamento (taskName já disparado
+# "Parado há 40 s (era 1 minuto até 2026-10-14) + rota de verdade em andamento (taskName já disparado
 # -- reservada/esperando check-turn/esperando carga NÃO conta, o robô nem
 # devia estar se movendo ainda) + não carregando" -- sintoma de caminho
 # obstruído ou desvio de rota que o robô não resolve sozinho. `vx`/`vth`
@@ -873,7 +873,7 @@ _robot_status_cache = {"charging": None, "battery": None, "returningToCharge": F
 # em vez de exatamente zero, por ruído normal de sensor até parado.
 STALL_VX_EPSILON_MPS = 0.02
 STALL_VTH_EPSILON_DEG_S = 1.0
-STALL_ALERT_SECONDS = 60
+STALL_ALERT_SECONDS = 40  # era 60 s; reduzido a pedido do usuário (2026-10-14)
 ROBOT_STALLED_MESSAGE = "ROBÔ PARADO! Remova obstáculos ou use o modo manual."
 # Variante do alerta vermelho (pedido do usuário, 2026-10-09): robô parado
 # PERTO da origem da rota e ALINHADO com ela, antes de pegar o pallet — aí o
@@ -969,6 +969,123 @@ def _refresh_stall_at_origin():
     _robot_status_cache["stalledAtOriginRouteId"] = route_id
 
 
+# --- Aviso de "planejando a rota" no corredor P3–P10 (pedido do usuário, 2026-10-14)
+# O dispatch demora ~130 s pra publicar a ordem quando o robô está parado num
+# ponto de docking do corredor (28 ciclos de planejamento de ~4,7 s por causa
+# das arestas sobrepostas P3/P10 -> pontos H*; ver CONTEXT.md, "Investigação
+# da demora de início"). Medido no log do dispatch: depois de uma tarefa normal
+# o robô fica no nó do LOTE (fora da faixa) e planeja em ~10 s; depois de um
+# cancelamento fica no docking e leva ~132 s. Só mostra aviso — não muda
+# fila, disparo nem cancelamento.
+#   - menta enquanto a rota atual já foi criada no robô, ainda não está
+#     RUNNING, o robô está parado e dentro da faixa entre P3 e P10;
+#   - vermelho se passar de ROUTE_PLANNING_LATE_SECONDS sem começar.
+# Enquanto o aviso vale, o alerta genérico de "robô parado" (STALL_ALERT_SECONDS) é
+# suprimido — o robô está parado de propósito, esperando o planejador.
+ROUTE_PLANNING_MESSAGE = "Planejando a rota... pode levar até ~2 min. Aguarde."
+ROUTE_PLANNING_LATE_MESSAGE = "Planejamento da rota demorando mais de 140 s. Verifique o robô ou cancele e tente de novo."
+ROUTE_PLANNING_LATE_SECONDS = 140
+ROUTE_PLANNING_CORRIDOR_POINTS = ("P3", "P10")  # extremos do corredor (no mapa do robô)
+# Docking das duas colunas ficam a ≤0,8 m da reta P3–P10; os nós dos lotes
+# (onde o robô fica depois de uma tarefa normal, e planeja rápido) a ≥1,7 m.
+ROUTE_PLANNING_CORRIDOR_HALF_WIDTH_METERS = 1.2
+ROUTE_PLANNING_CORRIDOR_CACHE_SECONDS = 600
+_route_planning_cache = {"routeId": None, "started": None, "inCorridor": False, "inCorridorRouteId": None}
+_corridor_endpoints_cache = {"at": None, "a": None, "b": None}
+
+
+def _note_route_record(current, record):
+    """Chamada pelo _queue_tick com o task-record que ele JÁ leu (nenhuma
+    chamada extra ao robô): guarda se a rota atual já está RUNNING."""
+    try:
+        status = record.get("status")
+        _route_planning_cache["routeId"] = current.get("id")
+        _route_planning_cache["started"] = (status == "RUNNING") or bool(_is_terminal_status(status))
+    except Exception:
+        pass
+
+
+def _corridor_endpoints():
+    """((x,y) de P3, (x,y) de P10) ou None. Cache de 10 min — o mapa quase não muda."""
+    cache = _corridor_endpoints_cache
+    now = time.monotonic()
+    if cache["at"] is not None and now - cache["at"] < ROUTE_PLANNING_CORRIDOR_CACHE_SECONDS and cache["a"] and cache["b"]:
+        return cache["a"], cache["b"]
+    points = _robot_call("GET", "/map/point/list/" + ROBOT_TARGET_MAP) or []
+    found = {}
+    for p in points:
+        name = p.get("name")
+        pos = p.get("position") or []
+        if name in ROUTE_PLANNING_CORRIDOR_POINTS and len(pos) >= 2:
+            found[name] = (pos[0], pos[1])
+    a, b = found.get(ROUTE_PLANNING_CORRIDOR_POINTS[0]), found.get(ROUTE_PLANNING_CORRIDOR_POINTS[1])
+    if not a or not b:
+        return None
+    cache["at"], cache["a"], cache["b"] = now, a, b
+    return a, b
+
+
+def _in_planning_corridor(pose):
+    ends = _corridor_endpoints()
+    if not ends:
+        return False
+    (ax, ay), (bx, by) = ends
+    dx, dy = bx - ax, by - ay
+    length2 = dx * dx + dy * dy
+    if length2 <= 0:
+        return False
+    t = ((pose["x"] - ax) * dx + (pose["y"] - ay) * dy) / length2
+    if t < -0.02 or t > 1.02:
+        return False
+    dist = abs((pose["x"] - ax) * dy - (pose["y"] - ay) * dx) / math.sqrt(length2)
+    return dist <= ROUTE_PLANNING_CORRIDOR_HALF_WIDTH_METERS
+
+
+def _refresh_route_planning_wait():
+    """Thread de fundo (junto de _refresh_stall_at_origin): só pergunta a pose
+    ao robô quando a rota atual já foi disparada, ainda não está RUNNING e o
+    robô está parado — o resto do tempo não gasta chamada nenhuma."""
+    inside, route_id = False, None
+    try:
+        with QUEUE_LOCK:
+            state = _read_queue_state()
+        cur = state.get("currentRoute") or {}
+        c = _route_planning_cache
+        if (cur.get("taskName") and not state.get("cancelPending")
+                and _route_fired_at.get("t") is not None
+                and c.get("routeId") == cur.get("id") and c.get("started") is False
+                and _robot_status_cache.get("stationarySince") is not None
+                and not _robot_status_cache.get("charging")):
+            inside = _in_planning_corridor(robot_pose())
+            route_id = cur.get("id")
+    except Exception:
+        inside, route_id = False, None  # robô/rede indisponível: sem aviso (cai no comportamento antigo)
+    _route_planning_cache["inCorridor"] = inside
+    _route_planning_cache["inCorridorRouteId"] = route_id
+
+
+def _route_planning_elapsed(state):
+    """Segundos desde o disparo da rota atual, ou None se não estamos
+    esperando o planejamento do dispatch (ver bloco acima)."""
+    cur = state.get("currentRoute") or {}
+    c = _route_planning_cache
+    if not (cur.get("taskName") and not state.get("cancelPending") and c.get("inCorridor")
+            and c.get("inCorridorRouteId") == cur.get("id") and c.get("started") is False):
+        return None
+    fired = _route_fired_at.get("t")
+    if fired is None:
+        return None
+    return time.monotonic() - fired
+
+
+def _route_planning_message(state):
+    """Aviso menta (None se não vale ou se já passou do limite -> vira o vermelho)."""
+    elapsed = _route_planning_elapsed(state)
+    if elapsed is None or elapsed >= ROUTE_PLANNING_LATE_SECONDS:
+        return None
+    return ROUTE_PLANNING_MESSAGE
+
+
 # Condição final do alerta (ver "Alerta de robô parado" acima): combina o
 # rastreio de velocidade (stationarySince) com o estado da fila. QUALQUER
 # rota conta -- reservada esperando giro seguro pra começar (turnBlocked),
@@ -978,6 +1095,12 @@ def _refresh_stall_at_origin():
 # dessas situações, não só numa rota já em andamento (pedido explícito do
 # usuário, 2026-10-02 -- a 1ª versão só considerava `taskName` de verdade).
 def _robot_stalled_message(state):
+    # Esperando o planejador do dispatch no corredor P3–P10 (ver acima): o
+    # robô está parado de propósito — sem o alerta genérico de "parado"; só passa
+    # do limite vira vermelho (mensagem própria).
+    planning = _route_planning_elapsed(state)
+    if planning is not None:
+        return ROUTE_PLANNING_LATE_MESSAGE if planning >= ROUTE_PLANNING_LATE_SECONDS else None
     since = _robot_status_cache.get("stationarySince")
     if since is None or _robot_status_cache.get("charging"):
         return None
@@ -2146,6 +2269,7 @@ def _emergency_suppress():
 def _queue_tick():
     _refresh_robot_status()  # sempre, independente de emergência/rota em andamento
     _refresh_stall_at_origin()  # só gasta chamadas ao robô com o alerta de parado já disparado
+    _refresh_route_planning_wait()  # só pergunta a pose com rota disparada, não-RUNNING e robô parado
 
     # Emergência tem precedência sobre tudo: a fila já foi esvaziada (ver
     # _queue_emergency), então aqui só se reprime a task de carga recriada.
@@ -2280,6 +2404,7 @@ def _queue_tick():
             except Exception:
                 pass  # melhor esforço — tenta de novo no próximo tick
 
+        _note_route_record(current, record)  # só lê o que já veio: o aviso "planejando a rota" não faz chamada extra
         advanced = _apply_record_status(state, current, record)
         if advanced:
             _write_queue_state(state)
@@ -2616,24 +2741,29 @@ def _user_fullscreen(user):
     return bool(user.get("fullscreen"))
 
 
+# Senha da conta inicial (pedido do usuário, 2026-10-15): "admin"/"admin" pra
+# facilitar o primeiro acesso numa máquina nova (a VM da empresa) — quem
+# instala só abre o endereço e entra, sem caçar a senha no log. É uma senha
+# FRACA conhecida: a rede é fechada (porta 8000 não sai pra internet) e o
+# 1º passo depois de entrar tem que ser trocar a senha na tela de Usuários.
+# (Antes era uma senha aleatória impressa uma única vez no console.)
+INITIAL_ADMIN_PASSWORD = "admin"
+
+
 def _bootstrap_users_if_missing():
-    """Primeiro boot sem users.json: cria um admin inicial com senha
-    aleatória impressa no console uma única vez. Evita cravar uma senha
-    padrão no código (ao contrário do DEV_PASSWORD do front, que é só uma
-    trava de UI — login é a fronteira de verdade, então o segredo inicial
-    nasce aleatório e só quem está olhando o terminal na hora do primeiro
-    boot o conhece)."""
+    """Primeiro boot sem users.json: cria a conta inicial admin/admin. Só
+    roda quando NÃO existe users.json — uma instalação que já tem usuários
+    (inclusive levada de outra máquina) nunca é tocada."""
     if USERS_FILE.exists():
         return
-    default_password = secrets.token_urlsafe(9)
     _write_users([
-        {"username": "admin", "passwordHash": hash_password(default_password), "isAdmin": True},
+        {"username": "admin", "passwordHash": hash_password(INITIAL_ADMIN_PASSWORD), "isAdmin": True},
     ])
     print("=" * 70)
     print("Nenhum users.json encontrado — usuário inicial criado:")
     print("  usuário: admin")
-    print("  senha:   " + default_password)
-    print("Anote agora e troque depois pela tela de Usuários (modo admin).")
+    print("  senha:   " + INITIAL_ADMIN_PASSWORD)
+    print("TROQUE a senha no 1º acesso pela tela de Usuários (modo admin).")
     print("=" * 70)
 
 
@@ -3208,6 +3338,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "robotBattery": _robot_status_cache.get("battery"),
             "robotReturningToCharge": bool(_robot_status_cache.get("returningToCharge")),
             "robotStalledMessage": _robot_stalled_message(state),
+            "routePlanningMessage": _route_planning_message(state),
             "limitBreaker": _limit_breaker_active(),
         }, ensure_ascii=False).encode("utf-8")
         self._relay(200, "application/json", body)

@@ -148,6 +148,16 @@ function PlayIcon() {
 // pro servidor. Toda a REGRA (validação de obstrução ao reordenar/remover,
 // edição) mora no MainApp — este componente só cuida do gesto e do visual, e
 // pergunta pra cima via onReorder se a nova ordem vale (true = aplicou).
+// Bloqueia o scroll por toque ENQUANTO uma tarefa está sendo arrastada. TEM que
+// ser uma função de módulo (identidade estável): definida dentro do componente
+// ela era recriada a cada render, e o removeEventListener da limpeza recebia
+// OUTRA função que não a registrada no início do arrasto — o listener ficava
+// preso no document e travava o scroll do app inteiro (incl. os manuais " i ")
+// até recarregar a página.
+function blockTouchScroll(e) {
+  if (e.cancelable) e.preventDefault();
+}
+
 export default function StagedTasksPanel({
   units, lots, points, editingUnitId, invalidTaskId, blockedReason,
   onSelectUnit, onRemoveTask, onReorder, onChangePallet, onStart, starting,
@@ -175,10 +185,6 @@ export default function StagedTasksPanel({
   function setDrag(next) {
     dragRef.current = typeof next === 'function' ? next(dragRef.current) : next;
     setDragState(dragRef.current);
-  }
-
-  function blockTouchScroll(e) {
-    if (e.cancelable) e.preventDefault();
   }
 
   function stopDragSideEffects() {

@@ -46,8 +46,9 @@ O `.exe` só pode ser compilado num Windows — o GitHub Actions faz isso de gra
   | `robot_host.txt` | IP do robô (ver seção 3, item "robô") | opcional, recomendado |
 
   Sem `calibration.json`/`users.json`, o servidor cria tudo do zero (mapa
-  vazio e um admin com **senha aleatória impressa uma única vez no log**).
-  Evite: leve os arquivos.
+  de fábrica e o usuário **`admin` com senha `admin`**). Evite: leve os
+  arquivos (ou, num install realmente novo, **troque a senha do `admin` no
+  1º acesso**).
 
 **Pedidos pra infra** (cada um tem um motivo):
 1. **Pasta própria com escrita**, por exemplo `C:\LIFTY\` — **não** em
@@ -103,8 +104,9 @@ O `.exe` só pode ser compilado num Windows — o GitHub Actions faz isso de gra
   2. **Tipos de arquivo (MIME) explícitos**: no Windows o Python consulta o
      registro; em máquina com registro "sujo" um `.js` sai como `text/plain` e o
      navegador **recusa o app (tela em branco)**.
-- **Primeira execução = o log mostra a senha do admin** só se `users.json` não
-  existir. Levando o `users.json`, isso não acontece.
+- **Primeira execução sem `users.json`** cria o usuário `admin` com senha `admin`
+  (o log avisa). Levando o `users.json`, isso não acontece. Numa instalação
+  nova, o 1º passo é trocar essa senha pela tela de Usuários.
 - **Log**: o serviço imprime uma linha por requisição (cada tablet consulta a
   cada 4 s) — configure rotação de log no NSSM (seção 5), senão cresce sem parar.
 - **Executável "onefile"**: a cada início ele se extrai numa pasta temporária
@@ -176,7 +178,7 @@ serviço descarta a fila (ver seção 3) — faça com o robô ocioso.
 
 - Conferir o log (`C:\LIFTY\logs\lifty.log`): deve mostrar o IP do robô
   encontrado e "Painel disponivel em http://localhost:8000".
-- Se um `users.json` novo foi criado (senha aleatória no log), trocar a senha do
-  `admin` pela tela de Usuários.
+- Se um `users.json` novo foi criado (`admin` / `admin`), **trocar a senha do
+  `admin`** pela tela de Usuários antes de liberar o endereço pros operadores.
 - Guardar uma cópia dos arquivos de dados num lugar seguro depois do primeiro dia
   de uso real.

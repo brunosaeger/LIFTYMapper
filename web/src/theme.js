@@ -83,3 +83,11 @@ export function darkenHex(hex, amount = 0.4) {
   const scale = 1 - amount;
   return `rgb(${Math.round(r * scale)}, ${Math.round(g * scale)}, ${Math.round(b * scale)})`;
 }
+
+// Mistura com branco (amount 0..1) — par do darkenHex; usado no miolo claro
+// do número da fila no mapa (ver QueueMark em FloorPlanCanvas.jsx).
+export function lightenHex(hex, amount = 0.45) {
+  const { r, g, b } = hexToRgb(hex);
+  const mix = (c) => Math.round(c + (255 - c) * amount);
+  return `rgb(${mix(r)}, ${mix(g)}, ${mix(b)})`;
+}

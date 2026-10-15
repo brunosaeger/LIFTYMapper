@@ -4,7 +4,7 @@ import useImage from 'use-image';
 import Konva from 'konva';
 import { useContainerSize } from '../hooks/useContainerSize';
 import { lotCellName, lotCellDisplayName } from '../hooks/useCalibration';
-import { COLORS, LOT_COLORS, hexToRgba, darkenHex } from '../theme';
+import { COLORS, LOT_COLORS, hexToRgba, darkenHex, lightenHex } from '../theme';
 import topViewUrl from '../assets/floorplan.jpg';
 import isoViewUrl from '../assets/isometric.jpg';
 
@@ -14,6 +14,7 @@ const VIEW_URLS = { top: topViewUrl, iso: isoViewUrl };
 // criaria um array novo a cada render, o que só geraria trabalho à toa nas
 // comparações de props do Konva.
 const EMPTY_NAMES = [];
+const EMPTY_MARKS = {};  // sem fila (ou prévia de lote): nenhuma célula marcada
 
 const ZOOM_STEP = 1.08;
 const MAX_ZOOM_MULT = 8; // múltiplo do "encaixar na tela" — teto de quanto dá pra aproximar
@@ -314,7 +315,53 @@ function SeqBadge({ seq, size, color, rotation = 0, scaleX = 1, scaleY = 1 }) {
   );
 }
 
-function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNumber, isHovered, isOccupied, isPreviewing, showName, invalidPulseActive, invalidPulseId, onSelect, onChange, onHoverEnter, onHoverLeave, onPressStart }) {
+// Marca de DESTINO de tarefa que está na fila (pedido do usuário, 2026-10-15):
+// a célula/ponto vira laranja opaco e ganha, no centro, o número da tarefa na
+// fila (1 = em andamento, 2 = próxima, ...) — assim dá pra ver quais lotes
+// vão receber pallet. O número vem pronto de MainApp (`queueMarks`, derivado
+// da fila do /api/live-state a cada render — não há nada a "atualizar" quando
+// uma tarefa termina: o polling traz a lista nova e tudo renumera sozinho).
+// Interior do número em laranja mais claro, contorno mais escuro. Contra-
+// rotaciona/contra-escala (igual SeqBadge) pra ficar na horizontal e do
+// mesmo tamanho mesmo em lote girado/esticado.
+function QueueMark({ number, size, rotation = 0, scaleX = 1, scaleY = 1 }) {
+  if (!number) return null;
+  const fontSize = size * 0.78;
+  return (
+    <>
+      <Rect
+        x={-size / 2}
+        y={-size / 2}
+        width={size}
+        height={size}
+        cornerRadius={3}
+        fill={hexToRgba(COLORS.accentOrange, 0.82)}
+        listening={false}
+      />
+      <Group rotation={-rotation} scaleX={1 / (scaleX || 1)} scaleY={1 / (scaleY || 1)} listening={false}>
+        <Text
+          text={String(number)}
+          fontFamily="Arial Black, Helvetica Neue, Arial, sans-serif"
+          fontSize={fontSize}
+          fontStyle="bold"
+          fill={lightenHex(COLORS.accentOrange, 0.55)}
+          stroke={darkenHex(COLORS.accentOrange, 0.62)}
+          strokeWidth={Math.max(1, fontSize * 0.18)}
+          fillAfterStrokeEnabled
+          align="center"
+          verticalAlign="middle"
+          width={size * 2}
+          height={size}
+          x={-size}
+          y={-size / 2}
+          listening={false}
+        />
+      </Group>
+    </>
+  );
+}
+
+function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNumber, queueNumber, isHovered, isOccupied, isPreviewing, showName, invalidPulseActive, invalidPulseId, onSelect, onChange, onHoverEnter, onHoverLeave, onPressStart }) {
   const groupRef = useRef(null);
   const trRef = useRef(null);
   const pulseRingRef = useRef(null);
@@ -374,6 +421,7 @@ function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNu
           strokeWidth={2}
         />
         {isOccupied && <XMark size={size} color={xColor} outlineColor={stroke} opacity={isPreviewing ? 0.5 : 1} />}
+        {!(isPickup || isDropoff) && <QueueMark number={queueNumber} size={size} rotation={point.rotation} />}
         <SeqBadge seq={seqNumber} size={size} color={stroke} rotation={point.rotation} />
         {showName && (
         <Text
@@ -420,7 +468,7 @@ function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNu
 // muda de fato. `themeKey` não é usado no corpo: existe só pra invalidar o
 // memo quando o tema claro/escuro troca (COLORS é mutado em lugar — os
 // COLORS.* lidos aqui dentro não aparecem em nenhuma prop).
-const LotCell = memo(function LotCell({ name, displayName, index, cellSize, fill, stroke, xColor, showName, isOccupied, isPreviewing, seqNumber, lotRotation, lotScaleX, lotScaleY, gestureActive, isHovered, isSelectedEndpoint, invalidPulseActive, invalidPulseId, onHoverEnter, onHoverLeave, onPressStart, themeKey }) {
+const LotCell = memo(function LotCell({ name, displayName, index, cellSize, fill, stroke, xColor, showName, isOccupied, isPreviewing, seqNumber, queueNumber, lotRotation, lotScaleX, lotScaleY, gestureActive, isHovered, isSelectedEndpoint, invalidPulseActive, invalidPulseId, onHoverEnter, onHoverLeave, onPressStart, themeKey }) {
   const cellRef = useRef(null);
   const pulseRingRef = useRef(null);
   usePtpScale(cellRef, gestureActive ? ptpTargetScale(isHovered, isSelectedEndpoint) : 1);
@@ -447,6 +495,10 @@ const LotCell = memo(function LotCell({ name, displayName, index, cellSize, fill
         strokeWidth={2}
       />
       {isOccupied && <XMark size={cellSize} color={xColor} outlineColor={stroke} opacity={isPreviewing ? 0.5 : 1} />}
+      {/* Destino de tarefa na fila (ver QueueMark). A seleção atual de Ponto a
+          Ponto (cyan/âmbar) fica por cima: se a célula é origem/destino da
+          seleção em andamento, a marca da fila não aparece. */}
+      {!isSelectedEndpoint && <QueueMark number={queueNumber} size={cellSize} rotation={lotRotation} scaleX={lotScaleX} scaleY={lotScaleY} />}
       {/* Triângulo de "facing": só na célula 1 (índice 0, a sem numeração)
           de cada LOTE — pontos avulsos ("lotes coringa") são um componente
           totalmente separado (PointMarker) e nunca passam por aqui, então
@@ -497,7 +549,7 @@ const LotCell = memo(function LotCell({ name, displayName, index, cellSize, fill
 // única unidade arrastável/rotacionável/redimensionável. Em Ponto a Ponto,
 // cada célula tem sua própria animação de hover (ver LotCell) — a seleção em
 // si acontece ao soltar o mouse/dedo, tratada no Stage.
-function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames, seqOverride, hoverName, occupiedNames, previewingNames, invalidPulseName, invalidPulseId, onSelectLot, onHoverEnter, onHoverLeave, onPressStart, onChange, isPreview }) {
+function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames, seqOverride, queueMarks = EMPTY_MARKS, hoverName, occupiedNames, previewingNames, invalidPulseName, invalidPulseId, onSelectLot, onHoverEnter, onHoverLeave, onPressStart, onChange, isPreview }) {
   const groupRef = useRef(null);
   const trRef = useRef(null);
   const editable = mode === 'edit' && !isPreview;
@@ -578,6 +630,7 @@ function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames,
               invalidPulseActive={name === invalidPulseName}
               invalidPulseId={invalidPulseId}
               seqNumber={seqNumber}
+              queueNumber={queueMarks[name] || null}
               lotRotation={lot.rotation}
               lotScaleX={lot.scaleX}
               lotScaleY={lot.scaleY}
@@ -587,7 +640,7 @@ function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames,
               onHoverEnter={onHoverEnter}
               onHoverLeave={onHoverLeave}
               onPressStart={onPressStart}
-              themeKey={COLORS.textPrimary + '|' + COLORS.stateError + '|' + COLORS.panelBase}
+              themeKey={COLORS.textPrimary + '|' + COLORS.stateError + '|' + COLORS.panelBase + '|' + COLORS.accentOrange}
             />
           );
         })}
@@ -726,6 +779,8 @@ export default function FloorPlanCanvas({
   seqOverride,
   onPointToPointClick,
   view,
+  // Destinos das tarefas na fila -> número (ver QueueMark e MainApp.jsx, queueMarks)
+  queueMarks = EMPTY_MARKS,
   occupiedNames,
   onMarkOccupied,
   markModeActive,
@@ -1489,6 +1544,7 @@ export default function FloorPlanCanvas({
                 pickupNames={pickupNames}
                 dropoffNames={dropoffNames}
                 seqOverride={seqOverride}
+                queueMarks={queueMarks}
                 hoverName={hoveredName}
                 occupiedNames={effectiveOccupied}
                 previewingNames={previewingNames}
@@ -1521,6 +1577,7 @@ export default function FloorPlanCanvas({
                     : (pickupNames.includes(p.name) || dropoffNames.includes(p.name)) && seqOverride != null ? seqOverride
                     : null
                 }
+                queueNumber={queueMarks[p.name] || null}
                 isHovered={hoveredName === p.name}
                 isOccupied={effectiveOccupied.includes(p.name)}
                 isPreviewing={previewingNames.has(p.name)}

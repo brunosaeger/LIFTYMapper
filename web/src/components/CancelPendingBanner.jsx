@@ -13,6 +13,10 @@
 // ação do operador, diferente das esperas normais (âmbar) que o sistema
 // resolve sozinho.
 //
+// `variant='info'` (menta, informativo): "Planejando a rota..." (ver server.py,
+// routePlanningMessage) — mesmo lugar dos âmbar, toca o aviso UMA vez como
+// eles; não é anomalia.
+//
 // Som: 'warning' toca notiftrue.webm UMA vez a cada aviso novo; 'danger'
 // toca warningtrue.webm em LOOP até o aviso sumir. Navegador pode bloquear
 // áudio sem gesto prévio do usuário — nesse caso tenta de novo no 1º toque.

@@ -653,6 +653,14 @@
   color: var(--accent-amber);
 }
 
+/* "Planejando a rota" (ver server.py, routePlanningMessage): informativo,
+   não é anomalia — menta (mesma cor do "Em Operação" do RobotStatusBanner),
+   no mesmo lugar dos âmbar (junto ao header). */
+.cancel-pending-banner--info {
+  border: 1px solid var(--accent-cyan);
+  color: var(--accent-cyan);
+}
+
 /* "Alerta de robô parado" (ver server.py, robotStalledMessage) — anomalia
    que pede ação do operador, não uma espera normal: vermelho pulsando
    (mesmo padrão do emergency-toggle.is-active) pra chamar atenção de

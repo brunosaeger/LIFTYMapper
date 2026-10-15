@@ -24,7 +24,7 @@ async function jsonRequest(path, options) {
 // dispositivos nunca "decidem" a mesma coisa duas vezes (ver server.py,
 // QUEUE_LOCK).
 export function useLiveState() {
-  const [state, setState] = useState({ currentRoute: null, pendingRoute: null, routeQueue: [], occupied: [], emergency: false, cancelPending: false, cancelPendingMessage: null, turnBlocked: false, turnBlockedMessage: null, awaitingCharge: false, awaitingChargeMessage: null, postPickupUnloadMessage: null, robotCharging: null, robotBattery: null, robotReturningToCharge: false, robotStalledMessage: null });
+  const [state, setState] = useState({ currentRoute: null, pendingRoute: null, routeQueue: [], occupied: [], emergency: false, cancelPending: false, cancelPendingMessage: null, turnBlocked: false, turnBlockedMessage: null, awaitingCharge: false, awaitingChargeMessage: null, postPickupUnloadMessage: null, robotCharging: null, robotBattery: null, robotReturningToCharge: false, robotStalledMessage: null, routePlanningMessage: null });
   const [status, setStatus] = useState('loading'); // loading | idle | error
 
   // Assinatura (JSON) da última resposta aplicada. O poll roda a cada 4s e,
@@ -230,6 +230,11 @@ export function useLiveState() {
     // em andamento e sem estar carregando (caminho obstruído/desvio de
     // rota que ele não resolve sozinho).
     robotStalledMessage: state.robotStalledMessage,
+    // Aviso menta "planejando a rota" (ver server.py, _route_planning_message)
+    // — não nulo enquanto o dispatch calcula a rota com o robô parado no
+    // corredor P3–P10. Passou de 140 s o servidor troca por um
+    // robotStalledMessage próprio (vermelho).
+    routePlanningMessage: state.routePlanningMessage,
     // null = ainda não sabemos, OU o robô não manda `battery` nesse formato
     // (ver _normalize_battery em server.py — 0-100 assumido, não confirmado
     // em campo ainda); 0-100 caso contrário.

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import Toolbar from './components/Toolbar';
 import CloseUpStatusBanner from './components/CloseUpStatusBanner';
 import CancelPendingBanner from './components/CancelPendingBanner';
@@ -70,10 +70,25 @@ export default function MainApp({ user, onLogout }) {
   // pra ele em vez de mudar estado local direto (quem decide/dispara de
   // verdade é sempre o server.py, nunca o navegador).
   const {
-    currentRoute, pendingRoute, routeQueue, occupied, emergency, cancelPending, cancelPendingMessage, turnBlockedMessage, awaitingChargeMessage, postPickupUnloadMessage, robotCharging, robotBattery, robotReturningToCharge, robotStalledMessage, status: liveStatus,
+    currentRoute, pendingRoute, routeQueue, occupied, emergency, cancelPending, cancelPendingMessage, turnBlockedMessage, awaitingChargeMessage, postPickupUnloadMessage, robotCharging, robotBattery, robotReturningToCharge, robotStalledMessage, routePlanningMessage, status: liveStatus,
     enqueueRoutes, cancelCurrent, clearQueue, removeQueued, reorderQueue, setOccupiedMany, toggleOccupied, setEmergency, setLimitBreakerLease,
   } = useLiveState();
   const [toast, showToast] = useToast();
+
+  // Destinos das tarefas que estão na fila -> posição na ordem de execução
+  // (1 = em andamento, 2 = pendente/próxima, 3... = resto da fila). Derivado
+  // direto da fila do /api/live-state, recalculado a cada render com a lista
+  // nova — nenhuma lógica de "atualizar números" quando uma tarefa termina,
+  // é cancelada ou reordenada. Se o mesmo destino aparecer em duas rotas (a
+  // trava de concorrência do servidor não deixa, mas por garantia) vale o
+  // menor número. Inclui UNLOAD isolado (pós-cancelamento) e pontos avulsos.
+  const queueMarks = useMemo(() => {
+    const marks = {};
+    [currentRoute, pendingRoute, ...(routeQueue || [])].filter(Boolean).forEach((route, i) => {
+      if (route.dropoff && marks[route.dropoff] === undefined) marks[route.dropoff] = i + 1;
+    });
+    return marks;
+  }, [currentRoute, pendingRoute, routeQueue]);
 
   // Aviso sonoro (opoveshchenie) + brilho azul no ícone do modo Fila: quando
   // COMEÇA uma tarefa da fila (uma rota nova passa a estar disparada de
@@ -154,15 +169,27 @@ export default function MainApp({ user, onLogout }) {
   // Melhor esforço: se o navegador recusar (ex. toque não contou como
   // gesto válido por algum motivo), não insiste — o botão manual continua
   // disponível no Toolbar.
+  //
+  // CORREÇÃO (2026-10-14): o gesto que o Chrome aceita pra liberar o
+  // requestFullscreen em TOQUE é o fim do toque (pointerup/click), NÃO o
+  // pointerdown — com o dedo, pointerdown não conta como "ativação do usuário"
+  // e a chamada era recusada em silêncio. Além disso o ouvinte se removia na
+  // 1ª tentativa mesmo se ela falhasse, então depois de apagar/acender a tela
+  // do tablet (o Android sai da tela cheia ao apagar) nunca mais voltava.
+  // Agora ouve pointerup+click e só some quando a tela cheia de fato
+  // volta (o efeito reexecuta com isFullscreen=true).
   useEffect(() => {
-    if (!wantsFullscreen || isFullscreen) return;
+    if (!wantsFullscreen || isFullscreen) return undefined;
     function tryEnter() {
-      document.removeEventListener('pointerdown', tryEnter, true);
       if (document.fullscreenElement) return;
       document.documentElement.requestFullscreen().catch(() => {});
     }
-    document.addEventListener('pointerdown', tryEnter, true);
-    return () => document.removeEventListener('pointerdown', tryEnter, true);
+    document.addEventListener('pointerup', tryEnter, true);
+    document.addEventListener('click', tryEnter, true);
+    return () => {
+      document.removeEventListener('pointerup', tryEnter, true);
+      document.removeEventListener('click', tryEnter, true);
+    };
   }, [wantsFullscreen, isFullscreen]);
 
   // Botão no Toolbar: ESTE clique já É o gesto do usuário, então pode
@@ -1423,9 +1450,13 @@ export default function MainApp({ user, onLogout }) {
           pós-pickup"). */}
       {/* robotStalledMessage (vermelho, anomalia) tem prioridade sobre as
           esperas normais (âmbar) — nunca escondido por elas. */}
+      {/* routePlanningMessage (menta, informativo): dispatch calculando a rota
+          com o robô parado no corredor P3–P10 — só aparece quando nenhuma das
+          esperas âmbar acima vale (nunca coexistem na prática). Passou de
+          140 s o servidor vira robotStalledMessage (vermelho). */}
       <CancelPendingBanner
-        message={robotStalledMessage || cancelPendingMessage || turnBlockedMessage || awaitingChargeMessage || postPickupUnloadMessage}
-        variant={robotStalledMessage ? 'danger' : 'warning'}
+        message={robotStalledMessage || cancelPendingMessage || turnBlockedMessage || awaitingChargeMessage || postPickupUnloadMessage || routePlanningMessage}
+        variant={robotStalledMessage ? 'danger' : (!(cancelPendingMessage || turnBlockedMessage || awaitingChargeMessage || postPickupUnloadMessage) && routePlanningMessage ? 'info' : 'warning')}
       />
 
       <div className="app__body">
@@ -1465,6 +1496,7 @@ export default function MainApp({ user, onLogout }) {
           onPointToPointClick={handlePointToPointClick}
           view={view}
           occupiedNames={occupied}
+          queueMarks={queueMarks}
           onMarkOccupied={setOccupiedMany}
           markModeActive={mode === 'mark'}
           onToggleMarkMode={handleToggleMarkMode}
