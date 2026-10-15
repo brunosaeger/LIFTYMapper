@@ -5049,3 +5049,24 @@ só informa; não muda fila/disparo/cancelamento:
   meio da espera normal. Fora dessa condição o comportamento é o de antes.
 - Constantes pra ajustar: `ROUTE_PLANNING_CORRIDOR_HALF_WIDTH_METERS`,
   `ROUTE_PLANNING_CORRIDOR_POINTS`, `ROUTE_PLANNING_LATE_SECONDS`.
+
+### Atualização 2026-10-15 — bridge da porta 8091 DESLIGADO (decisão do usuário)
+Na VM não vai existir o `robot-bridge/` (check-turn). `TURN_CHECK_ENABLED = False`
+em `server.py`: `robot_can_turn_safely()` devolve `None` na hora, sem rede — o mesmo
+fail-open de sempre (rota começa e cancelamento acontece sem esperar giro seguro;
+`cancelPending`/`turnBlocked` deixam de aparecer na prática). Evita um timeout de
+3 s por tentativa se a rede da VM descartar a 8091. O cancelamento por alinhamento
+de docking (pré-pickup, usa pose/SLAM) NÃO depende do bridge e continua valendo.
+Pra reativar: `TURN_CHECK_ENABLED = True` + bridge rodando no robô.
+
+### Bug de Windows corrigido 2026-10-15 — leitura/escrita dos .json sem encoding (primeiro boot na VM)
+Sintoma na VM (exe do build #5): login admin/admin OK, mas "Erro ao salvar" no topo (o POST
+`/api/calibration` dava erro). Causa: `Path.read_text()/write_text()` sem `encoding` usam a
+codificação do Windows (cp1252, não UTF-8) — o `calibration.json` tem 'Í' (bytes C3 8D) e o
+cp1252 não mapeia 0x8D -> `UnicodeDecodeError` dentro de `_read_calibration`, que só tratava
+`JSONDecodeError/OSError` -> exceção na thread -> conexão derrubada. No Linux (dev) nunca
+aparece (UTF-8 padrão). Correção: TODO `read_text/write_text` do `server.py` com
+`encoding="utf-8"`; `_read_calibration/_read_route_log/_read_queue_state` passam a tratar
+`ValueError` (cobre UnicodeDecodeError). Reproduzido e verificado rodando o server com
+`LC_ALL=C PYTHONUTF8=0` (antes: POST derruba a conexão; depois: 200 e arquivo UTF-8 válido).
+LIÇÃO: testar o servidor com locale não-UTF-8 antes de gerar exe pra Windows.

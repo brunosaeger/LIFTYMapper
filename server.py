@@ -180,7 +180,7 @@ def discover_robot_host():
     valor anterior)."""
     candidates_first = []
     if ROBOT_HOST_CACHE_FILE.exists():
-        cached = ROBOT_HOST_CACHE_FILE.read_text().strip()
+        cached = ROBOT_HOST_CACHE_FILE.read_text(encoding="utf-8").strip()
         if cached:
             candidates_first.append(cached)
     current = ROBOT_HOST.rstrip("/").replace("http://", "").replace("https://", "")
@@ -189,7 +189,7 @@ def discover_robot_host():
     for ip in candidates_first:
         if _looks_like_dispatch_service(ip):
             set_robot_host(ip)
-            ROBOT_HOST_CACHE_FILE.write_text(ip)
+            ROBOT_HOST_CACHE_FILE.write_text(ip, encoding="utf-8")
             print("Robô encontrado em %s (sem precisar varrer a rede)." % ip)
             return ip
 
@@ -211,7 +211,7 @@ def discover_robot_host():
 
     if found:
         set_robot_host(found)
-        ROBOT_HOST_CACHE_FILE.write_text(found)
+        ROBOT_HOST_CACHE_FILE.write_text(found, encoding="utf-8")
         print("Robô encontrado em %s (varredura de %s0/24)." % (found, prefix))
         return found
 
@@ -269,13 +269,13 @@ def _read_route_log():
     if not ROUTE_LOG_FILE.exists():
         return []
     try:
-        return json.loads(ROUTE_LOG_FILE.read_text())
-    except (json.JSONDecodeError, OSError):
+        return json.loads(ROUTE_LOG_FILE.read_text(encoding="utf-8"))
+    except (ValueError, OSError):  # ValueError cobre JSONDecodeError e UnicodeDecodeError
         return []
 
 
 def _write_route_log(entries):
-    ROUTE_LOG_FILE.write_text(json.dumps(entries, ensure_ascii=False, indent=2))
+    ROUTE_LOG_FILE.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # Gravação do histórico — funções de módulo (não métodos do Handler) porque,
@@ -538,6 +538,15 @@ TURN_CHECK_PORT = 8091
 TURN_CHECK_PATH = "/check-turn"
 TURN_CHECK_ANGLE_DEGREES = 180.0  # giro de "meia-volta" — o cenário de retorno pra carga que motivou tudo isso
 TURN_CHECK_TIMEOUT_SECONDS = 3
+# Chave geral da checagem de giro seguro (2026-10-15): o usuário decidiu NÃO
+# usar o bridge da porta 8091 na VM. Desligada = robot_can_turn_safely devolve
+# None na hora ("não sei", o mesmo fail-open de sempre: a rota começa e o
+# cancelamento acontece sem esperar giro seguro), SEM abrir conexão nenhuma —
+# senão cada início/cancelamento tentaria falar com a 8091 e, se a rede da VM
+# descartar essa porta, perderia até TURN_CHECK_TIMEOUT_SECONDS por tentativa
+# além de poluir o log. Pra voltar a usar o bridge: True + bridge rodando no
+# robô (ver robot-bridge/).
+TURN_CHECK_ENABLED = False
 
 
 def _turn_check_url(angle):
@@ -552,6 +561,8 @@ def robot_can_turn_safely(angle=TURN_CHECK_ANGLE_DEGREES):
     _queue_cancel_current: hoje trata como "segue com o comportamento
     antigo", pra essa checagem nova nunca travar um cancelamento se o
     bridge não estiver rodando)."""
+    if not TURN_CHECK_ENABLED:
+        return None
     try:
         with urllib.request.urlopen(_turn_check_url(angle), timeout=TURN_CHECK_TIMEOUT_SECONDS) as resp:
             data = json.loads(resp.read())
@@ -1391,8 +1402,8 @@ def _read_queue_state():
     if not QUEUE_STATE_FILE.exists():
         return _empty_queue_state()
     try:
-        data = json.loads(QUEUE_STATE_FILE.read_text())
-    except (json.JSONDecodeError, OSError):
+        data = json.loads(QUEUE_STATE_FILE.read_text(encoding="utf-8"))
+    except (ValueError, OSError):  # ValueError cobre JSONDecodeError e UnicodeDecodeError
         return _empty_queue_state()
     merged = _empty_queue_state()
     merged.update(data)
@@ -1400,7 +1411,7 @@ def _read_queue_state():
 
 
 def _write_queue_state(state):
-    QUEUE_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+    QUEUE_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # --- calibração (leitura estruturada — só pro que este bloco precisa: lotes
@@ -1409,8 +1420,8 @@ def _read_calibration():
     if not CALIBRATION_FILE.exists():
         return json.loads(EMPTY_CALIBRATION)
     try:
-        data = json.loads(CALIBRATION_FILE.read_text())
-    except (json.JSONDecodeError, OSError):
+        data = json.loads(CALIBRATION_FILE.read_text(encoding="utf-8"))
+    except (ValueError, OSError):  # ValueError cobre JSONDecodeError e UnicodeDecodeError
         return json.loads(EMPTY_CALIBRATION)
     # _save_calibration (mais abaixo) já exige essa forma pra aceitar um
     # save — um arquivo sem "top"/"iso" só existiria se nunca tivesse sido
@@ -1424,7 +1435,7 @@ def _read_calibration():
 
 
 def _write_calibration(data):
-    CALIBRATION_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    CALIBRATION_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # --- Kanbans (grupos de lotes delimitados por um Close Up) — restrição de
@@ -2653,9 +2664,9 @@ USERS_PATH = "/api/users"
 
 def _load_or_create_session_secret():
     if SESSION_SECRET_FILE.exists():
-        return bytes.fromhex(SESSION_SECRET_FILE.read_text().strip())
+        return bytes.fromhex(SESSION_SECRET_FILE.read_text(encoding="utf-8").strip())
     secret = secrets.token_bytes(32)
-    SESSION_SECRET_FILE.write_text(secret.hex())
+    SESSION_SECRET_FILE.write_text(secret.hex(), encoding="utf-8")
     return secret
 
 
@@ -2707,13 +2718,13 @@ def _read_users():
     if not USERS_FILE.exists():
         return []
     try:
-        return json.loads(USERS_FILE.read_text())
+        return json.loads(USERS_FILE.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return []
 
 
 def _write_users(users):
-    USERS_FILE.write_text(json.dumps(users, ensure_ascii=False, indent=2))
+    USERS_FILE.write_text(json.dumps(users, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # Preferência de tema por CONTA (não por dispositivo): o operador loga em
@@ -3269,7 +3280,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # própria (/api/pallet-heights), o cliente não manda no snapshot,
             # então preserva o que já está em disco.
             data["palletHeights"] = _pallet_heights(current)
-            CALIBRATION_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+            CALIBRATION_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         self._relay(200, "application/json", b'{"ok":true}')
 
     # Altura do pallet azul (editor, modo desenvolvedor, sub-seção "Altura de
@@ -3292,7 +3303,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if "blueTop" in payload:
                 heights["blueTop"] = _coerce_height(payload.get("blueTop"), heights["blueTop"])
             cal["palletHeights"] = heights
-            CALIBRATION_FILE.write_text(json.dumps(cal, ensure_ascii=False, indent=2))
+            CALIBRATION_FILE.write_text(json.dumps(cal, ensure_ascii=False, indent=2), encoding="utf-8")
         self._relay(200, "application/json", json.dumps({"ok": True, "palletHeights": heights}).encode("utf-8"))
 
     # --- histórico de rotas (painel "Histórico", modo desenvolvedor) --------

@@ -61,9 +61,9 @@ O `.exe` só pode ser compilado num Windows — o GitHub Actions faz isso de gra
 5. **Rotas de rede (o ponto mais arriscado)**:
    - **tablets → VM**, porta 8000. Pergunte explicitamente: "um aparelho na
      wifi dos tablets consegue abrir `http://192.168.5.252:8000`?".
-   - **VM → robô**, portas **80** (API do dispatch e SLAM) e **8091** (bridge de
-     "posso girar aqui?"). Sem isso o servidor roda, mas nenhuma tarefa é
-     despachada.
+   - **VM → robô**, porta **80** (API do dispatch e SLAM). Sem isso o servidor
+     roda, mas nenhuma tarefa é despachada. (A porta 8091, do bridge de "posso
+     girar aqui?", **não é usada** — ver "Bridge" abaixo.)
    - VMs de datacenter costumam ficar em rede separada da wifi do chão de fábrica
      por segurança: validar **antes** de desligar a máquina atual.
 6. **Relógio sincronizado (NTP)** — o histórico carimba horários com o relógio
@@ -91,11 +91,12 @@ O `.exe` só pode ser compilado num Windows — o GitHub Actions faz isso de gra
   robô estiverem na mesma faixa `192.168.5.x`**. Pra evitar essa varredura
   (que alguns firewalls leem como "port scan"), peça uma **reserva de DHCP pro
   robô** também e deixe o `robot_host.txt` com o IP dele.
-- **Bridge do robô (porta 8091)**: é o programa `robot-bridge/` rodando **no
-  computador do robô**, que responde se é seguro girar. Hoje ele sobe **na mão**
-  (via SSH) e **não volta sozinho** se o robô reiniciar. Sem ele, o sistema
-  segue funcionando no comportamento antigo (sem a checagem de giro seguro). É
-  uma decisão a tomar com a REEMAN/infra: deixar o bridge subir no boot do robô.
+- **Bridge do robô (porta 8091): NÃO usado** (decisão do usuário, 2026-10-15).
+  A checagem de "giro seguro" está desligada no `server.py`
+  (`TURN_CHECK_ENABLED = False`): as rotas começam e os cancelamentos acontecem
+  sem esperar essa confirmação, sem abrir conexão nenhuma na 8091. Não precisa
+  liberar essa porta nem subir nada no robô. (Pra voltar a usar: ligar a
+  constante e rodar o `robot-bridge/` no robô.)
 - **Duas correções que fiz agora no `server.py`** (só pra rodar como serviço no
   Windows, sem mexer em nada de fila/robô):
   1. **Saída sempre em UTF-8**: as mensagens de erro do dispatch vêm em chinês; no
@@ -128,7 +129,7 @@ o **mesmo** endereço.
       mostra a reserva por MAC.
 - [ ] Na VM: o serviço está rodando — `Get-Service LIFTY-SERVICE` → `Running`.
 - [ ] Na VM: `Test-NetConnection 192.168.5.195 -Port 80` → `TcpTestSucceeded: True`
-      (VM alcança o robô). Idem `-Port 8091` (bridge, se estiver no ar).
+      (VM alcança o robô). A 8091 não é usada.
 - [ ] Na própria VM: abrir `http://localhost:8000` → aparece a tela de login.
 - [ ] **De um tablet, na wifi do chão de fábrica**: abrir
       `http://192.168.5.252:8000` no Chrome → aparece a tela de login. **Este é o
