@@ -5125,3 +5125,13 @@ instante do cancelamento real; replay da coleta normal de 14/10 libera no P5 log
 vizinho) não libera; entrando no pallet (s = -0,5) não libera; sem pose -> pendente.
 **Validar em campo**: repetir `FDtoFD2` vindo pelo oeste e cancelar no caminho — deve cancelar
 no P5 depois do giro (log: `perto de P5 | eixo: s=+0.7x`), não no P16.
+
+## Número da fila continua visível no destino em destaque (2026-10-23)
+`QueueMark` (`FloorPlanCanvas.jsx`) numera no mapa os destinos das tarefas da fila. Quando a
+célula também era origem/destino da rota em destaque (rota clicada no painel Fila, rota atual,
+seleção de Ponto a Ponto), a marca era simplesmente omitida (`!isSelectedEndpoint`) e o número
+sumia sob o destaque âmbar. Agora o número continua: sem o quadrado laranja opaco (o destaque
+âmbar/ciano da célula fica visível) e no esquema do X de ocupação — texto na cor viva do
+destaque (`xColor`), contorno em `darkenHex(xColor, 0.55)`. Prop nova `selectedColor` no
+`QueueMark`; vale pra célula de lote e ponto avulso. (Essa mudança já tinha sido feita na
+máquina Linux, mas nunca chegou ao GitHub — refeita aqui.)

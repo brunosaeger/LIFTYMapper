@@ -324,28 +324,36 @@ function SeqBadge({ seq, size, color, rotation = 0, scaleX = 1, scaleY = 1 }) {
 // Interior do número em laranja mais claro, contorno mais escuro. Contra-
 // rotaciona/contra-escala (igual SeqBadge) pra ficar na horizontal e do
 // mesmo tamanho mesmo em lote girado/esticado.
-function QueueMark({ number, size, rotation = 0, scaleX = 1, scaleY = 1 }) {
+//
+// `selectedColor` (pedido do usuário, 2026-10-23): quando a célula também é
+// origem/destino da rota em destaque (seleção do painel Fila, rota atual,
+// Ponto a Ponto), o número continua aparecendo -- antes sumia. Sem o
+// quadrado laranja opaco, pra não esconder o destaque, e no esquema do X de
+// ocupação: número na cor viva do destaque, contorno numa versão escurecida.
+function QueueMark({ number, size, rotation = 0, scaleX = 1, scaleY = 1, selectedColor = null }) {
   if (!number) return null;
   const fontSize = size * 0.78;
   return (
     <>
-      <Rect
-        x={-size / 2}
-        y={-size / 2}
-        width={size}
-        height={size}
-        cornerRadius={3}
-        fill={hexToRgba(COLORS.accentOrange, 0.82)}
-        listening={false}
-      />
+      {!selectedColor && (
+        <Rect
+          x={-size / 2}
+          y={-size / 2}
+          width={size}
+          height={size}
+          cornerRadius={3}
+          fill={hexToRgba(COLORS.accentOrange, 0.82)}
+          listening={false}
+        />
+      )}
       <Group rotation={-rotation} scaleX={1 / (scaleX || 1)} scaleY={1 / (scaleY || 1)} listening={false}>
         <Text
           text={String(number)}
           fontFamily="Arial Black, Helvetica Neue, Arial, sans-serif"
           fontSize={fontSize}
           fontStyle="bold"
-          fill={lightenHex(COLORS.accentOrange, 0.55)}
-          stroke={darkenHex(COLORS.accentOrange, 0.62)}
+          fill={selectedColor || lightenHex(COLORS.accentOrange, 0.55)}
+          stroke={selectedColor ? darkenHex(selectedColor, 0.55) : darkenHex(COLORS.accentOrange, 0.62)}
           strokeWidth={Math.max(1, fontSize * 0.18)}
           fillAfterStrokeEnabled
           align="center"
@@ -421,7 +429,7 @@ function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNu
           strokeWidth={2}
         />
         {isOccupied && <XMark size={size} color={xColor} outlineColor={stroke} opacity={isPreviewing ? 0.5 : 1} />}
-        {!(isPickup || isDropoff) && <QueueMark number={queueNumber} size={size} rotation={point.rotation} />}
+        <QueueMark number={queueNumber} size={size} rotation={point.rotation} selectedColor={isPickup || isDropoff ? xColor : null} />
         <SeqBadge seq={seqNumber} size={size} color={stroke} rotation={point.rotation} />
         {showName && (
         <Text
@@ -495,10 +503,10 @@ const LotCell = memo(function LotCell({ name, displayName, index, cellSize, fill
         strokeWidth={2}
       />
       {isOccupied && <XMark size={cellSize} color={xColor} outlineColor={stroke} opacity={isPreviewing ? 0.5 : 1} />}
-      {/* Destino de tarefa na fila (ver QueueMark). A seleção atual de Ponto a
-          Ponto (cyan/âmbar) fica por cima: se a célula é origem/destino da
-          seleção em andamento, a marca da fila não aparece. */}
-      {!isSelectedEndpoint && <QueueMark number={queueNumber} size={cellSize} rotation={lotRotation} scaleX={lotScaleX} scaleY={lotScaleY} />}
+      {/* Destino de tarefa na fila (ver QueueMark). Se a célula também é
+          origem/destino da rota em destaque, o destaque (cyan/âmbar) continua
+          valendo e o número fica por cima na cor dele, sem o quadrado laranja. */}
+      <QueueMark number={queueNumber} size={cellSize} rotation={lotRotation} scaleX={lotScaleX} scaleY={lotScaleY} selectedColor={isSelectedEndpoint ? xColor : null} />
       {/* Triângulo de "facing": só na célula 1 (índice 0, a sem numeração)
           de cada LOTE — pontos avulsos ("lotes coringa") são um componente
           totalmente separado (PointMarker) e nunca passam por aqui, então
