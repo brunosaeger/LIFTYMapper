@@ -7,7 +7,7 @@
 
 export const CONFIG = {
   API_BASE: '/api/reeman-dispatch-service', // caminho relativo -> proxy local (server.py)
-  PROJECT_ID: 13,
+  PROJECT_ID: 15,
 };
 
 export async function apiGet(path) {
