@@ -770,8 +770,38 @@ def _recover_from_rotate_error_if_stuck():
 # `_execute_cancel_current_locked`/`robot_create_and_run_unload_chain` pra o
 # que acontece DEPOIS de cancelar nesse segundo caso.
 DOCKING_ALIGNMENT_CANCEL_MARGIN_DEGREES = 30.0  # "faltando uns 30" -- pedido explícito do usuário
-DOCKING_ALIGNMENT_CANCEL_PROXIMITY_METERS = 1.5  # raio pra considerar "já chegou no docking point" -- evita falso-positivo de alinhamento por coincidência longe do docking, ainda em rota normal
+# EIXO do docking (2026-10-23) -- substitui o raio de 1,5 m em volta do H.
+# Incidente de campo 2026-10-22 (FDtoFD2, 2 vezes): vindo pelo oeste
+# (P18 -> P16), o robô anda PARALELO ao pallet FD, então "a <=1,5 m do HFD e
+# a <=30° do theta" ficou verdadeiro no meio da curva ao lado do P16, a 1,44 m
+# DE LADO do eixo do docking -- cancelou longe do HFD. Auditoria de 150
+# aproximações reais (heartbeats do dispatch, 10/10 a 23/10): o raio
+# disparava fora do eixo em 15 delas (lotes F*, NA/NB, DD2, CAY2, A4); a regra
+# do eixo dispara no MESMO instante nas outras 135 e, nessas 15, só quando o
+# robô já está sobre o eixo (2-7 s antes de chegar no H).
+# O eixo é a reta pallet -> H (sentido do theta do pallet). `s` = posição ao
+# longo dela a partir do H: positivo = à frente do H (de onde o robô chega --
+# nos lotes F* ele gira no nó P5/P6/P12/P13, ~0,7 m à frente, e entra de ré
+# até o H); negativo = já entrando no pallet.
+DOCKING_ALIGNMENT_CANCEL_LATERAL_METERS = 0.35  # desvio máximo DE LADO do eixo (medido em campo: <=0,05 m sobre o eixo; ~1,2-1,4 m nos falsos positivos)
+DOCKING_ALIGNMENT_CANCEL_AHEAD_METERS = 1.0  # até onde à frente do H ainda conta (nó de giro dos lotes F* fica a 0,64-0,91 m)
+DOCKING_ALIGNMENT_CANCEL_BEHIND_METERS = 0.2  # passou disso pra dentro do pallet = já começou a entrada, não cancela mais aquela ação
 DOCKING_ALIGNMENT_CANCEL_POLL_INTERVAL_SECONDS = 0.5  # bem mais rápido que o cancelPending comum (2s) -- a janela entre "dentro da margem de 30°" e a câmera travar é curta, dos dois lados
+
+
+def robot_point_positions(target_map=ROBOT_TARGET_MAP):
+    """{nome: {'x','y','theta'}} de todos os pontos calibrados do mapa, numa
+    chamada só, ou None se a lista falhar."""
+    try:
+        points = _robot_call("GET", "/map/point/list/" + target_map) or []
+    except Exception:
+        return None
+    result = {}
+    for p in points:
+        pos = p.get("position") or []
+        if p.get("name") and len(pos) >= 3:
+            result[p["name"]] = {"x": pos[0], "y": pos[1], "theta": pos[2]}
+    return result
 
 
 def robot_find_point_position(name, target_map=ROBOT_TARGET_MAP):
@@ -780,28 +810,32 @@ def robot_find_point_position(name, target_map=ROBOT_TARGET_MAP):
     que por nome em vez de proximidade (aqui já sabemos exatamente qual
     ponto queremos: o docking point "H<pallet>" ou o próprio ponto de
     pallet)."""
-    try:
-        points = _robot_call("GET", "/map/point/list/" + target_map) or []
-    except Exception:
-        return None
-    for p in points:
-        if p.get("name") != name:
-            continue
-        pos = p.get("position") or []
-        if len(pos) < 3:
-            return None
-        return {"x": pos[0], "y": pos[1], "theta": pos[2]}
-    return None
+    return (robot_point_positions(target_map) or {}).get(name)
+
+
+def _docking_axis_geometry(pose, docking, pallet):
+    """(s, lateral, diff) da pose em relação ao eixo do docking -- ver
+    DOCKING_ALIGNMENT_CANCEL_* acima. `diff` em graus, contra o theta
+    PRÓPRIO do pallet (ver correção de 2026-09-25 abaixo)."""
+    ux, uy = math.cos(pallet["theta"]), math.sin(pallet["theta"])
+    dx, dy = pose["x"] - docking["x"], pose["y"] - docking["y"]
+    s = dx * ux + dy * uy
+    lateral = abs(dy * ux - dx * uy)
+    diff = abs(_normalize_angle_degrees(pallet["theta"] - pose["theta"]))
+    return s, lateral, diff
 
 
 def _docking_alignment_cancel_ready(pallet_point):
-    """True = o robô já está sobre o docking point ("H" + pallet_point) e
-    alinhado (dentro da margem) rumo a ele -- seguro cancelar agora, é o
-    giro final que o robô já faz de qualquer jeito (na coleta OU na
-    entrega, mesmo mecanismo dos dois lados). False = ainda não chegou lá
-    ou ainda não alinhou o suficiente -- espera mais. None = não deu pra
-    determinar (pose indisponível, ou os pontos "H<pallet_point>"/
-    pallet_point não existem no mapa) -- quem chama decide o fallback.
+    """True = o robô já está sobre o EIXO do docking point ("H" +
+    pallet_point) -- de lado no máximo DOCKING_ALIGNMENT_CANCEL_LATERAL_
+    METERS, entre AHEAD à frente do H e BEHIND pra dentro do pallet -- e
+    alinhado (dentro da margem) -- seguro cancelar agora, é o giro final que
+    o robô já faz de qualquer jeito (na coleta OU na entrega, mesmo mecanismo
+    dos dois lados). False = ainda não chegou lá, ainda não alinhou o
+    suficiente, ou já passou do H pra dentro do pallet -- espera mais. None =
+    não deu pra determinar (pose indisponível, ou os pontos
+    "H<pallet_point>"/pallet_point não existem no mapa) -- quem chama decide
+    o fallback.
 
     CORRIGIDO 2026-09-25 (1ª tentativa de campo falhou -- câmera reconheceu
     antes do cancelamento disparar): o alvo de alinhamento NÃO é o rumo
@@ -818,18 +852,23 @@ def _docking_alignment_cancel_ready(pallet_point):
     except Exception as err:
         print("alinhamento de docking: pose indisponível (%s) -- cai pro check-turn." % err)
         return None
-    docking = robot_find_point_position("H" + pallet_point)
-    pallet = robot_find_point_position(pallet_point)
+    points = robot_point_positions() or {}
+    docking = points.get("H" + pallet_point)
+    pallet = points.get(pallet_point)
     if docking is None or pallet is None:
         print("alinhamento de docking: docking 'H%s' ou pallet '%s' não encontrado no mapa -- cai pro check-turn." % (
             pallet_point, pallet_point))
         return None
-    dist = math.hypot(pose["x"] - docking["x"], pose["y"] - docking["y"])
-    diff = abs(_normalize_angle_degrees(pallet["theta"] - pose["theta"]))
-    print("alinhamento de docking (%s): dist=%.2fm (limite %.2fm), diff angular=%.1f (margem %.0f)" % (
-        pallet_point, dist, DOCKING_ALIGNMENT_CANCEL_PROXIMITY_METERS, diff, DOCKING_ALIGNMENT_CANCEL_MARGIN_DEGREES))
-    if dist > DOCKING_ALIGNMENT_CANCEL_PROXIMITY_METERS:
-        return False  # ainda a caminho do docking point
+    s, lateral, diff = _docking_axis_geometry(pose, docking, pallet)
+    nearest = min(points, key=lambda n: math.hypot(points[n]["x"] - pose["x"], points[n]["y"] - pose["y"]))
+    print("alinhamento de docking (%s): pose=(%.2f, %.2f, %.1f) perto de %s | eixo: s=%+.2fm (de -%.2f a +%.2f), lateral=%.2fm (limite %.2f), diff angular=%.1f (margem %.0f)" % (
+        pallet_point, pose["x"], pose["y"], math.degrees(pose["theta"]), nearest,
+        s, DOCKING_ALIGNMENT_CANCEL_BEHIND_METERS, DOCKING_ALIGNMENT_CANCEL_AHEAD_METERS,
+        lateral, DOCKING_ALIGNMENT_CANCEL_LATERAL_METERS, diff, DOCKING_ALIGNMENT_CANCEL_MARGIN_DEGREES))
+    if lateral > DOCKING_ALIGNMENT_CANCEL_LATERAL_METERS or s > DOCKING_ALIGNMENT_CANCEL_AHEAD_METERS:
+        return False  # ainda a caminho do docking point (fora do eixo ou longe à frente)
+    if s < -DOCKING_ALIGNMENT_CANCEL_BEHIND_METERS:
+        return False  # já entrando no pallet -- essa ação não cancela mais
     return diff <= DOCKING_ALIGNMENT_CANCEL_MARGIN_DEGREES
 
 
@@ -845,19 +884,28 @@ def _current_route_cancel_ready(current, pickup_cleared):
     """Decide se é seguro cancelar a currentRoute JÁ DISPARADA agora --
     alinhamento de docking dos dois lados (ver comentário acima do arquivo):
     ANTES do pickup usa o ponto de ORIGEM, DEPOIS (pickup_cleared) usa o de
-    DESTINO -- é lá que o robô vai alinhar de qualquer jeito. Mesmo contrato
-    de robot_can_turn_safely: True/False = resposta de verdade, None nunca é
-    devolvido (cai pro check-turn como rede de segurança em vez de travar o
-    cancelamento pra sempre)."""
+    DESTINO -- é lá que o robô vai alinhar de qualquer jeito. Sempre devolve
+    True/False, nunca None.
+
+    Sem resposta do alinhamento (pose indisponível agora, ou pontos ausentes
+    no mapa) tenta o check-turn; se ele também não souber -- o normal desde
+    que o bridge da 8091 foi desligado (TURN_CHECK_ENABLED = False) --
+    devolve False: o cancelamento fica pendente e é reavaliado no próximo
+    ciclo. Antes devolvia o None do check-turn, que os chamadores tratam
+    como "pode cancelar" -- uma falha de leitura da pose cancelava a rota
+    onde o robô estivesse (2026-10-23). Se ficar preso, o Limit Breaker
+    força."""
     target_point = current["dropoff"] if pickup_cleared else current["pickup"]
     ready = _docking_alignment_cancel_ready(target_point)
     if ready is True:
         print("alinhamento de docking: dentro da margem -- cancelando agora.")
     if ready is not None:
         return ready
-    # não achou os pontos calibrados ("H"+alvo / alvo) ou pose indisponível
-    # agora -- cai pro check-turn abaixo em vez de travar.
-    return robot_can_turn_safely()
+    turn_ok = robot_can_turn_safely()
+    if turn_ok is None:
+        print("alinhamento de docking indisponível e check-turn sem resposta -- cancelamento continua pendente.")
+        return False
+    return turn_ok
 
 
 # --- status ao vivo do robô pro banner "Em Operação" / "Recarregando" -----

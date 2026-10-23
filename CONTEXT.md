@@ -5070,3 +5070,58 @@ aparece (UTF-8 padrão). Correção: TODO `read_text/write_text` do `server.py` 
 `ValueError` (cobre UnicodeDecodeError). Reproduzido e verificado rodando o server com
 `LC_ALL=C PYTHONUTF8=0` (antes: POST derruba a conexão; depois: 200 e arquivo UTF-8 válido).
 LIÇÃO: testar o servidor com locale não-UTF-8 antes de gerar exe pra Windows.
+
+## Projeto do dispatch 13 -> 15 (2026-10-21/22)
+Depois da atualização do dispatch de 21/10 o robô passou pro projeto **15 ("单机项目")**;
+o 13 ("APItest") ficou só com histórico. `ROBOT_PROJECT_ID` (`server.py`) e `PROJECT_ID`
+(`web/src/api/lifty.js`) agora são 15. Logs do dispatch: `logs/单机项目/` (antes `logs/APItest/`).
+Raio-x completo do robô (somente leitura) no `reemansniff.md` — arquivo LOCAL, de propósito
+fora do git (repositório público; descreve IPs/acessos do robô).
+
+## Cancelamento por alinhamento: RAIO trocado por EIXO do docking (2026-10-23, AINDA NÃO VALIDADO EM CAMPO)
+
+**Incidente (2026-10-22, ~16:27 e ~16:47, `FDtoFD2` 2x)**: cancelamento pré-pickup pedido a
+caminho do HFD; o robô cancelou **ao lado do P16, a ~1,45 m do HFD**, sem chegar ao docking
+(depois girou no P16 sem travar, mas fora do princípio "sobre o docking e alinhado").
+Reconstruído pelos heartbeats do dispatch (`Hbt(... lI=(p=[x,y,θ]) ...)`, ~1 Hz; relógio do log
+≈ PC + 18h57): vindo pelo oeste (P18 -> P16) o robô anda **paralelo** ao pallet FD (θ=1°), então
+"≤ 1,5 m do H e ≤ 30° do theta" ficou verdadeiro no meio da curva, a 1,44 m **de lado** do eixo.
+
+**Como os lotes F\* funcionam de verdade** (coleta normal em FD, 14/10): o planejador manda
+`... P16 -> P5 -> HFD (r=true)` — o robô para no **P5** (nó do corredor, 0,7 m À FRENTE do HFD,
+sobre o eixo), **gira no lugar** pra ~0° e entra **de ré** até o HFD; a entrada no pallet
+(`isDocking=true`) começa assim que chega. Ou seja, o "giro de alinhamento" dos F\* é no P5, não
+no H. (Nos lotes comuns é sobre o próprio H, como já validado em 2026-09-25.)
+
+**Auditoria** (150 aproximações reais, 10/10 a 23/10): o raio disparava fora do eixo em 15
+(lotes F\*, NA/NB, DD2, CAY2, A4 — às vezes com o robô ainda dentro do lote vizinho). A regra
+do eixo dispara no MESMO instante nas outras 135 e, nessas 15, só sobre o eixo, 2-7 s antes do H.
+
+**Regra nova** (`_docking_alignment_cancel_ready` / `_docking_axis_geometry`): eixo = reta
+pallet -> H no sentido do theta do pallet; `s` = posição ao longo dele a partir do H (+ = à
+frente, de onde o robô chega). Libera só com desvio lateral ≤ `DOCKING_ALIGNMENT_CANCEL_
+LATERAL_METERS` (0,35), `-BEHIND (0,2) ≤ s ≤ AHEAD (1,0)` e diff ≤ 30° (inalterado). O limite de
+trás é novo: com o raio, dava pra "cancelar" com o robô já entrando de ré no pallet; agora,
+passou de 0,2 m pra dentro, aquela ação não cancela mais (pré-pickup: pega o pallet e o
+cancelamento segue pendente pro lado do destino, igual ao fluxo pós-pickup).
+`DOCKING_ALIGNMENT_CANCEL_PROXIMITY_METERS` saiu. `robot_point_positions()` busca a lista de
+pontos uma vez só (antes eram 2 GETs por checagem). O log de cada checagem agora traz pose,
+ponto calibrado mais próximo, `s`, lateral e diff — dá pra analisar um incidente só pelo log do
+`server.py`.
+
+**Brecha fechada no fallback** (`_current_route_cancel_ready`): sem pose (falha de rede), caía
+no check-turn; com o bridge desligado ele devolve `None`, e os chamadores tratam isso como
+"pode cancelar" — cancelava onde o robô estivesse. Agora, se o check-turn também não souber,
+devolve `False` (cancelamento continua pendente e é reavaliado no próximo ciclo; Limit Breaker
+força se precisar).
+
+**Fora do escopo, de propósito**: `STALL_AT_ORIGIN_RADIUS_METERS` (1,5 m) do alerta "sensor do
+garfo" usa a mesma ideia de raio, mas só escolhe o TEXTO do aviso vermelho — não cancela nada.
+
+**Testado isolado** (17 casos, `_robot_call`/`_slam_call` mockados, sem rede): as poses dos
+dois cancelamentos de ontem não liberam; replay das trajetórias reais de ontem não libera até o
+instante do cancelamento real; replay da coleta normal de 14/10 libera no P5 logo após o giro
+(mesmo instante da regra antiga); HEXP via P21 (EX\*) libera; sobre o HCAX com alvo CAX2 (lote
+vizinho) não libera; entrando no pallet (s = -0,5) não libera; sem pose -> pendente.
+**Validar em campo**: repetir `FDtoFD2` vindo pelo oeste e cancelar no caminho — deve cancelar
+no P5 depois do giro (log: `perto de P5 | eixo: s=+0.7x`), não no P16.
