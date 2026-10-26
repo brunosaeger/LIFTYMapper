@@ -27,6 +27,10 @@ independente dos topicos ROS que ja existem no robo, nada mais:
   sempre com teto de tempo do lado do server.py — este bridge nunca
   decide sozinho por quanto tempo fica desligado, so publica o Bool
   que pedirem.
+- /mobile_base/commands/send_to_base (std_msgs/String) -- POST
+  /fork-nav-height publica o comando FIXO de "garfo pra altura de
+  navegacao" (o mesmo que o app do tablet manda), ver
+  FORK_NAV_HEIGHT_COMMAND. Nenhum outro conteudo e aceito.
 
 Modo de uso pretendido (por enquanto): MANUAL, sob demanda, via SSH — nao
 e um systemd service, nao inicia sozinho no boot. So vira permanente se/
@@ -65,10 +69,19 @@ import threading
 import urllib.parse
 
 import rospy
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import Bool, Float32, String
 
 PORT = 8091
 RESPONSE_TIMEOUT_SECONDS = 5
+
+# Garfo -> altura de navegacao (2026-10-26). E EXATAMENTE o comando que o app
+# do tablet manda pra MCU quando comeca a navegar depois de uma acao (visto no
+# forklift_log do app: "send: send_to_base[208 4 25 1 44 1]" -> garfo vai pra
+# ~300 mm). O app pula esse passo depois de cancelamento e depois da energia;
+# o server.py manda nesses casos. So este comando FIXO e aceito -- o bridge
+# nunca repassa bytes vindos da rede pra MCU.
+FORK_NAV_HEIGHT_TOPIC = "/mobile_base/commands/send_to_base"
+FORK_NAV_HEIGHT_COMMAND = "208 4 25 1 44 1"
 
 _lock = threading.Lock()  # serializa: o par de topicos nao tem "numero de pedido" amarrando pergunta->resposta
 _response_event = threading.Event()
@@ -76,6 +89,7 @@ _last_response = {"value": None}
 
 pub = None  # setado no __main__, antes do HTTP server comecar a atender
 obs3d_pub = None  # idem -- publisher do /robot_api/set_obs3d_switch
+fork_pub = None  # idem -- publisher do /mobile_base/commands/send_to_base
 
 
 def _on_turn_check_ok(msg):
@@ -90,6 +104,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_check_turn(parsed)
         elif parsed.path == "/obstacle-3d":
             self._handle_obstacle_3d(parsed)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    # POST (nao GET) de proposito: move o garfo, nao pode disparar por um
+    # navegador abrindo a URL. Quem decide QUANDO e o server.py (so entre
+    # tarefas, com o robo fora do lote) -- aqui so publica, uma vez.
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/fork-nav-height":
+            fork_pub.publish(String(data=FORK_NAV_HEIGHT_COMMAND))
+            self._json(200, {"sent": FORK_NAV_HEIGHT_COMMAND})
         else:
             self.send_response(404)
             self.end_headers()
@@ -155,12 +181,14 @@ if __name__ == "__main__":
     pub = rospy.Publisher("/robot_api/turn_check_angle", Float32, queue_size=1)
     rospy.Subscriber("/robot_api/turn_check_ok", Bool, _on_turn_check_ok)
     obs3d_pub = rospy.Publisher("/robot_api/set_obs3d_switch", Bool, queue_size=1)
+    fork_pub = rospy.Publisher(FORK_NAV_HEIGHT_TOPIC, String, queue_size=1)
     rospy.sleep(0.5)  # da tempo dos publishers se registrarem no master antes do 1o uso
 
     httpd = http.server.HTTPServer(("0.0.0.0", PORT), Handler)
     print("Bridge rodando:")
     print("  http://0.0.0.0:%d/check-turn?angle=<graus>" % PORT)
     print("  http://0.0.0.0:%d/obstacle-3d?on=<1 ou 0>" % PORT)
+    print("  POST http://0.0.0.0:%d/fork-nav-height  (garfo -> altura de navegacao)" % PORT)
     print("Ctrl+C pra parar.")
     try:
         httpd.serve_forever()

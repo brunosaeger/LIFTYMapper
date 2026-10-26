@@ -5135,3 +5135,43 @@ sumia sob o destaque âmbar. Agora o número continua: sem o quadrado laranja op
 destaque (`xColor`), contorno em `darkenHex(xColor, 0.55)`. Prop nova `selectedColor` no
 `QueueMark`; vale pra célula de lote e ponto avulso. (Essa mudança já tinha sido feita na
 máquina Linux, mas nunca chegou ao GitHub — refeita aqui.)
+
+## Incidente da câmera 2026-10-27 (relógio do robô): `level_dist = 0` travou o algoritmo de pallet
+Ajustando a câmera no PalletPro, `level_dist` foi de 30 → 0 e gravado na câmera. Desde então o
+algoritmo de pallet DENTRO da câmera não iniciava: o driver do robô logava `gvcp start success,
+but not receive any stream … algor:1` e entrava em loop `LX_CMD_GET_NEW_FRAME error -26` (~1 GB de
+log em 9 min — encheria o disco), app dispatch mostrava câmera "Abnormal", PalletPro travava ao
+ligar a detecção em tempo real, e a câmera RECUSAVA gravar parâmetros novos
+(`LX_ERROR/LX_E_INPUT_ILLEGAL`). Reiniciar/desligar não resolve (a config fica na câmera).
+Resolveu voltando `level_dist` pra 30 no PalletPro (2ª tentativa aceita) → `start stream success`.
+Onde olhar: `C:\PalletPro\logs\lanxin_vision_*.log` (log do PalletPro: `param antigo --> novo`,
+`Detected.` = detecção OK, `Not Found! RET=-6`), `~/downfile/roslog/*.log` no robô (driver).
+Manual do PalletPro (pág. 9): RET `-2/-6` = poucos pontos / pernas do pallet não detectadas
+(causas: altura da câmera/garfo mudou, câmera inclinou, pernas encobertas). Calibrar pela
+calibração de perto/de longe do manual, não ajustando Euler à mão.
+
+## Garfo de volta à altura de navegação após cancelamento/energia (2026-10-26, AINDA NÃO VALIDADO EM CAMPO)
+**Achado** (log do app do tablet espelhado no robô: `~/downfile/powerlog/forklift_log/`, hora
+local; `叉臂高度: N` = altura real do garfo em mm; comandos à MCU como `send: send_to_base[...]`):
+o app manda `send_to_base[208 4 25 1 44 1]` = "garfo pra altura de navegação, 300 mm" (valor
+do app dispatch) SÓ quando começa a navegar depois de concluir uma ação. Depois de
+**cancelamento** (sem o passo em 45 de 69 coletas) e de chegar na **energia** (16 de 21) ele pula
+— a coleta seguinte começa com o garfo embaixo (~20 mm). O comando de altura de coleta
+(`208 4 25 1 60 0`, 6,5 cm) para o garfo em ~49 mm quando ele DESCE de 300 mm, mas em ~71-75 mm
+quando SOBE do chão (motor passa do alvo conforme a direção) — 2,5 cm mais alto na coleta.
+Com pallet: cancelamento pós-coleta depois do app já baixar pra ~120 mm faz a devolução viajar
+baixa (o app não volta pra 300 mm). O app nunca baixa o garfo depois de um cancelamento (150 de
+161 sem comando; 11 mandam o próprio 300) — sem corrida com ele.
+**Implementação**: bridge do robô (`robot-bridge/lifty_turn_check_bridge.py`, porta 8091) ganhou
+`POST /fork-nav-height`, que publica o comando FIXO `208 4 25 1 44 1` em
+`/mobile_base/commands/send_to_base` (std_msgs/String — o mesmo caminho do app via
+`yoyo_nativeapp`). `server.py`: `robot_fork_to_nav_height(reason)` (POST + espera 2,5 s,
+fail-open) chamado (1) depois de cancelamento EXECUTADO pela regra do eixo do docking — handler
+`_queue_cancel_current` e `cancelPending` do `_queue_tick` — antes da devolução do pallet / próxima
+rota; nunca em cancelamento forçado (Limit Breaker, pode estar dentro do lote); (2) em
+`_try_dispatch_current` quando o robô está carregando (saindo da energia), antes de `_fire_route`.
+Com o robô sobre o eixo (s ≥ -0,2 m) as pontas do garfo ficam fora do pallet. Chave:
+`FORK_NAV_HEIGHT_ENABLED`. **Pendente antes de usar**: confirmar o formato exato do texto no tópico
+(escuta passiva de `/mobile_base/commands/send_to_base` durante uma tarefa), atualizar o bridge no
+robô (`curl` do raw GitHub + `nohup`) e teste supervisionado (garfo no chão, robô fora de lote,
+um POST → garfo deve ir a ~300 mm). Testado isolado: 14 casos.

@@ -572,6 +572,48 @@ def robot_can_turn_safely(angle=TURN_CHECK_ANGLE_DEGREES):
         return None
 
 
+# --- garfo de volta à altura de navegação (2026-10-26) ---------------------
+# O app do tablet manda a MCU levar o garfo pra altura de navegação (~300 mm,
+# configurada no app dispatch) só quando começa a navegar DEPOIS de concluir
+# uma ação. Depois de um CANCELAMENTO ou de chegar na ENERGIA ele pula esse
+# passo (forklift_log do app, 20-26/10: sem o passo em 45 de 69 coletas após
+# cancelamento e 16 de 21 após a energia) e a coleta seguinte começa com o
+# garfo embaixo (~20 mm). Aí o comando de altura de coleta leva o garfo
+# SUBINDO e ele para ~2,5 cm acima do normal (6,5 cm: ~71-75 mm subindo
+# contra ~49 mm descendo de 300 mm) -- o motor passa do alvo conforme a
+# direção, e a altura de navegação é o que garante que a coleta sempre chega
+# descendo. Também com pallet no garfo: depois de um cancelamento pós-coleta
+# o app não volta pra 300 mm e a devolução pode viajar a ~12 cm.
+# O bridge do robô (robot-bridge/, mesma porta do check-turn) publica o MESMO
+# comando que o app usa. Só é chamado entre tarefas e com o robô fora do lote
+# (cancelamento executado pela regra do eixo do docking, ou saindo do
+# carregador) -- nunca no meio de uma ação do app nem depois de cancelamento
+# forçado (Limit Breaker), que pode acontecer com o garfo dentro do lote.
+# Fail-open: bridge fora do ar = segue como antes, sem travar nada.
+FORK_NAV_HEIGHT_ENABLED = True
+FORK_NAV_HEIGHT_PATH = "/fork-nav-height"
+FORK_NAV_HEIGHT_SETTLE_SECONDS = 2.5  # medido: o garfo sobe de ~20 pra ~300 mm em ~3 s, de ~120 em ~1,5 s
+
+
+def robot_fork_to_nav_height(reason):
+    """Manda o garfo pra altura de navegação e espera ele chegar antes de
+    devolver. True = comando aceito pelo bridge; False = não deu (segue sem)."""
+    if not FORK_NAV_HEIGHT_ENABLED:
+        return False
+    host = urllib.parse.urlparse(ROBOT_HOST).hostname
+    url = "http://%s:%d%s" % (host, TURN_CHECK_PORT, FORK_NAV_HEIGHT_PATH)
+    try:
+        req = urllib.request.Request(url, data=b"", method="POST")
+        with urllib.request.urlopen(req, timeout=TURN_CHECK_TIMEOUT_SECONDS) as resp:
+            resp.read()
+    except Exception as err:
+        print("Aviso: não consegui mandar o garfo pra altura de navegação (%s): %s -- segue sem." % (reason, err))
+        return False
+    print("Garfo -> altura de navegação (%s); aguardando %.1fs antes de seguir." % (reason, FORK_NAV_HEIGHT_SETTLE_SECONDS))
+    time.sleep(FORK_NAV_HEIGHT_SETTLE_SECONDS)
+    return True
+
+
 # --- destravamento manual do ROTATE_ERROR (ver "Destravamento manual do
 # ROTATE_ERROR" no CONTEXT.md, ideia e validação de campo do usuário,
 # 2026-09-24) --------------------------------------------------------------
@@ -2061,6 +2103,12 @@ def _try_dispatch_current():
         # travar os GET /api/live-state de todo mundo.
         safe = robot_can_turn_safely()
 
+    # Saindo do carregador: o app não leva o garfo pra altura de navegação
+    # depois da energia (ver robot_fork_to_nav_height). Fora do lock -- a
+    # espera do garfo subir não pode prender o QUEUE_LOCK.
+    if safe is not False and _robot_status_cache.get("charging"):
+        robot_fork_to_nav_height("saindo do carregador")
+
     with QUEUE_LOCK:
         state = _read_queue_state()
         current = state.get("currentRoute")
@@ -2371,7 +2419,9 @@ def _queue_tick():
         # Checagem fresca ANTES de decidir (ver CONTEXT.md, incidente
         # 2026-09-30 — mesmo cuidado do handler HTTP em _queue_cancel_current).
         cancel_pending_pickup_cleared = _resolve_pickup_cleared_for_cancel(cancel_pending_current, cancel_pending_pickup_cleared)
-        if _limit_breaker_active() or _current_route_cancel_ready(cancel_pending_current, cancel_pending_pickup_cleared):
+        forced = _limit_breaker_active()
+        if forced or _current_route_cancel_ready(cancel_pending_current, cancel_pending_pickup_cleared):
+            executed = False
             with QUEUE_LOCK:
                 state = _read_queue_state()
                 current = state.get("currentRoute")
@@ -2380,6 +2430,7 @@ def _queue_tick():
                         state["pickupCleared"] = True
                     try:
                         _execute_cancel_current_locked(state, current)
+                        executed = True
                     except Exception as err:
                         # tenta de novo no próximo tick — a rota atual
                         # continua rodando normalmente entretanto, sem
@@ -2387,6 +2438,13 @@ def _queue_tick():
                         # "adiado" que queremos).
                         print("cancelPending: erro ao executar cancelamento após janela segura: %s" % err)
                 _write_queue_state(state)
+            # Cancelou pela regra do eixo = robô sobre o docking, garfo fora
+            # do lote: devolve o garfo à altura de navegação antes da próxima
+            # tarefa (ou da devolução do pallet) -- o app não faz isso depois
+            # de cancelamento. Cancelamento forçado pode ter sido em qualquer
+            # lugar: não mexe no garfo.
+            if executed and not forced:
+                robot_fork_to_nav_height("depois do cancelamento")
             # Pós-pickup (ver CONTEXT.md, "Cancelamento pós-pickup"): resolve
             # já, no mesmo tick, em vez de esperar o ciclo normal (4s) — o
             # pallet está no garfo, quanto antes melhor. Idempotente/no-op
@@ -3717,6 +3775,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self._relay(502, "application/json", json.dumps({"error": "Erro ao cancelar a rota atual: " + str(err)}, ensure_ascii=False).encode("utf-8"))
                 return
             _write_queue_state(state)
+        # Garfo de volta à altura de navegação (ver robot_fork_to_nav_height)
+        # -- só quando quem liberou foi a regra do eixo do docking; forçado
+        # (Limit Breaker) pode ter cancelado com o garfo dentro do lote.
+        if not force and not _limit_breaker_active():
+            robot_fork_to_nav_height("depois do cancelamento")
         # Pós-pickup (ver CONTEXT.md, "Cancelamento pós-pickup"): resolve já,
         # na mesma resposta, em vez de esperar o próximo tick — o pallet está
         # no garfo, quanto antes melhor. No caminho comum (sem pallet), é
