@@ -5175,3 +5175,70 @@ Com o robô sobre o eixo (s ≥ -0,2 m) as pontas do garfo ficam fora do pallet.
 (escuta passiva de `/mobile_base/commands/send_to_base` durante uma tarefa), atualizar o bridge no
 robô (`curl` do raw GitHub + `nohup`) e teste supervisionado (garfo no chão, robô fora de lote,
 um POST → garfo deve ir a ~300 mm). Testado isolado: 14 casos.
+
+## Limpeza automática da fila parada há 1h (2026-10-27, AINDA NÃO VALIDADO EM CAMPO)
+Pedido do usuário: o servidor fica no ar 24/7 na VM, então uma fila esquecida (rota em andamento
+e/ou rotas esperando, sem nada mudar) não pode ficar lá pra sempre. `server.py`:
+`_refresh_idle_queue_timeout()`, chamado no `_queue_tick` logo depois da checagem de emergência
+(antes do bloco de `cancelPending`). Compara uma "impressão digital" do estado
+(`_queue_activity_fingerprint`: ids/taskName de current/pending/fila, `pickupCleared`, UNLOAD
+pendente e os flags de espera); mudou => zera o contador. Contador persistido no
+`queue_state.json` (`idleFingerprint`/`idleSince`, horário de parede — sobrevive a reinício).
+Passou de `QUEUE_IDLE_TIMEOUT_SECONDS` (3600): `pendingRoute` (cancelada no robô se tinha
+`taskName`), `routeQueue` e `currentRoute` RESERVADA saem na hora (log `cancelled`); a rota EM
+ANDAMENTO vira `cancelPending` — mesmo fluxo do botão de cancelar (eixo do docking/giro seguro, e
+com pallet no garfo devolve à origem). O UNLOAD isolado pós-pickup nunca é cancelado. Não conta
+tempo com `cancelPending`, `awaitingCharge` ou UNLOAD pendente; emergência nem chega na função.
+Consequência: com o robô travado onde não dá pra cancelar com segurança, a rota fica em
+`cancelPending` (com a mensagem de sempre na tela) até um operador agir. Custo: só uma leitura do
+estado por tick; escreve só quando a impressão muda; rede só no instante da limpeza. Testado
+isolado: 8 casos.
+
+## Tarefas dependentes do mesmo envio caem juntas (2026-10-27, AINDA NÃO VALIDADO EM CAMPO)
+Pedido do usuário: em "Tarefas aguardando envio" dá pra montar AVULSAS que só são válidas porque
+uma anterior libera o caminho (ex: NA → x, depois NA2 → y). Cancelar a primeira deixava a
+segunda na fila, obstruída. Agora recebe o mesmo tratamento do grupo de "Lotes em sequência",
+mas só pra quem depende de verdade. `server.py`:
+- `_batch_dependencies(lots, occupied, pairs)` no `_queue_enqueue_batch`: contrafactual com a
+  mesma regra do `validate_route_chain` — pra cada tarefa i, refaz a cadeia sem ela; toda j > i
+  que fica inválida depende de i (transitivo). Cobre obstrução no lote, pegar onde uma anterior
+  soltou e soltar onde uma anterior esvaziou. Gravado na rota como `dependsOn: [ids]` (só entre
+  rotas do MESMO envio).
+- `_drop_dependents_from_queue(state, route)` substitui `_drop_group_from_queue` nos 4 pontos
+  (cancelar em andamento, cancelar reservada, task morta por fora, remover da fila pelo X): tira
+  o resto do grupo + quem tem a rota em `dependsOn`, em cascata (dependente de uma rota derrubada
+  pelo grupo também cai). Log igual ao do grupo (pendingRoute → `cancelled`).
+Sem mudança no front. Rotas enfileiradas antes deste deploy não têm `dependsOn`. Testado isolado:
+9 casos.
+
+## Garfo: validação de campo + subida depois do depósito (2026-10-27, VALIDADO EM CAMPO)
+- Formato do `send_to_base` confirmado por escuta passiva: texto puro separado por espaço, sem
+  colchetes (o `[…]` é só do log do app). `208 4 25 1 <lo> <hi>` = altura em mm, 16 bits
+  little-endian (`0 0` = chão ~20 mm, `60 0` = coleta do pallet azul, `44 1` = 300 mm). O
+  bridge (`robot-bridge/`) foi instalado no robô e o garfo foi a 312-313 mm. O bridge roda com
+  `nohup` e NÃO volta depois de reiniciar o robô — subir de novo na mão.
+- Altura real ao entrar no pallet azul (pedido 60 mm, 39 coletas 20-26/10): partindo de ~300 mm,
+  46-55 mm; partindo do chão, 71-75 mm até 23/10 ~15:50 e 50-53 mm depois disso.
+- Depois de baixar o pallet, o app sai de ré até o docking e segue com o garfo no chão (o
+  dispatch manda `RESET_ARM` na ordem seguinte e o app ignora). `_refresh_fork_after_drop`: rota
+  FINISHED arma uma vigia no ponto de depósito; a cada 1 s lê a pose no eixo H+ponto e sobe o
+  garfo (sem esperar) quando `s >= FORK_AFTER_DROP_MIN_S` (-0,10 m) e lateral <= 0,35 m. Medido
+  no CAX: a ré para em s=-0,17 e o app gira PARADO no H em s=-0,01 — a subida acontece no giro.
+  NÃO sobe (só registra no log) se: o robô saiu do eixo/passou de +1,0 m, passaram 60 s, o
+  ponto não existe no mapa, emergência (apaga a vigia), ou o H da coleta seguinte cai dentro da
+  faixa de subida (+0,3 m de folga — o app baixa o garfo pra coleta no H). Corredor paralelo
+  (CAX2 -> CAY2, H a 1,36 m de lado) não conflita. Modo manual: quem está na manopla é o
+  responsável (decidido na empresa).
+- Seletor manual/automático do robô (hardware): depois de ir pro manual, a placa não reconhecia
+  mais o automático (`叉车控制状态` preso em 1, knob sem clique pra direita). Ligar o robô já em
+  automático funciona — não mexer no knob até a manutenção.
+
+## Devolução do pallet passa pela mesma trava da AUTO_SYSTEM (2026-10-27, VALIDADO EM CAMPO)
+Ao cancelar com pallet no garfo, o robô começou a ir pra energia antes de receber o UNLOAD
+isolado (AUTO_SYSTEM #68474 criada antes do UNLOAD #68475). Duas causas: o UNLOAD não passava
+pela checagem antes/depois de disparar que as rotas normais têm, e a espera de 2,5 s do garfo
+(antes do UNLOAD) deixava o robô sem task. Agora `_create_task_cancelling_charge` é usada por
+`_fire_route` e por `_try_dispatch_post_pickup_unload` (checa antes, cancela depois, 2ª checagem
+de retardatária, vigia rápida de 20 s), e com devolução pendente o comando do garfo vai sem
+esperar (continua ANTES do UNLOAD: se a origem for perto, a altura de depósito do app não pode
+chegar antes do nosso 300 mm).

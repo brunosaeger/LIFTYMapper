@@ -343,6 +343,11 @@ QUEUE_POLL_INTERVAL_SECONDS = 4  # mesmo intervalo que o front usava pra sondar 
 # reprimir a task de carga (AUTO_SYSTEM) que o robô recria sozinho ao ficar
 # sem fila — é o que o mantém parado no lugar. Ver _emergency_suppress.
 EMERGENCY_POLL_INTERVAL_SECONDS = 1.5
+# Limpeza automática da fila parada (pedido do usuário, 2026-10-27 — o
+# servidor fica no ar 24/7 na VM): se a fila não muda NADA (nenhuma rota
+# enfileirada, cancelada, removida, reordenada, disparada ou concluída) por
+# esse tempo, é limpa sozinha. Ver _refresh_idle_queue_timeout.
+QUEUE_IDLE_TIMEOUT_SECONDS = 60 * 60
 # Cancelamento adiado (ver CONTEXT.md, "Cancelamento adiado até giro
 # seguro"): enquanto `cancelPending` está true, sonda MAIS RÁPIDO —
 # alguém está esperando isso resolver na tela, e a rota continua se
@@ -595,9 +600,10 @@ FORK_NAV_HEIGHT_PATH = "/fork-nav-height"
 FORK_NAV_HEIGHT_SETTLE_SECONDS = 2.5  # medido: o garfo sobe de ~20 pra ~300 mm em ~3 s, de ~120 em ~1,5 s
 
 
-def robot_fork_to_nav_height(reason):
-    """Manda o garfo pra altura de navegação e espera ele chegar antes de
-    devolver. True = comando aceito pelo bridge; False = não deu (segue sem)."""
+def robot_fork_to_nav_height(reason, settle=True):
+    """Manda o garfo pra altura de navegação e (settle=True) espera ele chegar
+    antes de devolver. True = comando aceito pelo bridge; False = não deu
+    (segue sem)."""
     if not FORK_NAV_HEIGHT_ENABLED:
         return False
     host = urllib.parse.urlparse(ROBOT_HOST).hostname
@@ -609,6 +615,9 @@ def robot_fork_to_nav_height(reason):
     except Exception as err:
         print("Aviso: não consegui mandar o garfo pra altura de navegação (%s): %s -- segue sem." % (reason, err))
         return False
+    if not settle:
+        print("Garfo -> altura de navegação (%s)." % reason)
+        return True
     print("Garfo -> altura de navegação (%s); aguardando %.1fs antes de seguir." % (reason, FORK_NAV_HEIGHT_SETTLE_SECONDS))
     time.sleep(FORK_NAV_HEIGHT_SETTLE_SECONDS)
     return True
@@ -948,6 +957,109 @@ def _current_route_cancel_ready(current, pickup_cleared):
         print("alinhamento de docking indisponível e check-turn sem resposta -- cancelamento continua pendente.")
         return False
     return turn_ok
+
+
+# --- garfo de volta à altura de navegação DEPOIS DE DEPOSITAR (2026-10-27) --
+# Depois de baixar o pallet o app sai de ré até o docking point e segue pra
+# próxima tarefa com o garfo no chão (~20 mm) -- o dispatch até manda
+# RESET_ARM na ordem seguinte, mas o app ignora (forklift_log, 27/10 15:05).
+# Subir o garfo com ele ainda dentro do pallet pode virar o pallet, então só
+# sobe quando a pose diz que o garfo já saiu: sobre o eixo do docking do
+# ponto de depósito (mesma geometria da regra de cancelamento), já de volta
+# no H (s >= FORK_AFTER_DROP_MIN_S). Medido no CAX (27/10 15:05): a ré para
+# primeiro em s=-0,17 e só depois o app gira PARADO sobre o H (s=-0,01) com
+# o garfo ainda no chão -- é esse ponto do giro, onde o próprio app já mexe o
+# garfo sem encostar no pallet, que libera a subida. É só UM comando de garfo,
+# não mexe na ordem em andamento -- o app manda esse mesmo comando andando
+# no fluxo normal.
+# Janela fechada: se o robô já saiu do eixo (lateral/à frente) ou passou
+# FORK_AFTER_DROP_WINDOW_SECONDS sem chegar no H, NÃO manda -- um comando
+# atrasado poderia chegar quando ele já está baixando o garfo pra próxima
+# coleta. Pelo mesmo motivo, não sobe se o H da coleta da rota seguinte cai
+# DENTRO da faixa de subida (coletar no mesmo ponto que acabou de depositar,
+# ou num lote de frente cujo H fique sobre este eixo): o app baixa o garfo
+# pra coleta justamente no H, e o robô poderia estar lá ainda dentro da
+# faixa. H fora da faixa (ex.: corredor paralelo, CAY2 a 1,36 m de lado do
+# CAX2) não conflita -- quando o robô chega lá a vigia já saiu do eixo.
+# Emergência apaga a vigia. Em memória de propósito: reiniciar o servidor só
+# perde uma subida.
+FORK_AFTER_DROP_WINDOW_SECONDS = 60
+FORK_AFTER_DROP_POLL_INTERVAL_SECONDS = 1.0
+FORK_AFTER_DROP_MIN_S = -0.10  # metros ao longo do eixo; negativo = pra dentro do pallet
+FORK_AFTER_DROP_PICKUP_MARGIN_METERS = 0.3  # folga em volta da faixa de subida pro H da próxima coleta
+_fork_after_drop = {"point": None, "since": 0.0, "points": None}
+
+
+def _arm_fork_after_drop(point):
+    _fork_after_drop.update(point=point, since=time.monotonic(), points=None)
+
+
+def _clear_fork_after_drop():
+    _fork_after_drop.update(point=None, points=None)
+
+
+def _next_pickup_docking_in_window(points, drop_point):
+    """Nome do ponto de coleta da rota atual (ainda não coletado) cujo H cai
+    dentro da faixa de subida do eixo de `drop_point` (com
+    FORK_AFTER_DROP_PICKUP_MARGIN_METERS de folga), ou None."""
+    with QUEUE_LOCK:
+        state = _read_queue_state()
+    current = state.get("currentRoute") or {}
+    pickup = current.get("pickup")
+    if not pickup or state.get("pickupCleared"):
+        return None
+    docking = points.get("H" + pickup)
+    if docking is None:
+        return None
+    m = FORK_AFTER_DROP_PICKUP_MARGIN_METERS
+    s, lateral, _ = _docking_axis_geometry(dict(docking, theta=0.0), points["H" + drop_point], points[drop_point])
+    if lateral <= DOCKING_ALIGNMENT_CANCEL_LATERAL_METERS + m and FORK_AFTER_DROP_MIN_S - m <= s <= DOCKING_ALIGNMENT_CANCEL_AHEAD_METERS + m:
+        return pickup
+    return None
+
+
+def _refresh_fork_after_drop():
+    """Roda a cada tick enquanto há um depósito recente. True = ainda
+    vigiando (o tick deve voltar rápido); False = nada a vigiar."""
+    point = _fork_after_drop["point"]
+    if not point:
+        return False
+    if time.monotonic() - _fork_after_drop["since"] > FORK_AFTER_DROP_WINDOW_SECONDS:
+        print("Garfo pós-depósito (%s): robô não voltou ao docking em %ds -- não mexe no garfo." % (point, FORK_AFTER_DROP_WINDOW_SECONDS))
+        _clear_fork_after_drop()
+        return False
+    points = _fork_after_drop["points"]
+    if points is None:
+        points = robot_point_positions()
+        if points is None:
+            return True  # lista falhou agora -- tenta de novo no próximo tick
+        if points.get("H" + point) is None or points.get(point) is None:
+            print("Garfo pós-depósito: docking 'H%s' ou pallet '%s' não encontrado no mapa -- não mexe no garfo." % (point, point))
+            _clear_fork_after_drop()
+            return False
+        _fork_after_drop["points"] = points
+    try:
+        pose = robot_pose()
+    except Exception:
+        return True  # pose indisponível agora -- tenta de novo no próximo tick
+    s, lateral, _ = _docking_axis_geometry(pose, points["H" + point], points[point])
+    if lateral > DOCKING_ALIGNMENT_CANCEL_LATERAL_METERS or s > DOCKING_ALIGNMENT_CANCEL_AHEAD_METERS:
+        print("Garfo pós-depósito (%s): robô já saiu do eixo (s=%+.2fm, lateral=%.2fm) -- janela perdida, não mexe no garfo." % (point, s, lateral))
+        _clear_fork_after_drop()
+        return False
+    if s < FORK_AFTER_DROP_MIN_S:
+        return True  # garfo ainda dentro do pallet ou saindo de ré -- espera o H
+    _clear_fork_after_drop()
+    near_pickup = _next_pickup_docking_in_window(points, point)
+    if near_pickup:
+        print("Garfo pós-depósito (%s): H da próxima coleta (%s) fica sobre este eixo -- não mexe no garfo." % (point, near_pickup))
+        return False
+    with QUEUE_LOCK:
+        if _read_queue_state().get("emergency"):
+            return False
+    print("Garfo pós-depósito (%s): fora do pallet, sobre o eixo (s=%+.2fm, lateral=%.2fm)." % (point, s, lateral))
+    robot_fork_to_nav_height("depois de depositar em %s" % point, settle=False)
+    return False
 
 
 # --- status ao vivo do robô pro banner "Em Operação" / "Recarregando" -----
@@ -1836,6 +1948,66 @@ def _drop_group_from_queue(state, group_id):
     state["routeQueue"] = [r for r in (state.get("routeQueue") or []) if r.get("groupId") != group_id]
 
 
+# Dependência entre tarefas do MESMO envio (pedido do usuário, 2026-10-27):
+# com "Tarefas aguardando envio" dá pra montar avulsas que só são válidas
+# porque uma anterior do mesmo lote libera o caminho (ex: NA → x e depois
+# NA2 → y — sem tirar o NA, o NA2 continua obstruído; não existe NA1, a
+# 2ª célula do lote já é NA2, ver lot_cell_name). Antes, cancelar a
+# primeira deixava a segunda na fila, e o robô tentaria pegar numa posição
+# bloqueada. Mesmo tratamento do grupo de "Lotes em sequência", mas só pra
+# quem DEPENDE de verdade — tarefa que não depende continua independente.
+#
+# Contrafactual, com a MESMA regra do validate_route_chain: pra cada tarefa
+# i, refaz a cadeia como se i não rodasse; toda tarefa j > i que deixa de
+# ser válida depende de i (e também não roda, então não mexe na projeção —
+# quem dependia de j fica dependendo de i também, transitivo). Pega
+# obstrução no lote, pegar num ponto onde uma anterior ia soltar, soltar
+# num ponto que uma anterior ia esvaziar — sem caso especial pra nenhum.
+# Devolve, pra cada par, os índices dos pares de que ele depende.
+def _batch_dependencies(lots, occupied, pairs):
+    deps = [set() for _ in pairs]
+    for i in range(len(pairs)):
+        projected = set(occupied)
+        for j, pair in enumerate(pairs):
+            if j == i:
+                continue
+            after_pickup = projected - {pair["pickup"]}
+            if j > i and not (is_pickup_allowed(lots, projected, pair["pickup"])
+                              and is_dropoff_allowed(lots, after_pickup, pair["dropoff"])):
+                deps[j].add(i)
+                continue
+            projected = after_pickup | {pair["dropoff"]}
+    return deps
+
+
+# Tira da fila tudo que caiu junto com `route` (cancelada, falhou ou
+# removida): o resto do grupo dela (_drop_group_from_queue) e as tarefas
+# do mesmo envio que dependiam dela (`dependsOn`, ver _batch_dependencies)
+# — em cascata, porque uma rota derrubada por grupo também pode ter
+# dependentes fora do grupo. Mesmo tratamento de log do grupo: pendingRoute
+# vira "cancelled" no histórico, fila local só some.
+def _drop_dependents_from_queue(state, route):
+    if not route:
+        return
+    before = [r for r in [state.get("pendingRoute")] + list(state.get("routeQueue") or []) if r]
+    _drop_group_from_queue(state, route.get("groupId"))
+    remaining_ids = {r["id"] for r in [state.get("pendingRoute")] + list(state.get("routeQueue") or []) if r}
+    dropped = {route["id"]} | {r["id"] for r in before if r["id"] not in remaining_ids}
+    while True:
+        pending = state.get("pendingRoute")
+        if pending and dropped.intersection(pending.get("dependsOn") or []):
+            log_route_completed(pending["id"], "cancelled")
+            state["pendingRoute"] = None
+            dropped.add(pending["id"])
+            continue
+        queue = state.get("routeQueue") or []
+        hit = [r for r in queue if dropped.intersection(r.get("dependsOn") or [])]
+        if not hit:
+            return
+        dropped.update(r["id"] for r in hit)
+        state["routeQueue"] = [r for r in queue if r not in hit]
+
+
 # Agrupa rotas CONSECUTIVAS do mesmo groupId em "unidades" — mesmo
 # espírito de groupWaitingRoutes em QueuePanel.jsx (porta Python, usado
 # por _queue_reorder). Rotas de um grupo sempre ficam adjacentes (nascem
@@ -1866,6 +2038,25 @@ def _group_queue_units(route_queue):
 # a currentRoute nova quanto a promovida de pendingRoute/routeQueue passam
 # por aqui exatamente uma vez, no momento em que de fato começam a rodar.
 def _fire_route(route):
+    task_name = _create_task_cancelling_charge(
+        lambda: robot_create_and_run_route(
+            route["pickup"], route["dropoff"], route.get("palletType", "wood"),
+            route.get("palletTop", False), route.get("palletHeights"),
+        ),
+        "rota %s->%s" % (route["pickup"], route["dropoff"]),
+    )
+    fired = dict(route)
+    fired["taskName"] = task_name
+    log_route_requested(route["id"], route["pickup"], route["dropoff"], task_name, route["user"])
+    return fired
+
+
+# Cria uma task no robô (`create`, devolve o que ela devolver) sem deixar a
+# AUTO_SYSTEM de volta pra carga passar na frente. Usada pelas rotas normais
+# (_fire_route) E pelo UNLOAD isolado do cancelamento pós-pickup (bug de
+# campo 2026-10-27: a devolução não passava por aqui e o robô começou a ir
+# pra energia antes de receber o UNLOAD).
+def _create_task_cancelling_charge(create, label):
     # Descobre a task de carga ativa ANTES de disparar (se checasse depois,
     # o registro mais recente já seria o nosso, não o dela), dispara a rota
     # nova (fica pendente atrás da carga, fila nunca some a zero), e só então
@@ -1874,10 +2065,7 @@ def _fire_route(route):
         charge_task_id = robot_find_active_charge_task_id()
     except Exception:
         charge_task_id = None
-    task_name = robot_create_and_run_route(
-        route["pickup"], route["dropoff"], route.get("palletType", "wood"),
-        route.get("palletTop", False), route.get("palletHeights"),
-    )
+    result = create()
     if charge_task_id:
         try:
             robot_cancel_task_record(charge_task_id)
@@ -1896,17 +2084,13 @@ def _fire_route(route):
     try:
         straggler_id = robot_find_any_active_charge_task_id()
         if straggler_id and straggler_id != charge_task_id:
-            print("Retardatária pega na 2ª checagem (id=%s, rota %s->%s) -- cancelando." % (
-                straggler_id, route["pickup"], route["dropoff"]))
+            print("Retardatária pega na 2ª checagem (id=%s, %s) -- cancelando." % (straggler_id, label))
             robot_cancel_task_record(straggler_id)
     except Exception as err:
         print("Aviso: 2ª checagem de AUTO_SYSTEM retardatária falhou (%s) -- melhor esforço, segue sem cancelar." % err)
 
-    fired = dict(route)
-    fired["taskName"] = task_name
-    log_route_requested(route["id"], route["pickup"], route["dropoff"], task_name, route["user"])
     _route_fired_at["t"] = time.monotonic()
-    return fired
+    return result
 
 
 # AUTO_SYSTEM "sequestrando" a rota da fila (ver CONTEXT.md, incidente
@@ -2175,7 +2359,8 @@ def _execute_cancel_current_locked(state, current):
     # fila não são tocadas. Sempre acontece na hora, pickup limpo ou não —
     # o resto da sequência perde a validade assim que ESTA rota é cancelada,
     # independente de quando (ou se) o descarregar isolado abaixo terminar.
-    _drop_group_from_queue(state, current.get("groupId"))
+    # Idem pras tarefas do mesmo envio que dependiam desta (dependsOn).
+    _drop_dependents_from_queue(state, current)
 
     if state.get("pickupCleared") and not skip_unload:
         # Pós-pickup (ver CONTEXT.md, "Cancelamento pós-pickup"): o robô
@@ -2236,7 +2421,10 @@ def _try_dispatch_post_pickup_unload():
             return False  # nada pendente, ou já foi resolvido (outra chamada venceu a corrida)
 
     try:
-        task_record_id = robot_create_and_run_unload_chain(pending["dropoff"])
+        task_record_id = _create_task_cancelling_charge(
+            lambda: robot_create_and_run_unload_chain(pending["dropoff"]),
+            "UNLOAD isolado em %s" % pending["dropoff"],
+        )
     except Exception as err:
         print("Aviso: falha ao disparar UNLOAD isolado em %s (%s) -- pallet continua no garfo, tentando de novo." % (pending["dropoff"], err))
         return False
@@ -2280,7 +2468,7 @@ def _cancel_reserved_current_locked(state, current):
     state["currentRoute"] = None
     state["turnBlocked"] = False
     state["awaitingCharge"] = False
-    _drop_group_from_queue(state, current.get("groupId"))
+    _drop_dependents_from_queue(state, current)
     _advance_queue_locked(state)
 
 
@@ -2293,6 +2481,7 @@ def _apply_record_status(state, current, record):
     if status == "FINISHED":
         set_occupied_state(current["dropoff"], True)
         log_route_completed(current["id"], "finished")
+        _arm_fork_after_drop(current["dropoff"])  # garfo ficou no chão: sobe quando sair do pallet
         # A rota terminou de chegar por conta própria antes de existir uma
         # janela segura pra cancelar — o cancelamento pendente (se havia)
         # perdeu o sentido, não tem mais o que cancelar.
@@ -2334,8 +2523,9 @@ def _apply_record_status(state, current, record):
         state["currentRoute"] = None
         state["pickupCleared"] = False
         # Se fazia parte de uma sequência, o resto do grupo perdeu a validade
-        # junto (decisão do usuário: cancelar o resto).
-        _drop_group_from_queue(state, current.get("groupId"))
+        # junto (decisão do usuário: cancelar o resto) — e as tarefas do
+        # mesmo envio que dependiam desta (dependsOn).
+        _drop_dependents_from_queue(state, current)
         return True
     return False  # ainda em execução — nada a fazer, tenta de novo no próximo tick
 
@@ -2373,6 +2563,95 @@ def _emergency_suppress():
 # sondagem em MainApp.jsx, incluindo o Caso 2 (desmarcar origem assim que o
 # PICKUP terminar, via finishTime não-nulo — nunca vimos o valor de status
 # de uma ação concluída com sucesso).
+# Limpeza automática da fila parada (ver QUEUE_IDLE_TIMEOUT_SECONDS). Em vez
+# de carimbar "última atividade" em cada handler (enfileirar, cancelar,
+# reordenar, avanço da fila...), compara a cada tick uma "impressão digital"
+# do que importa no estado: mudou => houve atividade, zera o contador. Pega
+# qualquer mudança, inclusive as que vierem a existir depois, sem ninguém
+# lembrar de carimbar. Os flags de espera entram na impressão pra que sair
+# de uma espera legítima (abaixo) também zere o contador.
+def _queue_activity_fingerprint(state):
+    current = state.get("currentRoute") or {}
+    pending = state.get("pendingRoute") or {}
+    return json.dumps([
+        current.get("id"), current.get("taskName"),
+        pending.get("id"), pending.get("taskName"),
+        [r.get("id") for r in state.get("routeQueue") or []],
+        bool(state.get("pickupCleared")),
+        bool(state.get("pendingPostPickupUnload")),
+        bool(state.get("cancelPending")),
+        bool(state.get("turnBlocked")),
+        bool(state.get("awaitingCharge")),
+    ])
+
+
+# Horário de parede (time.time, não monotonic) e persistido no
+# queue_state.json — sobrevive a reinício do servidor. Quando estoura:
+#  - o que só está ESPERANDO (pendingRoute, routeQueue, currentRoute ainda
+#    RESERVADA) sai na hora, como no _clear_stale_queue_on_startup;
+#  - a rota EM ANDAMENTO no robô (com taskName) NÃO é cancelada à força:
+#    vira `cancelPending`, exatamente como se o operador tivesse clicado em
+#    cancelar — mesma espera de giro seguro/eixo do docking, e com pallet no
+#    garfo o fluxo pós-pickup devolve o pallet à origem;
+#  - o UNLOAD isolado pós-pickup (unloadOnly) é deixado em paz: é o pallet
+#    voltando pra origem, cancelar só o faria ser recriado.
+# Não conta tempo durante esperas legítimas que podem passar de 1h: cancela-
+# mento adiado (cancelPending), esperando o robô chegar na energia
+# (awaitingCharge) e UNLOAD pós-pickup pendente. Emergência nem chega aqui
+# (_queue_tick retorna antes). Chamada de rede só no instante da limpeza,
+# FORA do QUEUE_LOCK; no caminho comum é só uma leitura do estado.
+def _refresh_idle_queue_timeout():
+    now = time.time()
+    with QUEUE_LOCK:
+        state = _read_queue_state()
+        fingerprint = _queue_activity_fingerprint(state)
+        if fingerprint != state.get("idleFingerprint"):
+            state["idleFingerprint"] = fingerprint
+            state["idleSince"] = now
+            _write_queue_state(state)
+            return
+        if state.get("cancelPending") or state.get("awaitingCharge") or state.get("pendingPostPickupUnload"):
+            return
+        if now - (state.get("idleSince") or now) < QUEUE_IDLE_TIMEOUT_SECONDS:
+            return
+
+        dropped = []
+        to_cancel_on_robot = []
+        pending = state.get("pendingRoute")
+        if pending:
+            log_route_completed(pending["id"], "cancelled")
+            if pending.get("taskName"):
+                to_cancel_on_robot.append(pending["taskName"])
+            dropped.append(pending)
+            state["pendingRoute"] = None
+        for route in state.get("routeQueue") or []:
+            log_route_completed(route["id"], "cancelled")
+            dropped.append(route)
+        state["routeQueue"] = []
+        current = state.get("currentRoute")
+        if current and not current.get("taskName"):
+            log_route_completed(current["id"], "cancelled")
+            dropped.append(current)
+            state["currentRoute"] = None
+            state["turnBlocked"] = False
+            current = None
+        cancel_current = bool(current) and not current.get("unloadOnly")
+        if cancel_current:
+            state["cancelPending"] = True
+        if not dropped and not cancel_current:
+            return  # fila vazia (ou só o UNLOAD pós-pickup rodando) — nada a limpar
+        _write_queue_state(state)
+
+    print("Fila parada há mais de %d min — limpa automaticamente: %d rota(s) em espera descartada(s)%s." % (
+        QUEUE_IDLE_TIMEOUT_SECONDS // 60, len(dropped),
+        ", cancelamento da rota em andamento pedido (aguarda posição segura)" if cancel_current else ""))
+    for task_name in to_cancel_on_robot:
+        try:
+            _robot_try_cancel(task_name)
+        except Exception as err:
+            print("Limpeza automática: não deu pra cancelar '%s' no robô: %s" % (task_name, err))
+
+
 def _queue_tick():
     _refresh_robot_status()  # sempre, independente de emergência/rota em andamento
     _refresh_stall_at_origin()  # só gasta chamadas ao robô com o alerta de parado já disparado
@@ -2387,8 +2666,15 @@ def _queue_tick():
     with QUEUE_LOCK:
         emergency = bool(_read_queue_state().get("emergency"))
     if emergency:
+        _clear_fork_after_drop()  # garfo não se mexe sozinho depois de uma emergência
         _emergency_suppress()
         return EMERGENCY_POLL_INTERVAL_SECONDS
+
+    _refresh_fork_after_drop()  # no-op sem depósito recente
+
+    # Antes do bloco de cancelPending logo abaixo: se a limpeza automática
+    # pedir o cancelamento da rota em andamento, ele já é tratado neste tick.
+    _refresh_idle_queue_timeout()
 
     # Destravamento manual do ROTATE_ERROR (ver CONTEXT.md) — só faz sentido
     # quando a fila está genuinamente ociosa (é sempre a AUTO_SYSTEM nativa
@@ -2443,8 +2729,16 @@ def _queue_tick():
             # tarefa (ou da devolução do pallet) -- o app não faz isso depois
             # de cancelamento. Cancelamento forçado pode ter sido em qualquer
             # lugar: não mexe no garfo.
+            # Com pallet no garfo (devolução pendente) não espera o garfo
+            # chegar: o robô fica sem task nesse intervalo e a AUTO_SYSTEM
+            # nasce e sai andando pra energia antes do UNLOAD (campo
+            # 2026-10-27, #68474 antes do UNLOAD #68475). O comando continua
+            # indo ANTES do UNLOAD -- se a origem for perto, a altura de
+            # depósito do app não pode chegar antes do nosso 300 mm.
             if executed and not forced:
-                robot_fork_to_nav_height("depois do cancelamento")
+                with QUEUE_LOCK:
+                    returning_pallet = bool(_read_queue_state().get("pendingPostPickupUnload"))
+                robot_fork_to_nav_height("depois do cancelamento", settle=not returning_pallet)
             # Pós-pickup (ver CONTEXT.md, "Cancelamento pós-pickup"): resolve
             # já, no mesmo tick, em vez de esperar o ciclo normal (4s) — o
             # pallet está no garfo, quanto antes melhor. Idempotente/no-op
@@ -2680,6 +2974,8 @@ def _start_queue_thread():
                 fired_at = _route_fired_at["t"]
                 if fired_at is not None and time.monotonic() - fired_at < ROUTE_FIRED_WATCH_SECONDS:
                     interval = min(interval, ROUTE_FIRED_WATCH_INTERVAL_SECONDS)
+                if _fork_after_drop["point"]:
+                    interval = min(interval, FORK_AFTER_DROP_POLL_INTERVAL_SECONDS)
             except Exception as err:
                 print("Erro inesperado na sondagem da fila: %s" % err)
                 interval = QUEUE_POLL_INTERVAL_SECONDS
@@ -3545,6 +3841,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "user": requester["username"],
             "groupId": group_ids[i],
         } for i, pair in enumerate(pairs)]
+        # Dependências dentro DESTE envio (ver _batch_dependencies): se uma
+        # rota for cancelada/falhar/sair da fila, as que dependiam dela caem
+        # junto (_drop_dependents_from_queue). Só entre rotas do mesmo envio
+        # — de propósito, é o que o operador montou junto.
+        for route, dep_indexes in zip(routes, _batch_dependencies(cal["top"]["lots"], cal.get("occupied") or [], pairs)):
+            if dep_indexes:
+                route["dependsOn"] = [routes[i]["id"] for i in sorted(dep_indexes)]
 
         first_slot = None
         with QUEUE_LOCK:
@@ -3867,19 +4170,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     ensure_ascii=False).encode("utf-8"))
                 return
 
-            group_id = target.get("groupId")
-            if group_id:
-                # Parte de uma sequência: cancela TODO o resto do grupo que
-                # ainda não rodou (pendingRoute do grupo cancelada no robô +
-                # membros da fila local sumindo). A currentRoute, mesmo do
-                # mesmo grupo, não é tocada — ela é anterior, não depende das
-                # seguintes.
-                _drop_group_from_queue(state, group_id)
-            elif is_pending:
+            if is_pending:
                 log_route_completed(pending["id"], "cancelled")
                 state["pendingRoute"] = None
             else:
                 state["routeQueue"] = [r for r in queue if r["id"] != route_id]
+            # Parte de uma sequência: cancela TODO o resto do grupo que ainda
+            # não rodou. E as tarefas do mesmo envio que dependiam desta
+            # (dependsOn, ver _batch_dependencies) caem junto. A currentRoute,
+            # mesmo do mesmo grupo, não é tocada — ela é anterior, não depende
+            # das seguintes.
+            _drop_dependents_from_queue(state, target)
 
             # Esvaziou o pending mas ainda tem fila — a próxima sobe pra
             # pending (RESERVADA, sem taskName — só dispara quando virar
@@ -4009,6 +4310,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 state["currentRouteFresh"] = False
                 state["emergency"] = True
                 _write_queue_state(state)
+                _clear_fork_after_drop()
             elif not active and already:
                 state["emergency"] = False
                 _write_queue_state(state)
