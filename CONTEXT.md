@@ -5242,3 +5242,87 @@ pela checagem antes/depois de disparar que as rotas normais têm, e a espera de 
 de retardatária, vigia rápida de 20 s), e com devolução pendente o comando do garfo vai sem
 esperar (continua ANTES do UNLOAD: se a origem for perto, a altura de depósito do app não pode
 chegar antes do nosso 300 mm).
+
+## Robô ao vivo no mapa (2026-10-28, VALIDADO EM CAMPO)
+- **Pose**: `GET /api/robot-pose` (`server.py`, `_cached_robot_pose`: SLAM `/reeman/pose`, cache
+  0,8 s, lock não bloqueante — N tablets não multiplicam chamadas ao robô; o 200 não vai pro log).
+  O front (`RobotOverlay.jsx`) consulta 1x/s, pausa com a aba escondida e anima com `Konva.Tween`
+  (salto > 3 m = teletransporta).
+- **Metros → pixels** (`web/src/robotMap.js`): afim por mínimos quadrados entre a posição
+  calibrada (pontos avulsos + células de lote, em fração da imagem) e as coordenadas dos mesmos
+  pontos no mapa do dispatch (~11,3 px/m). θ do robô aponta pro lado OPOSTO aos garfos — o ícone
+  usa (-cosθ, -sinθ). Pivô do ícone = centro do pallet (`ICON.pivotX/pivotY`).
+- **Ícones** (`web/src/assets/robot-{empty,blue,wood}{,-glow}.webp`, gerados por script de
+  normalização: contorno cinza escuro, base flat, brilho borrado). Com pallet: campo
+  `robotCarrying` do `/api/live-state` (`_robot_carrying`: UNLOAD pendente ou rota atual com
+  `pickupCleared`). Bug corrigido junto: `pickupCleared` era calculado no tick mas só gravado no
+  `queue_state.json` quando a fila avançava — agora grava na hora.
+- **Brilho por status** (`ROBOT_STATUS`/`robotStatusOf`, prioridade): obstáculo (vermelho + sonar)
+  > planejando rota (amarelo) > cancelando (laranja, setas girando) > devolvendo pallet >
+  voltando à energia > carregando (verde) > operando (menta) > ocioso. Animações só rodam com o
+  status ativo (desempenho).
+- **Clique no robô ou no painel "ROBÔ: STATUS" do header**: quique + zoom médio + SEGUIR o robô
+  (zona morta de 28% antes de re-centralizar) + banner "VISUALIZANDO: ROBÔ / STATUS: X" na cor do
+  status. Seguir desliga com pan/roda/reset/clique em kanban/troca de modo. Toque detectado por
+  press/release (tolerância 12 px) num retângulo do tamanho do ícone — o drag do Stage engolia o
+  clique.
+- **Ajuste fino**: em "Editar closes" (dev) aparece um quadro arrastável/redimensionável
+  (Transformer) que corrige a afim; salvo como `robotFrame` por vista na calibração.
+
+## Rotas planejadas no mapa (2026-10-28, VALIDADO EM CAMPO)
+- `GET /api/route-graph` (cache 600 s): arestas e pontos de `/map/list/details/15`, com
+  `links [a, b, custo_ab, custo_ba]`, custo = `length/maxSpeed` por sentido (`edgeDirections`).
+  Dijkstra no front (`fastestPath`) — por TEMPO bate com o `globalPath` do dispatch em 126/130
+  ordens reais (por distância só 112/130).
+- Paradas (`routeStops`): início → H(origem) → origem → H(origem) → H(destino) → destino.
+- Desenho: linha grossa `#0f766e` 70% + linha fina `#5eead4` no meio. Sempre mostra a rota
+  ATUAL (vai sendo "comida" conforme o robô anda: progresso só pra frente, lookahead de 12
+  vértices); ao clicar numa rota da Fila/Histórico mostra a dela. Também cobre a volta pra
+  energia (sem `taskName`) e a devolução do pallet (`pendingUnloadDropoff` no live-state). Início
+  da rota ao vivo = nó do grafo mais próximo da primeira pose.
+
+## Detecção de obstáculo pelos sensores do robô (2026-10-28, VALIDADO EM CAMPO nas 4 direções)
+Antes era chute por posição ("parado perto da origem = sensor do garfo"). Agora:
+- **Bridge** (`robot-bridge/lifty_turn_check_bridge.py`, porta 8091, somente leitura): assina
+  `/mobile_base/commands/fork_info` (ForkliftDistance: front/back/left/right/f_left/f_right em cm,
+  255 = livre) e `/avoid_distance` (yoyo_msgs/AvoidDistance: distância de desvio ATIVA por lado,
+  em m, publicada só quando muda; 0 = lado desligado). Tipos customizados da REEMAN decodificados
+  com `rospy.AnyMsg` + `genpy.dynamic` a partir do header da conexão (nada compilado, nada da
+  REEMAN alterado — autorizado pelo usuário). `GET /obstacle` → `{front, back, left, right,
+  f_left, f_right, age, avoid}` (503 antes da 1ª leitura). Servidor passou a `ThreadingHTTPServer`.
+- **`server.py`** (`_refresh_obstacle`, thread própria de 1 s): só com rota disparada, sem
+  emergência, fora da carga e fora do "planejando rota"; robô parado (`/reeman/speed`) há ≥ 3 s;
+  lado em alerta quando leitura ≤ distância de desvio daquele trecho + 3 cm (sem `/avoid_distance`:
+  frente 85, trás 60, laterais 55). Ignora: leitura ≤ 2 cm (sensor mascarado), traseira com pallet
+  no garfo (enxerga o próprio pallet), lado com avoid 0. Na zona de docking (eixo da origem/destino,
+  lateral 0,5 m, até 0,8 m à frente do H) só a traseira conta e só depois de 10 s — mensagem
+  "parado na origem". Mensagens: `OBSTACLE_*_MESSAGE` com a distância. Vem antes do alerta de 40 s;
+  o chute "sensor do garfo" só volta se o bridge não respondeu nos últimos 5 s.
+- Validado em campo 28/10 bloqueando frente, trás, laterais e diagonais (f_left/f_right contam
+  como frente). Primeiro limite fixo falhou (lateral a 99 cm não alertava) — por isso os limites
+  vêm do `/avoid_distance` de cada trecho.
+- **Lembrete**: o bridge roda com `setsid nohup python3 lifty_turn_check_bridge.py < /dev/null &`
+  no `~` do robô e NÃO volta depois de reiniciar o robô. Pra parar: `kill -9` (o rospy segura
+  SIGTERM/SIGINT). Backups: `~/lifty_turn_check_bridge.py.bak-20261027`/`-20261028`.
+
+## "Planejando a rota" estendido aos EX* (2026-10-28)
+`ROUTE_PLANNING_SLOW_POINTS` = EXE, EXE2, EXM, EXN, EXO, EXP, EXQ: além da faixa P3–P10, o aviso
+amarelo vale com o robô sobre o EIXO do docking desses lotes (`_segment_distance`, raio
+`ROUTE_PLANNING_POINT_RADIUS_METERS` = 0,6 m — 1,0 m pegava o lote EX vizinho).
+
+## Banner "VISUALIZANDO: X → Y" — clique na origem/destino (investigado 2026-10-28, sem mudança)
+Relato: clicar na origem/destino não dava zoom. Reproduzido no Edge headless: funciona; o zoom é
+no KANBAN que contém o ponto, então quando origem e destino estão no mesmo kanban (todas as rotas
+do dia, ex. 61/52-AZ 1 → 61/52-AZ 3) o alvo é o mesmo e a tela não mexe. Ideia proposta, não
+feita: com o kanban já enquadrado, centralizar no ponto mantendo o zoom.
+
+## Coleta de campo 2026-10-28 (14:45-17:20, `field-data/2026-10-28_144557`, fora do git)
+`tools/field-data/collect.py` (app.log do tablet + tópicos ROS + server.log) e
+`tools/field-data/episodes.py <pasta>` (um episódio por docking). ~40 movimentações sem erro:
+23 coletas + 23 depósitos encaixados, 1 coleta em manual (CAY 15:10, operador). Coleta: lateral
+final mediana 2,6 cm (máx 10 cm), ângulo 1,3° (máx 3,4°), ~19 s. Depósito: 0,8 cm / 0,6°, ~10 s.
+Altura ao entrar no pallet: azul (`...MT6_5`) 68-75 mm, madeira 24-32 mm. 8 cancelamentos pelo
+botão, todos liberados pela regra do eixo; 1 pós-coleta devolveu o pallet ao CAX pelo UNLOAD
+isolado sem desviar pra energia. Avisos de obstáculo apareceram e limparam sozinhos
+(`Obstáculo: ...` / `Obstáculo: liberado` no server.log). Ao encerrar a coleta com TaskStop o
+`meta.json` não é escrito — gravar à mão (`start`/`end` em epoch).

@@ -54,7 +54,9 @@ function BatteryIcon({ pct }) {
 // é false (ver server.py, _robot_returning_to_charge_now — já garante
 // isso, mas checar aqui de novo evita depender só do backend pra nunca
 // mostrar os dois rótulos ao mesmo tempo).
-export default function RobotStatusBanner({ charging, battery, returningToCharge }) {
+// `onClick`: tocar no painel leva o mapa até o robô e passa a segui-lo
+// (mesmo efeito de tocar no ícone dele — ver FloorPlanCanvas/RobotOverlay).
+export default function RobotStatusBanner({ charging, battery, returningToCharge, onClick }) {
   // Carga detectada (transição "não carregando" -> "carregando"): pulsa
   // verde e toca o aviso UMA vez. Não dispara no 1º dado lido (abrir o app
   // com o robô já carregando não é uma "detecção").
@@ -78,7 +80,14 @@ export default function RobotStatusBanner({ charging, battery, returningToCharge
   const label = charging ? 'Recarregando' : (returningToCharge ? 'Voltando à Energia' : 'Em Operação');
 
   return (
-    <div className={'robot-status-banner' + (charging ? ' is-charging' : returningToCharge ? ' is-returning' : '') + (chargePulse ? ' is-charge-pulse' : '')} aria-hidden="true">
+    <div
+      className={'robot-status-banner' + (charging ? ' is-charging' : returningToCharge ? ' is-returning' : '') + (chargePulse ? ' is-charge-pulse' : '') + (onClick ? ' is-clickable' : '')}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      title={onClick ? 'Ver o robô no mapa' : undefined}
+      onClick={onClick}
+      onKeyDown={onClick ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } } : undefined}
+    >
       <span className="robot-status-banner__dot" />
       {/* "ROBÔ" na cor neutra das abas do header (Editar pontos/Histórico/
           Usuários); o status em si (mint = operando, âmbar = recarregando

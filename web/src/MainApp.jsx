@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import Toolbar from './components/Toolbar';
 import CloseUpStatusBanner from './components/CloseUpStatusBanner';
+import { robotStatusOf, ROBOT_STATUS } from './robotMap';
 import CancelPendingBanner from './components/CancelPendingBanner';
 import PointsPanel from './components/PointsPanel';
 import LotsPanel from './components/LotsPanel';
@@ -61,6 +62,7 @@ export default function MainApp({ user, onLogout }) {
     points, addPoint, updatePoint, removePoint,
     lots, addLot, updateLot, removeLot,
     closeUps, addCloseUp, updateCloseUp, removeCloseUp,
+    robotFrame, updateRobotFrame,
     palletHeights, savePalletHeights,
     status: saveStatus,
   } = useCalibration();
@@ -70,7 +72,7 @@ export default function MainApp({ user, onLogout }) {
   // pra ele em vez de mudar estado local direto (quem decide/dispara de
   // verdade é sempre o server.py, nunca o navegador).
   const {
-    currentRoute, pendingRoute, routeQueue, occupied, emergency, cancelPending, cancelPendingMessage, turnBlockedMessage, awaitingChargeMessage, postPickupUnloadMessage, robotCharging, robotBattery, robotReturningToCharge, robotStalledMessage, routePlanningMessage, status: liveStatus,
+    currentRoute, pendingRoute, routeQueue, occupied, emergency, cancelPending, cancelPendingMessage, turnBlockedMessage, awaitingChargeMessage, postPickupUnloadMessage, robotCharging, robotBattery, robotReturningToCharge, robotStalledMessage, routePlanningMessage, robotCarrying, pendingUnloadDropoff, status: liveStatus,
     enqueueRoutes, cancelCurrent, clearQueue, removeQueued, reorderQueue, setOccupiedMany, toggleOccupied, setEmergency, setLimitBreakerLease,
   } = useLiveState();
   const [toast, showToast] = useToast();
@@ -242,6 +244,12 @@ export default function MainApp({ user, onLogout }) {
   // ptp) e ao resetar o zoom (ver onCloseUpActivate passado pro
   // FloorPlanCanvas, chamado com null de dentro de handleResetView).
   const [activeCloseUpId, setActiveCloseUpId] = useState(null);
+  // Banner "VISUALIZANDO: ROBÔ" — true enquanto o mapa segue o robô (tocou no
+  // ícone dele; qualquer gesto de câmera solta, ver FloorPlanCanvas).
+  const [robotFollowing, setRobotFollowing] = useState(false);
+  // Toque no painel "ROBÔ: ..." do header -> zoom/seguir o robô no mapa
+  // (contador: cada toque é um pedido novo, mesmo repetido).
+  const [robotFocusRequest, setRobotFocusRequest] = useState(0);
   // Pulsar vermelho no ponto/célula clicado com seleção INVÁLIDA (Caso 3,
   // vazio na coleta, já ocupado na entrega, ordem errada em "Lotes em
   // sequência") — ver triggerInvalidPulse/useInvalidPulse
@@ -1387,6 +1395,33 @@ export default function MainApp({ user, onLogout }) {
   // prioridades acima) — senão vazaria um número errado pro Ponto a Ponto
   // ou Histórico, que nunca usam isso.
   const mapSeqOverride = !pickupNames.length && selectedQueueRoute ? queueSeqOverride : null;
+  // Caminho desenhado no mapa (ver RobotOverlay): a tarefa clicada na Fila ou
+  // no Histórico; sem clique, sempre a atual. A atual já disparada é "ao
+  // vivo" (sai do robô e encolhe enquanto ele anda) e, com o pallet já no
+  // garfo, só mostra o que falta até a entrega.
+  const robotRoute = useMemo(() => {
+    const sel = selectedQueueRoute || selectedHistoryRoute;
+    // Devolução do pallet decidida, UNLOAD ainda sendo criado: já mostra o
+    // caminho até ela (tem prioridade sobre a volta pra energia, que o
+    // servidor cancela nesse meio-tempo). Depois vira a rota atual normal.
+    if (!sel && pendingUnloadDropoff && !currentRoute?.taskName) {
+      return { id: 'unload|' + pendingUnloadDropoff, pickup: null, dropoff: pendingUnloadDropoff, live: true };
+    }
+    // Voltando sozinho pra energia (AUTO_SYSTEM, fora da nossa fila): não há
+    // rota atual disparada -- desenha o caminho ao vivo até o ponto da
+    // energia. Vale também com uma rota reservada esperando ele carregar.
+    if (!sel && robotReturningToCharge && !currentRoute?.taskName) {
+      return { id: 'energy', pickup: null, dropoff: 'energy', live: true };
+    }
+    const r = sel || currentRoute;
+    if (!r || !r.dropoff) return null;
+    const live = !!currentRoute?.taskName && (!sel || sel === currentRoute || (sel.id != null && sel.id === currentRoute.id));
+    const pickupDone = live && (!!robotCarrying || !!r.unloadOnly);
+    return { id: String(r.id ?? r.taskName ?? r.dropoff), pickup: pickupDone ? null : (r.pickup || null), dropoff: r.dropoff, live };
+  }, [selectedQueueRoute, selectedHistoryRoute, currentRoute, robotCarrying, robotReturningToCharge, pendingUnloadDropoff]);
+  const robotStatus = robotStatusOf({
+    robotStalledMessage, routePlanningMessage, cancelPending, postPickupUnloadMessage, robotReturningToCharge, robotCharging, currentRoute,
+  });
 
   return (
     <div className="app">
@@ -1411,9 +1446,11 @@ export default function MainApp({ user, onLogout }) {
         robotCharging={robotCharging}
         robotBattery={robotBattery}
         robotReturningToCharge={robotReturningToCharge}
+        onRobotStatusClick={() => setRobotFocusRequest((n) => n + 1)}
       />
       <CloseUpStatusBanner
         name={activeCloseUpId ? closeUps.find((c) => c.id === activeCloseUpId)?.name : null}
+        robot={robotFollowing ? { label: ROBOT_STATUS[robotStatus].label, color: ROBOT_STATUS[robotStatus].color() } : null}
         // Nomes AO VIVO da seleção em edição (mudar a origem no mapa já
         // atualiza aqui), no apelido visual — nunca o nome técnico.
         // pickups/dropoffs SEMPRE em lista (mesmo quando só existe um par) —
@@ -1512,6 +1549,13 @@ export default function MainApp({ user, onLogout }) {
           invalidPulseId={invalidPulse?.id ?? null}
           emergencyActive={emergency}
           onToggleEmergency={handleToggleEmergency}
+          robotStatus={robotStatus}
+          robotCarrying={robotCarrying}
+          robotRoute={robotRoute}
+          robotFrame={robotFrame}
+          onRobotFrameChange={updateRobotFrame}
+          onRobotFollowChange={setRobotFollowing}
+          robotFocusRequest={robotFocusRequest}
         />
 
         {mode === 'edit' && (

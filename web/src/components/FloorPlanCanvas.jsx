@@ -5,6 +5,7 @@ import Konva from 'konva';
 import { useContainerSize } from '../hooks/useContainerSize';
 import { lotCellName, lotCellDisplayName } from '../hooks/useCalibration';
 import { COLORS, LOT_COLORS, hexToRgba, darkenHex, lightenHex } from '../theme';
+import RobotOverlay from './RobotOverlay';
 import topViewUrl from '../assets/floorplan.jpg';
 import isoViewUrl from '../assets/isometric.jpg';
 
@@ -805,6 +806,16 @@ export default function FloorPlanCanvas({
   invalidPulseId,
   emergencyActive,
   onToggleEmergency,
+  // Robô ao vivo (ver RobotOverlay.jsx): status/pallet vêm do live-state,
+  // robotFrame é o ajuste fino do grafo salvo na calibração (Editar closes).
+  robotStatus,
+  robotCarrying,
+  robotRoute,
+  robotFrame,
+  onRobotFrameChange,
+  onRobotFollowChange,
+  // Toque no painel do robô no header: número que muda a cada pedido.
+  robotFocusRequest,
 }) {
   const containerRef = useRef(null);
   const { width: containerWidth, height: containerHeight } = useContainerSize(containerRef);
@@ -859,6 +870,7 @@ export default function FloorPlanCanvas({
   // precisar do caminho imperativo do Konva.
   function handleResetView() {
     if (!baseScale) return;
+    setFollow(false);
     onResetViewClick?.(); // só o clique no botão ZOOM - (ver MainApp.jsx)
     // Voltar pro enquadramento geral não é mais "olhar de perto" nenhum
     // Close Up específico — some o banner "VISUALIZANDO: KANBAN X" (ver
@@ -884,6 +896,7 @@ export default function FloorPlanCanvas({
   function handleCloseUpClick(closeUp) {
     const stage = stageRef.current;
     if (!stage || !image || !containerWidth || !containerHeight) return;
+    setFollow(false);
     // Banner "VISUALIZANDO: KANBAN X" (ver CloseUpStatusBanner.jsx) — avisa
     // MainApp.jsx já no toque, sem esperar a animação de zoom terminar.
     onCloseUpActivate?.(closeUp);
@@ -965,6 +978,7 @@ export default function FloorPlanCanvas({
   function zoomToContentPoint(pos) {
     const stage = stageRef.current;
     if (!stage) return;
+    setFollow(false);
     const newScale = clampScale(baseScale * POINT_FOCUS_ZOOM_MULT);
     const newPos = { x: containerWidth / 2 - pos.x * newScale, y: containerHeight / 2 - pos.y * newScale };
     stage.to({
@@ -980,6 +994,76 @@ export default function FloorPlanCanvas({
       },
     });
   }
+
+  // --- robô: clique = zoom nele + seguir ------------------------------------
+  // Seguir "com folga": a câmera só recentraliza quando o robô sai da área
+  // central da tela, em vez de andar junto a cada leitura — mover o Stage
+  // redesenha a planta inteira (a parte cara), então isso acontece de vez em
+  // quando, não toda hora. Qualquer gesto do operador (pan, roda, reset,
+  // zoom num kanban/ponto, troca de modo) solta o robô.
+  const ROBOT_FOCUS_ZOOM_MULT = 3;
+  const ROBOT_FOLLOW_MARGIN = 0.28; // fração da tela, de cada lado, que dispara o recentralizar
+  const followRef = useRef(false);
+  const followTweenRef = useRef(false);
+  function setFollow(on) {
+    if (followRef.current === on) return;
+    followRef.current = on;
+    onRobotFollowChange?.(on);
+  }
+  function centerStageOn(pos, scale, duration) {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const newPos = { x: containerWidth / 2 - pos.x * scale, y: containerHeight / 2 - pos.y * scale };
+    followTweenRef.current = true;
+    stage.to({
+      scaleX: scale,
+      scaleY: scale,
+      x: newPos.x,
+      y: newPos.y,
+      duration,
+      easing: Konva.Easings.EaseInOut,
+      onFinish: () => {
+        followTweenRef.current = false;
+        setStageScale(scale);
+        setStagePos(newPos);
+      },
+    });
+  }
+  const robotClickRef = useRef(null);
+  robotClickRef.current = (pos) => {
+    onCloseUpActivate?.(null);
+    centerStageOn(pos, clampScale(baseScale * ROBOT_FOCUS_ZOOM_MULT), 0.45);
+    setFollow(true);
+  };
+  // estável: o RobotOverlay é memo e não precisa re-renderizar a cada render do mapa
+  const handleRobotClick = useCallback((pos) => robotClickRef.current(pos), []);
+  const robotPoseRef = useRef(null);
+  const lastRobotPosRef = useRef(null); // última posição conhecida (px de conteúdo) — pro toque no painel do header
+  robotPoseRef.current = (pos) => {
+    lastRobotPosRef.current = pos;
+    const stage = stageRef.current;
+    if (!followRef.current || !stage || followTweenRef.current) return;
+    const scale = stage.scaleX();
+    const sx = pos.x * scale + stage.x();
+    const sy = pos.y * scale + stage.y();
+    const mx = containerWidth * ROBOT_FOLLOW_MARGIN;
+    const my = containerHeight * ROBOT_FOLLOW_MARGIN;
+    if (sx < mx || sx > containerWidth - mx || sy < my || sy > containerHeight - my) {
+      centerStageOn(pos, scale, 0.8);
+    }
+  };
+  useEffect(() => { setFollow(false); }, [mode, view]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Toque no painel "ROBÔ: ..." do header (ver MainApp.jsx): mesmo efeito de
+  // tocar no ícone — bounce, zoom nele e seguir. Só a vista de cima tem robô.
+  const [robotBounceId, setRobotBounceId] = useState(0);
+  useEffect(() => {
+    const pos = lastRobotPosRef.current;
+    if (!robotFocusRequest || !pos || view !== 'top' || !baseScale) return;
+    setRobotBounceId((id) => id + 1);
+    robotClickRef.current(pos);
+    // Só reage a um PEDIDO novo (id), igual ao focusRequest.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [robotFocusRequest]);
 
   useEffect(() => {
     if (!focusRequest || !image || !baseScale) return;
@@ -1356,6 +1440,7 @@ export default function FloorPlanCanvas({
     // o banner "VISUALIZANDO: KANBAN X" — ele só sobrevive a mover o mapa
     // no mesmo nível de zoom (ver CONTEXT.md).
     onCloseUpActivate?.(null);
+    setFollow(false);
     const oldScale = stage.scaleX();
     const pointTo = {
       x: (pointer.x - stage.x()) / oldScale,
@@ -1523,6 +1608,7 @@ export default function FloorPlanCanvas({
           onDragStart={(e) => {
             if (e.target !== e.target.getStage()) return; // dragstart de um marcador (ex: mover ponto em edit), não é pan
             wasPanningRef.current = true;
+            setFollow(false); // o operador assumiu a câmera
           }}
           onDragEnd={(e) => {
             if (e.target !== e.target.getStage()) return; // dragend de um marcador borbulhou até aqui, não é pan
@@ -1667,6 +1753,26 @@ export default function FloorPlanCanvas({
               />
             )}
           </Layer>
+          {/* Robô ao vivo: Layer própria (ver RobotOverlay.jsx) — só na vista
+              de cima, a única com calibração completa. Grafo editável só em
+              "Editar closes" sem a ferramenta de desenhar close ativa. */}
+          {view === 'top' && (
+            <RobotOverlay
+              image={image}
+              points={points}
+              lots={lots}
+              frame={robotFrame}
+              editable={mode === 'closeup' && addTool === null}
+              interactive={mode !== 'edit' && mode !== 'closeup'}
+              status={robotStatus}
+              carrying={robotCarrying}
+              route={robotRoute}
+              bounceId={robotBounceId}
+              onFrameChange={onRobotFrameChange}
+              onRobotClick={handleRobotClick}
+              onPoseRef={robotPoseRef}
+            />
+          )}
         </Stage>
       )}
     </div>

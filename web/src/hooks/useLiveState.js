@@ -24,7 +24,7 @@ async function jsonRequest(path, options) {
 // dispositivos nunca "decidem" a mesma coisa duas vezes (ver server.py,
 // QUEUE_LOCK).
 export function useLiveState() {
-  const [state, setState] = useState({ currentRoute: null, pendingRoute: null, routeQueue: [], occupied: [], emergency: false, cancelPending: false, cancelPendingMessage: null, turnBlocked: false, turnBlockedMessage: null, awaitingCharge: false, awaitingChargeMessage: null, postPickupUnloadMessage: null, robotCharging: null, robotBattery: null, robotReturningToCharge: false, robotStalledMessage: null, routePlanningMessage: null });
+  const [state, setState] = useState({ currentRoute: null, pendingRoute: null, routeQueue: [], occupied: [], emergency: false, cancelPending: false, cancelPendingMessage: null, turnBlocked: false, turnBlockedMessage: null, awaitingCharge: false, awaitingChargeMessage: null, postPickupUnloadMessage: null, robotCharging: null, robotBattery: null, robotReturningToCharge: false, robotStalledMessage: null, routePlanningMessage: null, robotCarrying: null, pendingUnloadDropoff: null });
   const [status, setStatus] = useState('loading'); // loading | idle | error
 
   // Assinatura (JSON) da última resposta aplicada. O poll roda a cada 4s e,
@@ -239,6 +239,12 @@ export function useLiveState() {
     // (ver _normalize_battery em server.py — 0-100 assumido, não confirmado
     // em campo ainda); 0-100 caso contrário.
     robotBattery: state.robotBattery,
+    // Pallet no garfo pro ícone do robô ('blue' | 'wood' | null) — ver
+    // server.py, _robot_carrying.
+    robotCarrying: state.robotCarrying,
+    // Destino da devolução do pallet ainda não disparada (ver server.py,
+    // pendingPostPickupUnload) — só pro desenho da rota no mapa.
+    pendingUnloadDropoff: state.pendingUnloadDropoff,
     status,
     enqueueRoutes,
     setLimitBreakerLease,

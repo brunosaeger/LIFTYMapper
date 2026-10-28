@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { loadCalibration, saveCalibration, savePalletHeights as savePalletHeightsApi } from '../api/lifty';
 import { generateId } from '../utils';
 
-const EMPTY_VIEW_DATA = { points: [], lots: [], closeUps: [] };
+const EMPTY_VIEW_DATA = { points: [], lots: [], closeUps: [], robotFrame: null };
 // "Altura de pallets" (sub-seção do editor). blueBase = andar de baixo do
 // pallet azul (o valor que o azul já recebia, 8); blueTop = 2º andar do
 // "pallet de cima" (sem padrão de fábrica — persiste o último salvo).
@@ -22,9 +22,16 @@ function normalizeView(raw) {
   if (raw && Array.isArray(raw.points) && Array.isArray(raw.lots)) {
     // closeUps é campo novo (ver "Close Up") — calibration.json salvo antes
     // dele existir não tem a chave, cai no fallback [] abaixo.
-    return { points: raw.points, lots: raw.lots, closeUps: Array.isArray(raw.closeUps) ? raw.closeUps : [] };
+    // robotFrame: ajuste fino do grafo de rotas sobre a planta (ver
+    // RobotOverlay.jsx) — { x, y, scaleX, scaleY, rotation } ou null.
+    return {
+      points: raw.points,
+      lots: raw.lots,
+      closeUps: Array.isArray(raw.closeUps) ? raw.closeUps : [],
+      robotFrame: raw.robotFrame && typeof raw.robotFrame === 'object' ? raw.robotFrame : null,
+    };
   }
-  return { points: [], lots: [], closeUps: [] };
+  return { points: [], lots: [], closeUps: [], robotFrame: null };
 }
 
 // Estado da calibração (pontos avulsos + lotes em linha/coluna) + persistência
@@ -186,6 +193,12 @@ export function useCalibration() {
     });
   }, [view]);
 
+  // Ajuste fino do grafo de rotas do robô (arrastar/esticar/girar em
+  // "Editar closes") — vai no mesmo snapshot debounced de pontos/lotes.
+  const updateRobotFrame = useCallback((frame) => {
+    setData((prev) => ({ ...prev, [view]: { ...prev[view], robotFrame: frame } }));
+  }, [view]);
+
   // Altura de pallets: mutação cirúrgica no servidor (não passa pelo save
   // debounced de pontos/lotes). Otimista + reconcilia com o que o servidor
   // devolve; em erro, volta pro valor anterior.
@@ -206,6 +219,7 @@ export function useCalibration() {
     points: data[view].points, addPoint, updatePoint, removePoint,
     lots: data[view].lots, addLot, updateLot, removeLot,
     closeUps: data[view].closeUps, addCloseUp, updateCloseUp, removeCloseUp,
+    robotFrame: data[view].robotFrame, updateRobotFrame,
     palletHeights, savePalletHeights,
     status,
   };

@@ -9,7 +9,7 @@ const SAVE_LABEL = {
   error: 'Erro ao salvar',
 };
 
-export default function Toolbar({ mode, onModeChange, addTool, onStartAddPoint, onStartAddLot, onCancelAdd, saveStatus, theme, onToggleTheme, isFullscreen, onToggleFullscreen, devMode, onDevButtonClick, limitBreaker, onToggleLimitBreaker, user, onLogout, robotCharging, robotBattery, robotReturningToCharge }) {
+export default function Toolbar({ mode, onModeChange, addTool, onStartAddPoint, onStartAddLot, onCancelAdd, saveStatus, theme, onToggleTheme, isFullscreen, onToggleFullscreen, devMode, onDevButtonClick, limitBreaker, onToggleLimitBreaker, user, onLogout, robotCharging, robotBattery, robotReturningToCharge, onRobotStatusClick }) {
   return (
     <header className="toolbar">
       <div className="toolbar__brand">
@@ -21,7 +21,7 @@ export default function Toolbar({ mode, onModeChange, addTool, onStartAddPoint, 
           flutuando sobre o mapa) — posicionamento absoluto (ver App.css),
           então não se importa com a largura variável de .toolbar__modes/
           .toolbar__actions ao redor. */}
-      <RobotStatusBanner charging={robotCharging} battery={robotBattery} returningToCharge={robotReturningToCharge} />
+      <RobotStatusBanner charging={robotCharging} battery={robotBattery} returningToCharge={robotReturningToCharge} onClick={onRobotStatusClick} />
 
       {/* "Editar pontos" é só modo desenvolvedor (ver MainApp.jsx:
           DEV_PASSWORD, botão "{ }" no fim da toolbar) — sem ele, mode nunca

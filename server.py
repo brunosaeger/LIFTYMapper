@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Servidor local do painel de controle do forklift.
 
 Serve o build do app React (web/dist) estaticamente, faz proxy de
@@ -678,6 +678,86 @@ def robot_pose():
     return {"x": data["x"], "y": data["y"], "theta": data["theta"]}
 
 
+# --- Robô no mapa do site (pedido do usuário, 2026-10-28) -------------------
+# Posição ao vivo pro ícone do robô no FloorPlanCanvas. Endpoint próprio, fora
+# do /api/live-state: a pose muda a cada segundo e o live-state re-renderiza
+# o app inteiro quando muda. Sob demanda e compartilhada: no máximo uma
+# leitura ao robô a cada ROBOT_POSE_MAX_AGE_SECONDS, não importa quantos
+# tablets estejam com o mapa aberto, e nenhuma se ninguém estiver olhando.
+# Uma leitura lenta (robô fora do ar) não segura ninguém: quem chega durante
+# ela recebe a última pose conhecida.
+ROBOT_POSE_PATH = "/api/robot-pose"
+ROBOT_POSE_MAX_AGE_SECONDS = 0.8
+_robot_pose_cache = {"pose": None, "ok": False, "at": -1e9}
+_robot_pose_lock = threading.Lock()
+
+
+def _cached_robot_pose():
+    if time.monotonic() - _robot_pose_cache["at"] >= ROBOT_POSE_MAX_AGE_SECONDS \
+            and _robot_pose_lock.acquire(blocking=False):
+        try:
+            try:
+                _robot_pose_cache.update(pose=robot_pose(), ok=True)
+            except Exception:
+                _robot_pose_cache["ok"] = False  # mantém a última pose; o front decide o que fazer
+            _robot_pose_cache["at"] = time.monotonic()
+        finally:
+            _robot_pose_lock.release()
+    return dict(_robot_pose_cache["pose"] or {}, ok=_robot_pose_cache["ok"])
+
+
+# Grafo de rotas do dispatch (mesmo desenhado no painel do dispatch): só as
+# arestas como segmentos [x1, y1, x2, y2] em metros + a posição dos pontos
+# com nome (o front cruza com os pontos/lotes calibrados na planta pra achar
+# a transformação mapa do robô -> imagem). Todas as arestas do mapa atual
+# são retas (type 0, sem controlPositions). Muda só quando alguém edita o
+# mapa no dispatch -- cache longo.
+ROUTE_GRAPH_PATH = "/api/route-graph"
+ROUTE_GRAPH_CACHE_SECONDS = 600
+_route_graph_cache = {"data": None, "at": -1e9}
+
+
+def _route_graph():
+    if _route_graph_cache["data"] is None or time.monotonic() - _route_graph_cache["at"] >= ROUTE_GRAPH_CACHE_SECONDS:
+        maps = _robot_call("GET", "/map/list/details/" + ROBOT_PROJECT_ID) or []
+        m = next((m for m in maps if m.get("name") == ROBOT_TARGET_MAP), None)
+        if m is None:
+            raise RuntimeError("mapa %s não encontrado no projeto %s" % (ROBOT_TARGET_MAP, ROBOT_PROJECT_ID))
+        edges = [[round(v, 3) for v in (e["startPosition"][0], e["startPosition"][1], e["endPosition"][0], e["endPosition"][1])]
+                 for e in m.get("edges") or [] if e.get("startPosition") and e.get("endPosition")]
+        points = {p["name"]: [round(p["position"][0], 3), round(p["position"][1], 3)]
+                  for p in m.get("points") or [] if p.get("name") and len(p.get("position") or []) >= 2}
+        # Pro caminho planejado (desenho da rota no site): [de, para, custo
+        # de->para, custo para->de], custo = comprimento / velocidade máxima
+        # daquele sentido, None = sentido proibido. Com esse custo, o caminho
+        # mais rápido bate EXATO com o globalPath que o dispatch mandou ao robô
+        # em 126 de 130 ordens dos logs de campo (2026-10-27/28; só distância
+        # batia 112).
+        links = []
+        for e in m.get("edges") or []:
+            dirs = {d.get("direction"): d for d in e.get("edgeDirections") or []}
+            cost = [round(dirs[k]["length"] / max(dirs[k].get("maxSpeed") or 1.0, 0.05), 3) if k in dirs else None for k in (0, 1)]
+            if e.get("startPoint") and e.get("endPoint") and (cost[0] is not None or cost[1] is not None):
+                links.append([e["startPoint"], e["endPoint"], cost[0], cost[1]])
+        _route_graph_cache.update(data={"edges": edges, "points": points, "links": links}, at=time.monotonic())
+    return _route_graph_cache["data"]
+
+
+def _robot_carrying(state):
+    """Tipo do pallet no garfo ('blue'/'wood') ou None -- pro ícone do robô.
+    Com pallet: rota atual já disparada e coleta concluída (pickupCleared;
+    o UNLOAD isolado já nasce assim), ou cancelamento pós-coleta esperando o
+    UNLOAD ser disparado. A rota sai de currentRoute no FINISHED, quando o
+    pallet já foi deixado."""
+    pending = state.get("pendingPostPickupUnload")
+    if pending:
+        return pending.get("palletType") or "wood"
+    current = state.get("currentRoute") or {}
+    if current.get("taskName") and state.get("pickupCleared"):
+        return current.get("palletType") or "wood"
+    return None
+
+
 def robot_find_nearest_point(pose, target_map=ROBOT_TARGET_MAP):
     """{'name','x','y','theta'} do ponto calibrado mais próximo da pose
     atual, ou None se a lista falhar/vier vazia. Aproximação pro "último nó
@@ -1203,8 +1283,14 @@ ROUTE_PLANNING_CORRIDOR_POINTS = ("P3", "P10")  # extremos do corredor (no mapa 
 # (onde o robô fica depois de uma tarefa normal, e planeja rápido) a ≥1,7 m.
 ROUTE_PLANNING_CORRIDOR_HALF_WIDTH_METERS = 1.2
 ROUTE_PLANNING_CORRIDOR_CACHE_SECONDS = 600
+# Outros pontos onde o mesmo planejamento lento foi visto em campo (pedido do
+# usuário, 2026-10-28). Aqui não é uma faixa de corredor: o robô fica parado
+# no eixo de docking do ponto (entre o lote e o H dele) -- a zona é esse
+# segmento, com folga.
+ROUTE_PLANNING_SLOW_POINTS = ("EXE", "EXE2", "EXM", "EXN", "EXO", "EXP", "EXQ")
+ROUTE_PLANNING_POINT_RADIUS_METERS = 0.6  # o robô para no H com precisão de cm; os lotes EX vizinhos ficam a ~1,2 m
 _route_planning_cache = {"routeId": None, "started": None, "inCorridor": False, "inCorridorRouteId": None}
-_corridor_endpoints_cache = {"at": None, "a": None, "b": None}
+_corridor_endpoints_cache = {"at": None, "a": None, "b": None, "slow": []}
 
 
 def _note_route_record(current, record):
@@ -1219,7 +1305,9 @@ def _note_route_record(current, record):
 
 
 def _corridor_endpoints():
-    """((x,y) de P3, (x,y) de P10) ou None. Cache de 10 min — o mapa quase não muda."""
+    """((x,y) de P3, (x,y) de P10) ou None. Cache de 10 min — o mapa quase não
+    muda. Na mesma leitura, guarda os eixos (ponto, H) de
+    ROUTE_PLANNING_SLOW_POINTS em cache["slow"]."""
     cache = _corridor_endpoints_cache
     now = time.monotonic()
     if cache["at"] is not None and now - cache["at"] < ROUTE_PLANNING_CORRIDOR_CACHE_SECONDS and cache["a"] and cache["b"]:
@@ -1229,29 +1317,45 @@ def _corridor_endpoints():
     for p in points:
         name = p.get("name")
         pos = p.get("position") or []
-        if name in ROUTE_PLANNING_CORRIDOR_POINTS and len(pos) >= 2:
+        if len(pos) >= 2:
             found[name] = (pos[0], pos[1])
     a, b = found.get(ROUTE_PLANNING_CORRIDOR_POINTS[0]), found.get(ROUTE_PLANNING_CORRIDOR_POINTS[1])
     if not a or not b:
         return None
+    cache["slow"] = [(found[n], found.get("H" + n, found[n])) for n in ROUTE_PLANNING_SLOW_POINTS if n in found]
     cache["at"], cache["a"], cache["b"] = now, a, b
     return a, b
+
+
+def _segment_distance(pose, a, b, margin_fraction=0.0):
+    """Distância da pose ao segmento a-b; None se a projeção cai fora dele
+    (além de `margin_fraction` do comprimento em cada ponta)."""
+    (ax, ay), (bx, by) = a, b
+    dx, dy = bx - ax, by - ay
+    length2 = dx * dx + dy * dy
+    if length2 <= 0:
+        return math.hypot(pose["x"] - ax, pose["y"] - ay)
+    t = ((pose["x"] - ax) * dx + (pose["y"] - ay) * dy) / length2
+    if t < -margin_fraction or t > 1 + margin_fraction:
+        return None
+    return abs((pose["x"] - ax) * dy - (pose["y"] - ay) * dx) / math.sqrt(length2)
 
 
 def _in_planning_corridor(pose):
     ends = _corridor_endpoints()
     if not ends:
         return False
-    (ax, ay), (bx, by) = ends
-    dx, dy = bx - ax, by - ay
-    length2 = dx * dx + dy * dy
-    if length2 <= 0:
-        return False
-    t = ((pose["x"] - ax) * dx + (pose["y"] - ay) * dy) / length2
-    if t < -0.02 or t > 1.02:
-        return False
-    dist = abs((pose["x"] - ax) * dy - (pose["y"] - ay) * dx) / math.sqrt(length2)
-    return dist <= ROUTE_PLANNING_CORRIDOR_HALF_WIDTH_METERS
+    dist = _segment_distance(pose, ends[0], ends[1], margin_fraction=0.02)
+    if dist is not None and dist <= ROUTE_PLANNING_CORRIDOR_HALF_WIDTH_METERS:
+        return True
+    # Pontos EX*: no eixo lote<->H, ou a até ROUTE_PLANNING_POINT_RADIUS_METERS
+    # de qualquer uma das pontas.
+    for pallet, dock in _corridor_endpoints_cache.get("slow") or []:
+        d = _segment_distance(pose, pallet, dock)
+        if (d is not None and d <= ROUTE_PLANNING_POINT_RADIUS_METERS) or min(
+                math.hypot(pose["x"] - p[0], pose["y"] - p[1]) for p in (pallet, dock)) <= ROUTE_PLANNING_POINT_RADIUS_METERS:
+            return True
+    return False
 
 
 def _refresh_route_planning_wait():
@@ -1299,6 +1403,186 @@ def _route_planning_message(state):
     return ROUTE_PLANNING_MESSAGE
 
 
+# --- Obstáculo pelos sensores do robô (pedido do usuário, 2026-10-28) -------
+# O app do robô para sozinho quando um sensor de distância marca algo perto
+# na direção em que ele anda, e fala "saia do caminho" -- mas a fala não vai
+# pra log nenhum. Medido em campo (bloqueios de propósito, 2026-10-28): as
+# distâncias que o app usa saem em /mobile_base/commands/fork_info (cm, 255 =
+# livre, ~5 Hz) -- parou com front=71 (frente) e back=31 (lado dos garfos) e
+# voltou a andar no instante em que o valor voltou a 255. O bridge expõe isso
+# em GET /obstacle; uma thread própria consulta a cada ~1 s SÓ com rota
+# disparada, e o aviso sai em ~2-3 s em vez dos 40 s do alerta de "parado"
+# (que continua de reserva se o bridge cair).
+#   - fora do lote: parado >= OBSTACLE_STOPPED_SECONDS com front/back abaixo
+#     do limite -> "obstáculo à frente/atrás" com a distância;
+#   - na faixa de encaixe (eixo do docking da coleta/entrega, entre o H e o
+#     pallet): o sensor de trás vê o pallet normalmente, então só depois de
+#     OBSTACLE_DOCKING_STOPPED_SECONDS parado -- e aí, com o de trás, é o
+#     "sensor do garfo viu o pallet" de verdade (antes era chute por posição);
+#   - esperando o planejador do dispatch (corredor P3-P10): nunca -- o robô
+#     está parado no H de propósito, com os garfos de frente pro lote.
+# Ajustes pelo dia inteiro de coleta (todas as paradas >= 1,5 s com sensor
+# perto, 2026-10-28):
+#   - laterais também param o robô (bloqueios de propósito: parou com 45-58
+#     e 19 cm) -> entram, com limite próprio;
+#   - leitura 0-2 = sensor mascarado pelo app (aparece parado nos H, nos
+#     lotes), não objeto colado -> ignorada;
+#   - com pallet no garfo o sensor de trás enxerga a própria carga (6-47 cm
+#     nos H depois da coleta) -> ignorado enquanto carrega;
+#   - paradas normais em nós com parede perto duram 1,8-1,9 s; bloqueio de
+#     verdade, 20-40 s -> pede 3 s parado.
+OBSTACLE_PATH = "/obstacle"
+OBSTACLE_WATCH_INTERVAL_SECONDS = 1.0
+# Limites: o robô para quando um sensor fica abaixo da distância de desvio
+# do TRECHO atual (o app troca por rota/ponto: [100,100,30,30], [0,30,0,0],
+# [100,100,100,100]... -- confirmado ao vivo: parado com a direita a 99 cm
+# num trecho de 100). O bridge repassa essa distância; os fixos abaixo só
+# valem enquanto ela não chegou (os bloqueios de propósito pararam com
+# 71/31-38/45-58 cm).
+OBSTACLE_AVOID_MARGIN_CM = 3  # leitura oscila uns cm em volta do limite com o robô parado
+OBSTACLE_FRONT_TRIGGER_CM = 85
+OBSTACLE_BACK_TRIGGER_CM = 60
+OBSTACLE_SIDE_TRIGGER_CM = 55
+OBSTACLE_MASKED_MAX_CM = 2
+OBSTACLE_STOPPED_SECONDS = 3.0
+OBSTACLE_DOCKING_STOPPED_SECONDS = 10
+OBSTACLE_DOCKING_LATERAL_METERS = 0.5
+OBSTACLE_DOCKING_AHEAD_METERS = 0.8  # quanto além do H (saindo do lote) ainda conta -- o robô gira/espera até ~0,5 m dele
+OBSTACLE_READING_MAX_AGE_SECONDS = 2.0
+OBSTACLE_BRIDGE_HEALTHY_SECONDS = 5  # bridge respondeu há menos que isso = confia nele (desliga o chute por posição)
+OBSTACLE_POINTS_CACHE_SECONDS = 600
+OBSTACLE_FRONT_MESSAGE = "OBSTÁCULO À FRENTE do robô (%d cm)! Libere o caminho."
+OBSTACLE_BACK_MESSAGE = "OBSTÁCULO ATRÁS, no lado dos garfos (%d cm)! Libere o caminho."
+OBSTACLE_LEFT_MESSAGE = "OBSTÁCULO NA LATERAL ESQUERDA do robô (%d cm)! Libere o caminho."
+OBSTACLE_RIGHT_MESSAGE = "OBSTÁCULO NA LATERAL DIREITA do robô (%d cm)! Libere o caminho."
+_obstacle_watch = {"message": None, "routeId": None, "stoppedSince": None, "healthyAt": None, "points": None, "pointsAt": -1e9}
+_obstacle_thread = {"t": None}
+
+
+def robot_obstacle_distances():
+    """{'front','back',...} em cm (255 = livre) da leitura mais recente do
+    bridge, ou None (bridge fora do ar / leitura velha)."""
+    host = urllib.parse.urlparse(ROBOT_HOST).hostname
+    try:
+        with urllib.request.urlopen("http://%s:%d%s" % (host, TURN_CHECK_PORT, OBSTACLE_PATH), timeout=1.5) as resp:
+            data = json.loads(resp.read())
+    except Exception:
+        return None
+    if data.get("age") is None or data["age"] > OBSTACLE_READING_MAX_AGE_SECONDS:
+        return None
+    _obstacle_watch["healthyAt"] = time.monotonic()
+    return data
+
+
+def _in_docking_zone(pose, state, current):
+    """Robô sobre o eixo do docking da coleta (ainda não feita) ou da entrega
+    da rota atual, entre o pallet e um pouco além do H."""
+    if time.monotonic() - _obstacle_watch["pointsAt"] >= OBSTACLE_POINTS_CACHE_SECONDS or not _obstacle_watch["points"]:
+        _obstacle_watch["points"] = robot_point_positions() or {}
+        _obstacle_watch["pointsAt"] = time.monotonic()
+    points = _obstacle_watch["points"]
+    names = [current.get("dropoff")]
+    if current.get("pickup") and not state.get("pickupCleared"):
+        names.append(current["pickup"])
+    for name in filter(None, names):
+        pallet, docking = points.get(name), points.get("H" + name)
+        if pallet and docking:
+            s, lateral, _diff = _docking_axis_geometry(pose, docking, pallet)
+            if lateral <= OBSTACLE_DOCKING_LATERAL_METERS and s <= OBSTACLE_DOCKING_AHEAD_METERS:
+                return True
+    return False
+
+
+def _set_obstacle_message(message, route_id):
+    if message != _obstacle_watch["message"]:
+        print("Obstáculo: %s" % (message or "liberado"))
+    _obstacle_watch["message"] = message
+    _obstacle_watch["routeId"] = route_id if message else None
+
+
+def _refresh_obstacle():
+    with QUEUE_LOCK:
+        state = _read_queue_state()
+    current = state.get("currentRoute") or {}
+    if (not current.get("taskName") or state.get("emergency") or _robot_status_cache.get("charging")
+            or _route_planning_elapsed(state) is not None):
+        _obstacle_watch["stoppedSince"] = None
+        _set_obstacle_message(None, None)
+        return
+    speed = _slam_call("GET", "/reeman/speed")
+    if abs(float(speed.get("vx") or 0)) >= STALL_VX_EPSILON_MPS or abs(float(speed.get("vth") or 0)) >= STALL_VTH_EPSILON_DEG_S:
+        _obstacle_watch["stoppedSince"] = None
+        _set_obstacle_message(None, None)
+        return
+    if _obstacle_watch["stoppedSince"] is None:
+        _obstacle_watch["stoppedSince"] = time.monotonic()
+    stopped_for = time.monotonic() - _obstacle_watch["stoppedSince"]
+    if stopped_for < OBSTACLE_STOPPED_SECONDS:
+        return
+    d = robot_obstacle_distances()
+    if d is None:
+        _set_obstacle_message(None, None)  # sem leitura: o alerta antigo de 40 s cobre
+        return
+
+    def reading(*keys):
+        vals = [d.get(k, 255) for k in keys]
+        vals = [v for v in vals if v > OBSTACLE_MASKED_MAX_CM]
+        return min(vals) if vals else 255
+
+    # Limite de cada lado = a distância de desvio que o PRÓPRIO robô está
+    # usando no trecho (bridge, /avoid_distance; 0 = lado desligado). Sem ela
+    # (bridge recém-ligado: o tópico só publica quando muda), os fixos.
+    avoid = d.get("avoid") or {}
+
+    def limit(side, fixed):
+        cm = avoid.get(side)
+        return fixed if cm is None else (cm + OBSTACLE_AVOID_MARGIN_CM if cm > 0 else 0)
+
+    carrying = _robot_carrying(state) is not None
+    near = []  # (cm, lado, mensagem) abaixo do limite de cada lado
+    front = reading("front")
+    if front < limit("front", OBSTACLE_FRONT_TRIGGER_CM):
+        near.append((front, "front", OBSTACLE_FRONT_MESSAGE))
+    back = reading("back")
+    if back < limit("back", OBSTACLE_BACK_TRIGGER_CM) and not carrying:
+        near.append((back, "back", OBSTACLE_BACK_MESSAGE))
+    left, right = reading("left", "f_left"), reading("right", "f_right")
+    if left < limit("left", OBSTACLE_SIDE_TRIGGER_CM):
+        near.append((left, "left", OBSTACLE_LEFT_MESSAGE))
+    if right < limit("right", OBSTACLE_SIDE_TRIGGER_CM):
+        near.append((right, "right", OBSTACLE_RIGHT_MESSAGE))
+    if not near:
+        _set_obstacle_message(None, None)
+        return
+    cm, side, template = min(near)
+    if _in_docking_zone(robot_pose(), state, current):
+        # Na faixa de encaixe é normal ter pallet/lote perto de todo lado: só
+        # o garfo (trás, sem carga) parado por muito tempo é aviso -- o caso
+        # do espaçamento entre pallets.
+        if any(s == "back" for _, s, _ in near) and stopped_for >= OBSTACLE_DOCKING_STOPPED_SECONDS:
+            _set_obstacle_message(ROBOT_STALLED_AT_ORIGIN_MESSAGE, current.get("id"))
+        else:
+            _set_obstacle_message(None, None)
+        return
+    _set_obstacle_message(template % cm, current.get("id"))
+
+
+def _start_obstacle_thread():
+    if _obstacle_thread["t"] is not None and _obstacle_thread["t"].is_alive():
+        return
+
+    def _loop():
+        while not _queue_stop.wait(OBSTACLE_WATCH_INTERVAL_SECONDS):
+            try:
+                _refresh_obstacle()
+            except Exception:  # robô/rede indisponível agora -- sem aviso, tenta no próximo segundo
+                _obstacle_watch["stoppedSince"] = None
+                _set_obstacle_message(None, None)
+
+    _obstacle_thread["t"] = threading.Thread(target=_loop, daemon=True)
+    _obstacle_thread["t"].start()
+
+
 # Condição final do alerta (ver "Alerta de robô parado" acima): combina o
 # rastreio de velocidade (stationarySince) com o estado da fila. QUALQUER
 # rota conta -- reservada esperando giro seguro pra começar (turnBlocked),
@@ -1314,6 +1598,10 @@ def _robot_stalled_message(state):
     planning = _route_planning_elapsed(state)
     if planning is not None:
         return ROUTE_PLANNING_LATE_MESSAGE if planning >= ROUTE_PLANNING_LATE_SECONDS else None
+    # Sensores do robô (ver "Obstáculo pelos sensores do robô"): na hora, com o lado.
+    current = state.get("currentRoute") or {}
+    if _obstacle_watch["message"] and _obstacle_watch["routeId"] == current.get("id"):
+        return _obstacle_watch["message"]
     since = _robot_status_cache.get("stationarySince")
     if since is None or _robot_status_cache.get("charging"):
         return None
@@ -1321,8 +1609,12 @@ def _robot_stalled_message(state):
         return None
     if time.monotonic() - since < STALL_ALERT_SECONDS:
         return None
-    current = state.get("currentRoute") or {}
-    if _robot_status_cache.get("stalledAtOrigin") and _robot_status_cache.get("stalledAtOriginRouteId") == current.get("id"):
+    # Bridge respondendo = os sensores já disseram se é o garfo vendo o
+    # pallet (acima); o chute por posição só vale com o bridge fora do ar.
+    healthy_at = _obstacle_watch["healthyAt"]
+    bridge_healthy = healthy_at is not None and time.monotonic() - healthy_at < OBSTACLE_BRIDGE_HEALTHY_SECONDS
+    if not bridge_healthy and _robot_status_cache.get("stalledAtOrigin") \
+            and _robot_status_cache.get("stalledAtOriginRouteId") == current.get("id"):
         return ROBOT_STALLED_AT_ORIGIN_MESSAGE
     return ROBOT_STALLED_MESSAGE
 
@@ -2803,6 +3095,7 @@ def _queue_tick():
         # ainda A CAMINHO da coleta apagava o X da origem de um pallet que
         # ele nunca chegou a pegar. Rota cancelada => deixa a ocupação como
         # está; a suposição segura é que o pallet continua onde estava.
+        pickup_just_cleared = False
         if not state.get("pickupCleared") and record.get("status") != "CANCELLED":
             try:
                 actions = robot_fetch_action_records(record["id"])
@@ -2811,13 +3104,19 @@ def _queue_tick():
                         and pickup_action.get("finishTime")
                         and pickup_action.get("status") != "CANCELLED"):
                     state["pickupCleared"] = True
+                    pickup_just_cleared = True
                     set_occupied_state(current["pickup"], False)
             except Exception:
                 pass  # melhor esforço — tenta de novo no próximo tick
 
         _note_route_record(current, record)  # só lê o que já veio: o aviso "planejando a rota" não faz chamada extra
         advanced = _apply_record_status(state, current, record)
-        if advanced:
+        # pickupCleared PRECISA ir pro disco na hora (bug até 2026-10-28: só
+        # era gravado junto com um avanço de status, então no meio da rota
+        # ele era recalculado e descartado a cada tick — o ícone do robô
+        # nunca mostrava o pallet e o cancelamento dependia só da checagem
+        # fresca de _pickup_actually_completed)
+        if advanced or pickup_just_cleared:
             _write_queue_state(state)
         cancel_pending_now = bool(state.get("cancelPending"))
         turn_blocked_now = bool(state.get("turnBlocked"))
@@ -3018,6 +3317,7 @@ def start_server(robot_host=None, port=None):
     _bootstrap_users_if_missing()
     _reconcile_queue_state_on_startup()
     _start_queue_thread()
+    _start_obstacle_thread()
     handler = functools.partial(Handler, directory=STATIC_DIR)
     _httpd = http.server.ThreadingHTTPServer(("0.0.0.0", listen_port), handler)
     threading.Thread(target=_httpd.serve_forever, daemon=True).start()
@@ -3234,6 +3534,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not self._require_auth():
                 return
             self._get_live_state()
+        elif self.path == ROBOT_POSE_PATH:
+            if not self._require_auth():
+                return
+            self._relay(200, "application/json", json.dumps(_cached_robot_pose()).encode("utf-8"))
+        elif self.path == ROUTE_GRAPH_PATH:
+            if not self._require_auth():
+                return
+            try:
+                self._relay(200, "application/json", json.dumps(_route_graph(), ensure_ascii=False).encode("utf-8"))
+            except Exception as err:
+                self._relay(502, "application/json", json.dumps({"error": str(err)}, ensure_ascii=False).encode("utf-8"))
         elif self.path == SESSION_PATH:
             self._get_session()
         elif self.path == USERS_PATH:
@@ -3753,6 +4064,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "robotStalledMessage": _robot_stalled_message(state),
             "routePlanningMessage": _route_planning_message(state),
             "limitBreaker": _limit_breaker_active(),
+            "robotCarrying": _robot_carrying(state),
+            # Devolução do pallet decidida mas o UNLOAD ainda não criado no
+            # robô (janela de ~1 tick): o mapa já desenha o caminho até ela.
+            "pendingUnloadDropoff": (state.get("pendingPostPickupUnload") or {}).get("dropoff"),
         }, ensure_ascii=False).encode("utf-8")
         self._relay(200, "application/json", body)
 
@@ -4374,6 +4689,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(payload)
 
     def log_message(self, fmt, *args):
+        # a pose do robô é sondada a ~1 Hz por tablet com o mapa aberto: não
+        # vale uma linha de log cada (erros continuam aparecendo)
+        if self.path == ROBOT_POSE_PATH and len(args) > 1 and str(args[1]) == "200":
+            return
         print("[%s] %s" % (self.address_string(), fmt % args))
 
 

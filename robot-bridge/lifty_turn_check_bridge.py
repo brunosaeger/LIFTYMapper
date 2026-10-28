@@ -31,6 +31,15 @@ independente dos topicos ROS que ja existem no robo, nada mais:
   /fork-nav-height publica o comando FIXO de "garfo pra altura de
   navegacao" (o mesmo que o app do tablet manda), ver
   FORK_NAV_HEIGHT_COMMAND. Nenhum outro conteudo e aceito.
+- /mobile_base/commands/fork_info + /avoid_distance -- GET /obstacle devolve as distancias
+  dos sensores de obstaculo (cm, 255 = livre) que o app usa pra parar o
+  robo (validado em campo 2026-10-28: parou com front=71 / back=31 e voltou
+  a andar no instante em que o valor voltou a 255). SO LEITURA. Excecao
+  combinada com o usuario a regra "so tipos padrao": o tipo e da REEMAN
+  (driver_msgs/ForkliftDistance), entao assina como AnyMsg e monta a classe
+  na hora a partir da definicao que o proprio publicador manda no cabecalho
+  da conexao (genpy.dynamic) -- sem compilar, sem ler arquivo nenhum da
+  REEMAN, mesmo metodo do leitor de coleta (tools/field-data).
 
 Modo de uso pretendido (por enquanto): MANUAL, sob demanda, via SSH — nao
 e um systemd service, nao inicia sozinho no boot. So vira permanente se/
@@ -66,8 +75,10 @@ Teste remoto (de qualquer maquina na mesma wifi, ex. a que roda server.py):
 import http.server
 import json
 import threading
+import time
 import urllib.parse
 
+import genpy.dynamic
 import rospy
 from std_msgs.msg import Bool, Float32, String
 
@@ -97,6 +108,48 @@ def _on_turn_check_ok(msg):
     _response_event.set()
 
 
+# Distancias de obstaculo (ver GET /obstacle). ~5 Hz; guarda so a ultima.
+OBSTACLE_TOPIC = "/mobile_base/commands/fork_info"
+OBSTACLE_FIELDS = ("front", "back", "left", "right", "f_left", "f_right")
+# Distancia de desvio ATIVA por lado (m) -- o app troca a cada trecho de rota
+# / ponto ("激光避让距离" no log dele: [100,100,30,30], [0,30,0,0]...; 0 =
+# lado desligado) e para quando um sensor fica abaixo dela. So publica quando
+# muda, entao guarda a ultima.
+AVOID_TOPIC = "/avoid_distance"
+_obstacle = {"values": None, "t": None, "avoid": None}
+_dynamic_classes = {}
+
+
+def _decode(raw):
+    """Mensagem de tipo da REEMAN -> objeto, montado a partir da definicao do
+    cabecalho da conexao (sem compilar, sem ler arquivo)."""
+    header = raw._connection_header
+    cls = _dynamic_classes.get(header["md5sum"])
+    if cls is None:
+        cls = genpy.dynamic.generate_dynamic(header["type"], header["message_definition"])[header["type"]]
+        _dynamic_classes[header["md5sum"]] = cls
+    msg = cls()
+    msg.deserialize(raw._buff)
+    return msg
+
+
+def _on_fork_info(raw):
+    try:
+        msg = _decode(raw)
+        _obstacle["values"] = {f: int(getattr(msg, f + "_obstacle_distance")) for f in OBSTACLE_FIELDS}
+        _obstacle["t"] = time.time()
+    except Exception as err:  # formato inesperado: /obstacle responde 503 e o server.py cai no alerta antigo
+        print("fork_info: nao consegui ler (%s)" % err)
+
+
+def _on_avoid_distance(raw):
+    try:
+        msg = _decode(raw)
+        _obstacle["avoid"] = {f: int(round(float(getattr(msg, f)) * 100)) for f in ("front", "back", "left", "right")}
+    except Exception as err:  # sem isso o server.py usa limites fixos
+        print("avoid_distance: nao consegui ler (%s)" % err)
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -104,6 +157,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_check_turn(parsed)
         elif parsed.path == "/obstacle-3d":
             self._handle_obstacle_3d(parsed)
+        elif parsed.path == "/obstacle":
+            if _obstacle["values"] is None:
+                self._json(503, {"error": "ainda sem leitura de %s" % OBSTACLE_TOPIC})
+            else:
+                self._json(200, dict(_obstacle["values"], age=round(time.time() - _obstacle["t"], 2), avoid=_obstacle["avoid"]))
         else:
             self.send_response(404)
             self.end_headers()
@@ -182,13 +240,18 @@ if __name__ == "__main__":
     rospy.Subscriber("/robot_api/turn_check_ok", Bool, _on_turn_check_ok)
     obs3d_pub = rospy.Publisher("/robot_api/set_obs3d_switch", Bool, queue_size=1)
     fork_pub = rospy.Publisher(FORK_NAV_HEIGHT_TOPIC, String, queue_size=1)
+    rospy.Subscriber(OBSTACLE_TOPIC, rospy.AnyMsg, _on_fork_info, queue_size=1)
+    rospy.Subscriber(AVOID_TOPIC, rospy.AnyMsg, _on_avoid_distance, queue_size=1)
     rospy.sleep(0.5)  # da tempo dos publishers se registrarem no master antes do 1o uso
 
-    httpd = http.server.HTTPServer(("0.0.0.0", PORT), Handler)
+    # Threading: o /check-turn pode esperar ate 5 s pela resposta do robo e nao
+    # pode segurar o /obstacle, que o server.py consulta a cada ~1 s em rota.
+    httpd = http.server.ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print("Bridge rodando:")
     print("  http://0.0.0.0:%d/check-turn?angle=<graus>" % PORT)
     print("  http://0.0.0.0:%d/obstacle-3d?on=<1 ou 0>" % PORT)
     print("  POST http://0.0.0.0:%d/fork-nav-height  (garfo -> altura de navegacao)" % PORT)
+    print("  http://0.0.0.0:%d/obstacle  (distancias dos sensores de obstaculo, cm)" % PORT)
     print("Ctrl+C pra parar.")
     try:
         httpd.serve_forever()

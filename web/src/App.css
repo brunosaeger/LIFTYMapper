@@ -437,6 +437,22 @@
   pointer-events: none;
 }
 
+/* Tocar no painel leva o mapa até o robô (ver RobotStatusBanner.jsx). */
+.robot-status-banner.is-clickable {
+  pointer-events: auto;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.robot-status-banner.is-clickable:hover {
+  border-color: rgba(255, 255, 255, 0.35);
+  background: rgba(15, 17, 20, 0.7);
+}
+
+.robot-status-banner.is-clickable:active {
+  transform: translate(-50%, -50%) scale(0.97);
+}
+
 /* Carga detectada: pulsa verde uma vez (ver RobotStatusBanner.jsx). */
 .robot-status-banner.is-charge-pulse {
   animation: charge-ready-pulse 1.4s ease-out 1;

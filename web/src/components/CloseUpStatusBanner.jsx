@@ -13,8 +13,13 @@
 // GRUPO de "Lotes em sequência" visualizado por inteiro (bug corrigido
 // 2026-10-02: antes só mostrava o 1º par, como se o resto não existisse).
 // `active` ({kind, index}) destaca qual ponto específico está sendo visto.
-export default function CloseUpStatusBanner({ name, task, onFocusEndpoint, wide }) {
-  if (!name && !task) return null;
+//
+// `robot` ({ label, color }): o mapa está seguindo o robô (tocou no ícone
+// dele, ver RobotOverlay.jsx) — "VISUALIZANDO: ROBÔ / STATUS: ...", com o
+// status na mesma cor do brilho do ícone. Tem prioridade sobre `name` (tocar
+// no robô já solta o kanban).
+export default function CloseUpStatusBanner({ name, task, robot, onFocusEndpoint, wide }) {
+  if (!name && !task && !robot) return null;
 
   const className = 'closeup-status-banner'
     + (task ? ' closeup-status-banner--task' : '')
@@ -26,7 +31,11 @@ export default function CloseUpStatusBanner({ name, task, onFocusEndpoint, wide 
         {/* Prefixo em destaque (mint vibrante), resto do texto em branco —
             pedido explícito do usuário, ver CONTEXT.md. */}
         <span className="closeup-status-banner__prefix">VISUALIZANDO</span>
-        {name && <span className="closeup-status-banner__rest">: KANBAN {name}</span>}
+        {robot ? (
+          <span className="closeup-status-banner__rest">
+            : ROBÔ / STATUS: <span style={robot.color ? { color: robot.color } : undefined}>{robot.label.toUpperCase()}</span>
+          </span>
+        ) : name && <span className="closeup-status-banner__rest">: KANBAN {name}</span>}
       </div>
       {task && (
         <div className={'closeup-status-banner__task' + (task.pickups.length > 1 || task.dropoffs.length > 1 ? ' closeup-status-banner__task--group' : '')}>
