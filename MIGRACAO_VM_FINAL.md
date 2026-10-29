@@ -67,8 +67,8 @@ pasta do `.exe` na VM. **Não estão no GitHub** (de propósito):
 
 | Arquivo | O que é | Levar? |
 |---|---|---|
-| `calibration.json` | mapa calibrado: pontos, lotes, kanbans, ocupação, ajuste do robô no mapa | **sim** |
-| `users.json` | contas e senhas | **sim** |
+| `calibration.json` | mapa calibrado: pontos e lotes (posição, nome técnico e apelido), kanbans, ocupação, alturas de pallet, ajuste do robô no mapa (`robotFrame`), **grafo deformado** (`robotWarp`) e opacidade da rota | **sim** |
+| `users.json` | contas, senhas (hash), admin/mestre e kanbans de cada usuário | **sim** |
 | `session_secret.key` | chave que assina os logins (sem ela todo mundo loga de novo) | recomendado |
 | `lifty_robot` | **chave SSH do robô** (hoje em `C:\Users\bruno\.ssh\lifty_robot`) — a vigia do bridge usa | **sim** (seção 7) |
 | `robot_host.txt` | último IP do robô | recomendado |
@@ -79,6 +79,23 @@ pasta do `.exe` na VM. **Não estão no GitHub** (de propósito):
 
 Sem `calibration.json`/`users.json`, o servidor cria tudo do zero (mapa de
 fábrica e usuário **`admin` / `admin`**). Evite.
+
+**Quando copiar**: só **depois de parar o `server.py` da máquina antiga** (e com o
+robô ocioso). Qualquer ajuste feito no site depois da cópia (ocupação marcada,
+grafo mexido, usuário criado) ficaria só na máquina antiga. Copie os arquivos
+como estão — não abra/salve em editor de texto (muda codificação/quebras de
+linha). Guarde também uma cópia datada num lugar seguro antes de começar.
+
+Conferir que a cópia chegou idêntica (rodar nas duas máquinas, os hashes têm
+que bater):
+
+```powershell
+Get-FileHash calibration.json, users.json, session_secret.key | Format-Table Hash, Path
+```
+
+Referência de 29/10 (pra conferir no site depois de subir): 4 usuários; vista de
+cima com 46 lotes e 19 pontos; grafo do robô com 172 pinos de deformação e
+opacidade da rota em 60%; 51 posições ocupadas (esse número muda com o uso).
 
 > A chave `lifty_robot` dá acesso de terminal ao robô. Trate como senha: só na
 > pasta do serviço, com permissão restrita (seção 7), nunca no GitHub, nunca em
@@ -171,6 +188,11 @@ tablets.
 
 Se o IP da VM um dia mudar, **todos os atalhos precisam ser refeitos**.
 
+Endereço novo = o navegador trata como outro site: preferências guardadas só no
+tablet (tema claro/escuro, modo desenvolvedor destrancado) voltam ao padrão e o
+login é pedido uma vez (o cookie de login é por endereço). Os dados do mapa e
+os usuários NÃO dependem disso — moram no servidor.
+
 ## 7. Instalação na VM (PowerShell como administrador)
 
 ```powershell
@@ -224,6 +246,14 @@ C:\LIFTY\nssm.exe start LIFTY-SERVICE
 - [ ] Tarefa de verdade, robô acompanhado: enviar, ver a rota desenhada no mapa,
       acompanhar na Fila, cancelar (o garfo deve subir pra altura de navegação —
       log `Garfo -> altura de navegação`).
+- [ ] **Dados vieram junto** (se algo faltar, o arquivo não foi copiado pra
+      `C:\LIFTY\` — pare o serviço, copie, suba de novo; NÃO recalibre à mão):
+  - [ ] login com um usuário que já existia (não `admin`/`admin`); Usuários
+        lista os mesmos usuários, com os mesmos kanbans;
+  - [ ] lotes e pontos no mesmo lugar e com os mesmos nomes;
+  - [ ] Editar closes → "Ajustar grafo do robô": grafo com a mesma deformação
+        (contador de pinos igual) e a rota com a mesma opacidade;
+  - [ ] mesmas posições ocupadas (X) no mapa.
 - [ ] Se um `users.json` novo foi criado: trocar a senha do `admin`.
 - [ ] Guardar cópia dos arquivos de dados depois do 1º dia de uso real.
 - [ ] Só então: desligar de vez a máquina antiga (idealmente mantê-la um tempo
