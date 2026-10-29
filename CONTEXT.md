@@ -5296,8 +5296,9 @@ Antes era chute por posição ("parado perto da origem = sensor do garfo"). Agor
   frente 85, trás 60, laterais 55). Ignora: leitura ≤ 2 cm (sensor mascarado), traseira com pallet
   no garfo (enxerga o próprio pallet), lado com avoid 0. Na zona de docking (eixo da origem/destino,
   lateral 0,5 m, até 0,8 m à frente do H) só a traseira conta e só depois de 10 s — mensagem
-  "parado na origem". Mensagens: `OBSTACLE_*_MESSAGE` com a distância. Vem antes do alerta de 40 s;
-  o chute "sensor do garfo" só volta se o bridge não respondeu nos últimos 5 s.
+  "parado na origem". Mensagens: `OBSTACLE_*_MESSAGE` com a distância. (Até 29/10 havia ainda o
+  alerta genérico de 40 s parado e o chute "sensor do garfo" por posição — removidos, ver
+  "Avisos antigos de robô parado removidos" abaixo.)
 - Validado em campo 28/10 bloqueando frente, trás, laterais e diagonais (f_left/f_right contam
   como frente). Primeiro limite fixo falhou (lateral a 99 cm não alertava) — por isso os limites
   vêm do `/avoid_distance` de cada trecho.
@@ -5326,3 +5327,117 @@ botão, todos liberados pela regra do eixo; 1 pós-coleta devolveu o pallet ao C
 isolado sem desviar pra energia. Avisos de obstáculo apareceram e limparam sozinhos
 (`Obstáculo: ...` / `Obstáculo: liberado` no server.log). Ao encerrar a coleta com TaskStop o
 `meta.json` não é escrito — gravar à mão (`start`/`end` em epoch).
+
+## Modo sombra: pallet empurrado na coleta (2026-10-29, EM OBSERVAÇÃO — só registra)
+Medo do usuário: o garfo empurrar o pallet em vez de entrar (nunca aconteceu em ~60 coletas
+recentes). Decidido: primeiro só REGISTRAR "teria parado aqui" por alguns dias; parar o robô de
+verdade só depois de zero alarme falso, e é decisão à parte (comando de escrita durante o encaixe).
+**O que os dados de 27-28/10 mostraram** (`field-data/`, 53 coletas):
+- Sensor do garfo (`back` do `fork_info`): durante o encaixe fica em 255 ou 0/1 (o app o desliga
+  lá — confirma o usuário). Não serve de bumper sem mudar o robô. Só registrado.
+- `forklift_status.paller_limit`/`dock_state`: sempre 0. Sem fim-de-curso de pallet.
+- Câmera de pallet (`/lx_camera_pallet_node/forklift_pallet_pose`, `dis_x` = pallet em relação ao
+  robô, m) publica só durante a coleta: no alinhamento e na ré de entrada até ~1 m do fim (a
+  ponta do garfo chega na face do pallet com ela ainda vendo). Odometria (`/mobile/odom`,
+  `twist.linear.x`, + = andando pra longe dos garfos): numa coleta normal Δdis_x = −Δodom —
+  razão ~1,0, pior 0,49 em 119 sequências de detecção. Empurrando, o pallet anda junto → ~0.
+- Pose do mapa no fim da coleta: −0,205 a +0,351 m do ponto do pallet (neg = pra dentro).
+- Relógio: `ros.jsonl` (robô) e `app.log` (app) diferem ~9 s A MAIS que o offset arredondado pro
+  minuto do `episodes.py` — janelas de ROS do `episodes.csv` estão deslocadas ~9 s. Pra cruzar ROS
+  com app, alinhar pelo movimento (odometria x `nav:pose`), não pelo minuto.
+**Implementação**:
+- Bridge: `GET /dock-shadow` (só leitura). Assina câmera + odometria (AnyMsg + genpy.dynamic, 20
+  Hz); sequência de detecções da câmera = 1 encaixe (acaba após 3 s sem detecção). A cada 0,15 m
+  de odometria: razão = −Δdis_x/Δodom; < 0,25 vai pra `push` (`DOCK_PUSH_RATIO`). Guarda os 30
+  últimos (`boot`+`id`, tempos relativos — sem depender do relógio do robô). Também o mínimo do
+  sensor do garfo. Agora roda com `python3 -u` (log sem buffer).
+- `server.py` (`_refresh_dock_shadow`, na thread da vigia de obstáculo, 1 s, `DOCK_SHADOW_ENABLED`):
+  profundidade da pose sobre o eixo da coleta (lateral ≤ 0,35 m), limite
+  `DOCK_SHADOW_DEPTH_LIMIT_METERS` = −0,30 m; consulta o bridge só com rota rodando. Registra em
+  `dock_shadow.jsonl` (fora do git) e no log com prefixo `Sombra:` — tipos `camera`/`depth` (um
+  por coleta, "normal" ou "TERIA PARADO") e `camera-live`/`depth-live` (no instante em que
+  teria parado). Nada no tablet, nada na fila.
+- Testado: replay das 119 sequências reais no detector do bridge = 0 alarme; 12/12 empurrões
+  simulados (câmera congelada) detectados na 1ª janela (~0,19 m); servidor isolado 13 casos.
+**Pra revisar depois de alguns dias**: `dock_shadow.jsonl` — algum `TERIA PARADO` em coleta boa?
+Distribuição de `min_ratio` e `min` (profundidade) por lote, madeira x azul. Teste controlado
+sugerido: pallet vazio deslocado/torto de propósito com alguém na emergência.
+
+## Vigia do bridge: o servidor religa o bridge por SSH (2026-10-29, VALIDADO)
+Pedido: bridge subir sozinho depois de reiniciar o robô (servidor vai rodar 24/7). Achado: o boot
+do robô é o **crontab do usuário reeman** (`@reboot` do `bringup.sh` do ROS, webServer, frp...) —
+é da REEMAN, NÃO mexer; systemd pediria sudo. Escolha do usuário: vigia no servidor.
+`server.py` (`_refresh_bridge_watch`, thread própria, `BRIDGE_WATCHDOG_*`): a cada 30 s testa a 8091
+(qualquer resposta HTTP = vivo); fora do ar e porta 22 do robô aberta → `ssh` (BatchMode,
+`StrictHostKeyChecking=accept-new`, known_hosts próprio `robot_known_hosts`) roda o script fixo
+`BRIDGE_START_SCRIPT` via base64: se já há processo, responde `ja-rodando` (não duplica); senão
+`setsid nohup python3 -u lifty_turn_check_bridge.py > bridge.log`. Vivo mas mudo por 300 s → `restart`
+(kill -9 + sobe). Tentativas a cada 120 s no máximo; log só quando a situação muda (`Bridge: ...`).
+Chave: `lifty_robot` ao lado do executável (serviço roda como SYSTEM) ou `~/.ssh/lifty_robot`.
+Bridge: consultas 200 de `/obstacle` e `/dock-shadow` não vão mais pro `bridge.log` (com `-u` e 24/7
+o arquivo cresceria sem parar no disco do robô). Testado em campo: bridge derrubado com kill -9 →
+religado pela vigia em < 45 s; com o bridge vivo, a vigia responde `ja-rodando`.
+**VM precisa alcançar o robô nas portas 80, 8091 e 22** + cliente OpenSSH + chave → ver
+`MIGRACAO_VM_FINAL.md` (substitui o `MIGRACAO_VM.md`).
+
+## Ajuste do grafo do robô no "Editar closes" (2026-10-29)
+Botão "Ajustar grafo do robô" (CloseUpsPanel) — fora dele o grafo não aparece nem bloqueia o
+editor. Duas ferramentas:
+- **Mover / esticar** (`robotFrame` {x, y, scaleX, scaleY, rotation}): Transformer do Konva. Bug
+  corrigido: o Shape com `sceneFunc` próprio não tem tamanho pro Konva, a caixa nascia com tamanho
+  zero no canto (0,0) e qualquer puxão salvava escala absurda (scaleX 1068). Agora o Shape recebe
+  x/y/width/height do grafo + Rect transparente pra pegar o arraste; `validRobotFrame` (escala
+  0,5–2, rotação ±45°) recusa o resto; botão "Resetar ajuste".
+- **Deformar** ("liquify", `robotWarp` = pinos {x, y, dx, dy, r} em px de conteúdo): arrastar um
+  trecho leva a vizinhança junto, raio "Área de influência" 2–30 m. Núcleo `(1-(d/r)²)²`, pinos
+  somam; deslocamento limitado a 0,6·r (não dobra). Grafo, rota e ícone do robô passam pela mesma
+  deformação (`warpPoint`; a rotação do ícone por `warpRotationDelta`). "Desfazer última"/"Limpar
+  todas".
+- **Opacidade da rota** (`routeOpacity`, 10–100%): só a rota desenhada, não o grafo. Enquanto o
+  slider mexe aparece uma rota de exemplo (some 3 s depois) — fixa na tela ela parecia uma rota
+  "fantasma" de verdade (relato do usuário).
+**Sincronia entre aparelhos**: antes cada site salvava a calibração inteira logo ao abrir — um
+tablet com JS velho apagava o ajuste dos outros. Agora: não salva depois de carregar; o servidor
+preserva `robotFrame`/`robotWarp`/`routeOpacity` quando o POST não traz o campo
+(`CALIBRATION_PRESERVED_VIEW_KEYS`); o live-state leva `calibrationStamp` (muda só em POST do
+editor) e os outros aparelhos recarregam sozinhos (`syncRemoteStamp` em useCalibration).
+
+## Pallet sem padrão no Ponto a Ponto (2026-10-29)
+Nenhum pallet vem marcado e a escolha volta a vazio depois de cada "Enviar tarefa". Avulsa sem
+escolha → aviso vermelho central "Selecione o tipo do pallet: Madeira ou Azul (Metal)" (só fecha
+no OK, `NoticeModal.jsx`). "Lotes em sequência" não trava (sem escolha vai madeira, trocável em
+cada barrinha) — e o 1º "Iniciar tarefas" de uma lista com sequência só mostra o aviso amarelo
+"Antes de iniciar a tarefa, verifique se os materiais dos pallets correspondem às posições
+marcadas em sequência" e não envia; o toque seguinte envia. Avisos são locais do aparelho.
+
+## Tarefa em execução x robô no mapa (2026-10-29)
+- Clicar em qualquer rota da Fila (inclusive a EM EXECUÇÃO) ou do Histórico = traçado estático
+  da tarefa inteira (origem → destino).
+- Tocar no robô (ícone ou painel ROBÔ do header) = `robotViewing`: larga a seleção da
+  Fila/Histórico, mostra o trajeto AO VIVO e o banner "VISUALIZANDO: ROBÔ / STATUS: …" com
+  origem → destino da tarefa atual clicáveis (o banner continua quando a câmera vai até o ponto).
+  Sai ao selecionar rota da Fila/Histórico, tocar num kanban, abrir tarefa preparada, trocar de
+  modo ou resetar a vista.
+- Bug corrigido (rota sobreposta): a rota ao vivo recalculada no meio do caminho (ex: clicar na
+  tarefa em execução) partia do nó do INÍCIO da tarefa, e o recorte procurava o robô só 12
+  trechos à frente — a linha saía do robô, voltava ao começo e refazia o caminho por cima. Agora
+  a 1ª leitura depois de recalcular procura na rota inteira (`routeProgressRef = -1`).
+
+## Avisos antigos de robô parado removidos (2026-10-29)
+Saíram o "ROBÔ PARADO! Remova obstáculos ou use o modo manual." (40 s parado, sem olhar sensor) e
+o chute "sensor do garfo" pela posição (`_refresh_stall_at_origin`). O aviso vermelho agora é só:
+planejamento passando de 140 s, ou a vigia dos sensores. Sem o bridge não há aviso de obstáculo
+(a vigia do bridge o religa em 30–60 s). Textos (pedido do usuário):
+- obstáculo (todas as direções): "... Remova o obstáculo ou utilize o modo manual para levá-lo à
+  energia." (`OBSTACLE_ACTION`);
+- garfo na faixa de encaixe: "Sensor do garfo detectou o pallet como objeto! Verifique se o
+  espaçamento de pallets está adequado e retorne o robô manualmente para a energia."
+`stationarySince` continua (o aviso de "planejando a rota" usa).
+
+## Outros ajustes de interface (2026-10-29)
+- Botão de parada de emergência do canto do mapa removido (sem uso). O endpoint
+  `/api/queue/emergency` continua no servidor, sem nada no site chamando.
+- Usuários: busca e campos de senha com `autoComplete` desligado / `new-password` — o
+  gerenciador de senhas do navegador do PC preenchia "33dev" na busca (e podia preencher a senha
+  salva em "nova senha"). Olhinho (mostrar/esconder) na senha do novo usuário e em "nova senha" de
+  cada um. Senhas existentes são só hash PBKDF2 — não há como mostrá-las.

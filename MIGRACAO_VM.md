@@ -1,5 +1,9 @@
 # Migração do LIFTY Mapper pra VM Windows — guia e checklist
 
+> **DESATUALIZADO (2026-10-29): use o [`MIGRACAO_VM_FINAL.md`](MIGRACAO_VM_FINAL.md).**
+> Este guia diz que a porta 8091 não é usada — hoje é, e a VM também precisa
+> da porta 22 do robô e da chave SSH. Mantido só como histórico.
+
 **Situação**: hoje o `server.py` roda numa máquina local ligada na wifi do
 robô. O destino é uma VM **Windows Server 2019** da empresa (`aplsrv`, IP fixo
 combinado: `192.168.5.252`), rodando um executável **sem interface**

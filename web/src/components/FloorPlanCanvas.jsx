@@ -804,18 +804,24 @@ export default function FloorPlanCanvas({
   queuePulseId = 0,
   invalidPulseName,
   invalidPulseId,
-  emergencyActive,
-  onToggleEmergency,
   // Robô ao vivo (ver RobotOverlay.jsx): status/pallet vêm do live-state,
   // robotFrame é o ajuste fino do grafo salvo na calibração (Editar closes).
   robotStatus,
   robotCarrying,
   robotRoute,
   robotFrame,
+  robotWarp,
+  routeOpacity,
+  showRoutePreview,
+  robotGraphEditing,
+  robotGraphTool,
+  robotWarpRadiusM,
   onRobotFrameChange,
+  onRobotWarpChange,
   onRobotFollowChange,
   // Toque no painel do robô no header: número que muda a cada pedido.
   robotFocusRequest,
+  onRobotSelect,
 }) {
   const containerRef = useRef(null);
   const { width: containerWidth, height: containerHeight } = useContainerSize(containerRef);
@@ -1032,6 +1038,7 @@ export default function FloorPlanCanvas({
   const robotClickRef = useRef(null);
   robotClickRef.current = (pos) => {
     onCloseUpActivate?.(null);
+    onRobotSelect?.();
     centerStageOn(pos, clampScale(baseScale * ROBOT_FOCUS_ZOOM_MULT), 0.45);
     setFollow(true);
   };
@@ -1504,18 +1511,6 @@ export default function FloorPlanCanvas({
     >
       <button
         type="button"
-        className={'emergency-toggle' + (emergencyActive ? ' is-active' : '')}
-        onClick={onToggleEmergency}
-        aria-label={emergencyActive ? 'Liberar parada de emergência' : 'Parada de emergência — parar o robô'}
-        aria-pressed={emergencyActive}
-        title={emergencyActive ? 'Liberar parada de emergência' : 'Parada de emergência'}
-      >
-        <svg viewBox="0 0 48 48" fill="currentColor" aria-hidden="true">
-          <path d="M43.4,15.1,32.9,4.6A2,2,0,0,0,31.5,4h-15a2,2,0,0,0-1.4.6L4.6,15.1A2,2,0,0,0,4,16.5v15a2,2,0,0,0,.6,1.4L15.1,43.4a2,2,0,0,0,1.4.6h15a2,2,0,0,0,1.4-.6L43.4,32.9a2,2,0,0,0,.6-1.4v-15A2,2,0,0,0,43.4,15.1ZM24,34a2,2,0,1,1,2-2A2,2,0,0,1,24,34Zm2-8a2,2,0,0,1-4,0V16a2,2,0,0,1,4,0Z" />
-        </svg>
-      </button>
-      <button
-        type="button"
         className="view-toggle reset-toggle"
         onClick={handleResetView}
         aria-label="Resetar posição e zoom do mapa"
@@ -1762,7 +1757,13 @@ export default function FloorPlanCanvas({
               points={points}
               lots={lots}
               frame={robotFrame}
-              editable={mode === 'closeup' && addTool === null}
+              warp={robotWarp}
+              routeOpacity={routeOpacity}
+              showRoutePreview={showRoutePreview}
+              editable={robotGraphEditing && addTool === null}
+              graphTool={robotGraphTool}
+              warpRadiusM={robotWarpRadiusM}
+              onWarpChange={onRobotWarpChange}
               interactive={mode !== 'edit' && mode !== 'closeup'}
               status={robotStatus}
               carrying={robotCarrying}

@@ -75,6 +75,92 @@ export function mapToContent(t, x, y) {
   return { x: t.a * x + t.b * y + t.c, y: t.d * x + t.e * y + t.f };
 }
 
+// Ajuste fino do grafo (frame do "Editar closes"): é só um retoque em cima do
+// encaixe automático acima. Fora destes limites é lixo e é ignorado — em
+// 2026-10-29 a caixa do Transformer, com tamanho zero, salvou scaleX 1068 /
+// scaleY -85 e o grafo sumiu.
+const FRAME_SCALE_MIN = 0.5;
+const FRAME_SCALE_MAX = 2;
+const FRAME_ROTATION_MAX = 45;
+
+// { x, y, scaleX, scaleY, rotation } válido, ou null.
+export function validRobotFrame(frame) {
+  if (!frame || typeof frame !== 'object') return null;
+  const { x = 0, y = 0, scaleX = 1, scaleY = 1, rotation = 0 } = frame;
+  if (![x, y, scaleX, scaleY, rotation].every(Number.isFinite)) return null;
+  const scaleOk = (s) => s >= FRAME_SCALE_MIN && s <= FRAME_SCALE_MAX;
+  if (!scaleOk(scaleX) || !scaleOk(scaleY) || Math.abs(rotation) > FRAME_ROTATION_MAX) return null;
+  return { x, y, scaleX, scaleY, rotation };
+}
+
+// --- deformação livre do grafo ("liquify", Editar closes) ------------------
+// A planta não é 100% proporcional: uma afim só não encaixa todo corredor.
+// Cada "pino" é um arrasto do desenvolvedor: o ponto (x, y) foi levado de
+// (dx, dy), e a vizinhança vai junto até o raio r, cada vez menos. Tudo em px
+// de conteúdo DEPOIS da afim e ANTES do frame (dentro do Group do frame), e
+// os pinos SOMAM, cada um com a âncora no espaço sem deformação. O robô, as
+// rotas e o grafo passam pela mesma função, então ficam sempre juntos.
+// Núcleo (1 - (d/r)²)²: suave e zero de verdade a partir de r (o círculo
+// mostrado é exatamente a área afetada). Inclinação máxima ~1,54/r: um
+// deslocamento até WARP_MAX_SHIFT·r nunca dobra o grafo sobre si mesmo.
+export const WARP_MAX_SHIFT = 0.6;
+const WARP_MAX_PINS = 300;
+
+export function validRobotWarp(pins) {
+  if (!Array.isArray(pins)) return [];
+  return pins
+    .filter((p) => p && [p.x, p.y, p.dx, p.dy, p.r].every(Number.isFinite) && p.r >= 5 && p.r <= 5000
+      && Math.hypot(p.dx, p.dy) <= p.r * WARP_MAX_SHIFT + 1e-6)
+    .slice(-WARP_MAX_PINS)
+    .map(({ x, y, dx, dy, r }) => ({ x, y, dx, dy, r }));
+}
+
+// (x, y) sem deformação -> deformado.
+export function warpPoint(pins, x, y) {
+  let ox = 0;
+  let oy = 0;
+  for (const p of pins) {
+    const s = ((x - p.x) ** 2 + (y - p.y) ** 2) / (p.r * p.r);
+    if (s < 1) {
+      const w = (1 - s) ** 2;
+      ox += p.dx * w;
+      oy += p.dy * w;
+    }
+  }
+  return { x: x + ox, y: y + oy };
+}
+
+// Inversa (ponto deformado -> de onde ele veio), por iteração de ponto fixo:
+// converge rápido porque a deformação é suave (inclinação < 1, ver acima).
+export function unwarpPoint(pins, x, y) {
+  let px = x;
+  let py = y;
+  for (let i = 0; i < 12; i++) {
+    const q = warpPoint(pins, px, py);
+    px += x - q.x;
+    py += y - q.y;
+  }
+  return { x: px, y: py };
+}
+
+// Rotação extra (graus) que a deformação dá a um vetor que sai de (x, y) na
+// direção `deg` — pra o ícone do robô acompanhar o corredor entortado.
+export function warpRotationDelta(pins, x, y, deg) {
+  if (!pins.length) return 0;
+  const a = (deg * Math.PI) / 180;
+  const step = 4;
+  const p0 = warpPoint(pins, x, y);
+  const p1 = warpPoint(pins, x + step * Math.cos(a), y + step * Math.sin(a));
+  return (Math.atan2(p1.y - p0.y, p1.x - p0.x) * 180) / Math.PI - deg;
+}
+
+// Opacidade da rota desenhada no mapa (multiplicador, slider do "Ajustar grafo
+// do robô"): nunca some de todo -- é o caminho que o operador acompanha.
+export const ROUTE_OPACITY_MIN = 0.1;
+export function validRouteOpacity(v) {
+  return Number.isFinite(v) ? Math.min(1, Math.max(ROUTE_OPACITY_MIN, v)) : 1;
+}
+
 // px de conteúdo por metro (média dos dois eixos — o ajuste deu ~igual).
 export function contentPxPerMeter(t) {
   return Math.sqrt(Math.abs(t.a * t.e - t.b * t.d));

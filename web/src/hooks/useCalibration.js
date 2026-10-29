@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { loadCalibration, saveCalibration, savePalletHeights as savePalletHeightsApi } from '../api/lifty';
 import { generateId } from '../utils';
+import { validRobotFrame, validRobotWarp, validRouteOpacity } from '../robotMap';
 
-const EMPTY_VIEW_DATA = { points: [], lots: [], closeUps: [], robotFrame: null };
+const EMPTY_VIEW_DATA = { points: [], lots: [], closeUps: [], robotFrame: null, robotWarp: [], routeOpacity: 1 };
 // "Altura de pallets" (sub-seção do editor). blueBase = andar de baixo do
 // pallet azul (o valor que o azul já recebia, 8); blueTop = 2º andar do
 // "pallet de cima" (sem padrão de fábrica — persiste o último salvo).
@@ -24,14 +25,17 @@ function normalizeView(raw) {
     // dele existir não tem a chave, cai no fallback [] abaixo.
     // robotFrame: ajuste fino do grafo de rotas sobre a planta (ver
     // RobotOverlay.jsx) — { x, y, scaleX, scaleY, rotation } ou null.
+    // robotWarp: deformação livre do grafo — lista de pinos (ver robotMap.js).
     return {
       points: raw.points,
       lots: raw.lots,
       closeUps: Array.isArray(raw.closeUps) ? raw.closeUps : [],
-      robotFrame: raw.robotFrame && typeof raw.robotFrame === 'object' ? raw.robotFrame : null,
+      robotFrame: validRobotFrame(raw.robotFrame),
+      robotWarp: validRobotWarp(raw.robotWarp),
+      routeOpacity: validRouteOpacity(raw.routeOpacity),
     };
   }
-  return { points: [], lots: [], closeUps: [], robotFrame: null };
+  return { points: [], lots: [], closeUps: [], robotFrame: null, robotWarp: [], routeOpacity: 1 };
 }
 
 // Estado da calibração (pontos avulsos + lotes em linha/coluna) + persistência
@@ -59,21 +63,33 @@ export function useCalibration() {
   const [status, setStatus] = useState('loading'); // loading | idle | saving | error
   const saveTimer = useRef(null);
   const loadedRef = useRef(false);
+  // Dado que veio do SERVIDOR (load) não é edição: não salva de volta. Antes
+  // todo aparelho regravava a calibração inteira ao abrir a página — e um
+  // tablet com o site antigo apagou o ajuste do grafo feito em outro
+  // (2026-10-29).
+  const skipSaveRef = useRef(false);
+  const ownSavesRef = useRef(0); // gravações nossas que ainda vão aparecer no carimbo do live-state
+  const stampRef = useRef(null);
+
+  function applyLoaded(loaded) {
+    // Migração: calibration.json de antes da vista isométrica existir
+    // era {points:[...], lots:[...]} direto (sem "top"/"iso") — tudo
+    // que já existia foi calibrado contra a vista de cima.
+    const isNewFormat = loaded && typeof loaded === 'object' && ('top' in loaded || 'iso' in loaded);
+    skipSaveRef.current = true;
+    setData({
+      top: normalizeView(isNewFormat ? loaded.top : loaded),
+      iso: normalizeView(isNewFormat ? loaded.iso : null),
+    });
+    setPalletHeights(normalizePalletHeights(loaded && loaded.palletHeights));
+  }
 
   useEffect(() => {
     let cancelled = false;
     loadCalibration()
       .then((loaded) => {
         if (cancelled) return;
-        // Migração: calibration.json de antes da vista isométrica existir
-        // era {points:[...], lots:[...]} direto (sem "top"/"iso") — tudo
-        // que já existia foi calibrado contra a vista de cima.
-        const isNewFormat = loaded && typeof loaded === 'object' && ('top' in loaded || 'iso' in loaded);
-        setData({
-          top: normalizeView(isNewFormat ? loaded.top : loaded),
-          iso: normalizeView(isNewFormat ? loaded.iso : null),
-        });
-        setPalletHeights(normalizePalletHeights(loaded && loaded.palletHeights));
+        applyLoaded(loaded);
         setStatus('idle');
         loadedRef.current = true;
       })
@@ -87,18 +103,43 @@ export function useCalibration() {
 
   useEffect(() => {
     if (!loadedRef.current) return; // não salva antes do primeiro load completar
+    if (skipSaveRef.current) {
+      skipSaveRef.current = false; // veio do servidor, não de uma edição
+      return undefined;
+    }
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
+      saveTimer.current = null;
       setStatus('saving');
       // occupied não é lido/escrito daqui — GET manda o que já está salvo
       // (server.py preserva o campo), e as mutações de ocupação passam
       // pelos endpoints cirúrgicos em useLiveState.js, nunca por aqui.
       saveCalibration(data)
-        .then(() => setStatus('idle'))
+        .then(() => {
+          ownSavesRef.current += 1;
+          setStatus('idle');
+        })
         .catch(() => setStatus('error'));
     }, 500);
     return () => clearTimeout(saveTimer.current);
   }, [data]);
+
+  // Carimbo da última gravação (vem no /api/live-state, a cada 4 s). Mudou
+  // por causa de OUTRO aparelho = recarrega: ajuste do grafo, opacidade da
+  // rota, pontos e lotes aparecem em todos sem F5. Mudança causada por nós
+  // mesmos, ou com edição local ainda esperando salvar, não recarrega.
+  const syncRemoteStamp = useCallback((stamp) => {
+    if (stamp == null || stamp === stampRef.current) return;
+    const first = stampRef.current === null;
+    stampRef.current = stamp;
+    if (first) return; // o load inicial já trouxe o estado atual
+    if (ownSavesRef.current > 0) {
+      ownSavesRef.current = 0;
+      return;
+    }
+    if (saveTimer.current || !loadedRef.current) return;
+    loadCalibration().then(applyLoaded).catch(() => {});
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // --- pontos avulsos (sempre na vista ativa) --------------------------------
   const addPoint = useCallback((x, y) => {
@@ -196,7 +237,13 @@ export function useCalibration() {
   // Ajuste fino do grafo de rotas do robô (arrastar/esticar/girar em
   // "Editar closes") — vai no mesmo snapshot debounced de pontos/lotes.
   const updateRobotFrame = useCallback((frame) => {
-    setData((prev) => ({ ...prev, [view]: { ...prev[view], robotFrame: frame } }));
+    setData((prev) => ({ ...prev, [view]: { ...prev[view], robotFrame: validRobotFrame(frame) } }));
+  }, [view]);
+  const updateRobotWarp = useCallback((pins) => {
+    setData((prev) => ({ ...prev, [view]: { ...prev[view], robotWarp: validRobotWarp(pins) } }));
+  }, [view]);
+  const updateRouteOpacity = useCallback((value) => {
+    setData((prev) => ({ ...prev, [view]: { ...prev[view], routeOpacity: validRouteOpacity(value) } }));
   }, [view]);
 
   // Altura de pallets: mutação cirúrgica no servidor (não passa pelo save
@@ -220,7 +267,10 @@ export function useCalibration() {
     lots: data[view].lots, addLot, updateLot, removeLot,
     closeUps: data[view].closeUps, addCloseUp, updateCloseUp, removeCloseUp,
     robotFrame: data[view].robotFrame, updateRobotFrame,
+    robotWarp: data[view].robotWarp, updateRobotWarp,
+    routeOpacity: data[view].routeOpacity ?? 1, updateRouteOpacity,
     palletHeights, savePalletHeights,
+    syncRemoteStamp,
     status,
   };
 }

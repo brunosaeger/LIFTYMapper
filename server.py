@@ -240,6 +240,7 @@ def _note_possible_ip_change(err):
         _last_discovery_attempt = now
     threading.Thread(target=discover_robot_host, daemon=True).start()
 CALIBRATION_PATH = "/api/calibration"
+CALIBRATION_PRESERVED_VIEW_KEYS = ("robotFrame", "robotWarp", "routeOpacity")  # ver _save_calibration
 KANBANS_PATH = "/api/kanbans"  # lista de Close Ups elegíveis pra restringir usuário (ver _get_kanbans) — exclui os "livres pra todos" (FREE_KANBAN_IDS)
 # Sempre absoluto, nunca relativo ao diretório de trabalho do processo —
 # SimpleHTTPRequestHandler resolve `directory=` relativo ao CWD em tempo de
@@ -1153,31 +1154,21 @@ def _refresh_fork_after_drop():
 # só a THREAD DE FUNDO escreve (um GET por tick, mesmo padrão de
 # _emergency_suppress), os handlers HTTP só leem — assim nenhum poll de
 # tablet bate no robô direto, e não têm N tablets multiplicando chamada.
-# `stationarySince`: ver "Alerta de robô parado" abaixo.
-_robot_status_cache = {"charging": None, "battery": None, "returningToCharge": False, "stationarySince": None, "stalledAtOrigin": None}  # None = ainda não sabemos (1ª leitura não chegou ainda)
+# `stationarySince`: instante em que o robô ficou parado (velocidade quase
+# zero), ou None andando -- usado pelo aviso de "planejando a rota".
+_robot_status_cache = {"charging": None, "battery": None, "returningToCharge": False, "stationarySince": None}  # None = ainda não sabemos (1ª leitura não chegou ainda)
 
-# --- Alerta de robô parado (pedido do usuário, 2026-10-02) -----------------
-# "Parado há 40 s (era 1 minuto até 2026-10-14) + rota de verdade em andamento (taskName já disparado
-# -- reservada/esperando check-turn/esperando carga NÃO conta, o robô nem
-# devia estar se movendo ainda) + não carregando" -- sintoma de caminho
-# obstruído ou desvio de rota que o robô não resolve sozinho. `vx`/`vth`
-# (GET /reeman/speed) são a mesma leitura de velocidade que o resto do
-# sistema já usa pra girar (ver ROTATE_ERROR_NUDGE acima) -- "quase zero"
-# em vez de exatamente zero, por ruído normal de sensor até parado.
+# "Parado" = `vx`/`vth` (GET /reeman/speed) quase zero, não exatamente zero,
+# por ruído normal de sensor até parado. O antigo alerta "ROBÔ PARADO!"
+# (40 s parado, sem olhar sensor nenhum) e o palpite do garfo pela posição
+# foram removidos em 2026-10-29 (pedido do usuário): os avisos agora vêm dos
+# sensores de verdade, ver "Obstáculo pelos sensores do robô".
 STALL_VX_EPSILON_MPS = 0.02
 STALL_VTH_EPSILON_DEG_S = 1.0
-STALL_ALERT_SECONDS = 40  # era 60 s; reduzido a pedido do usuário (2026-10-14)
-ROBOT_STALLED_MESSAGE = "ROBÔ PARADO! Remova obstáculos ou use o modo manual."
-# Variante do alerta vermelho (pedido do usuário, 2026-10-09): robô parado
-# PERTO da origem da rota e ALINHADO com ela, antes de pegar o pallet — aí o
-# problema não é caminho obstruído, é o sensor do garfo enxergando o próprio
-# pallet como objeto (espaçamento entre pallets pequeno demais), e a ação
-# certa é abaixar o garfo no modo manual. Mesmas constantes de "perto" e
-# "alinhado" do cancelamento por alinhamento de docking (validadas em campo).
-ROBOT_STALLED_AT_ORIGIN_MESSAGE = ("Sensor do garfo detectou o pallet como objeto, use o modo manual "
-                                   "para abaixar o garfo. Fique atento ao espaçamento correto entre pallets!")
-STALL_AT_ORIGIN_RADIUS_METERS = 1.5
-STALL_AT_ORIGIN_MARGIN_DEGREES = 30.0
+# Sensor de trás (garfo, sem carga) vendo o pallet na faixa de encaixe -- ver
+# _refresh_obstacle. Espaçamento entre pallets pequeno demais.
+ROBOT_STALLED_AT_ORIGIN_MESSAGE = ("Sensor do garfo detectou o pallet como objeto! Verifique se o espaçamento "
+                                   "de pallets está adequado e retorne o robô manualmente para a energia.")
 
 
 # `battery` em `/reeman/base_encode` (documentado, nunca lido até agora —
@@ -1211,8 +1202,7 @@ def _refresh_robot_status():
         _robot_status_cache["returningToCharge"] = _robot_returning_to_charge_now()
     except Exception:
         pass
-    # Rastreio de "parado há quanto tempo" (ver "Alerta de robô parado"
-    # acima) -- marca o instante em que ficou quase-zero; qualquer
+    # Rastreio de "parado há quanto tempo" -- marca o instante em que ficou quase-zero; qualquer
     # velocidade de verdade (ou falha de rede, tratada como "não sei")
     # zera a marca na hora, o relógio só conta enquanto fica quieto sem
     # interrupção.
@@ -1229,39 +1219,6 @@ def _refresh_robot_status():
         _robot_status_cache["stationarySince"] = None
 
 
-def _refresh_stall_at_origin():
-    """Roda na thread de fundo (mesmo ciclo de _refresh_robot_status): quando o
-    robô está parado há tempo suficiente pro alerta vermelho E a rota atual
-    ainda não pegou o pallet, confere se ele está perto da origem e alinhado
-    com ela. Guarda o resultado (e de QUAL rota) em _robot_status_cache — o
-    GET /api/live-state de cada tablet só lê isso, nunca fala com o robô. Só
-    gasta chamadas ao robô enquanto o alerta está de fato disparado (raro)."""
-    result, route_id = False, None
-    try:
-        since = _robot_status_cache.get("stationarySince")
-        if since is not None and not _robot_status_cache.get("charging") \
-                and time.monotonic() - since >= STALL_ALERT_SECONDS:
-            with QUEUE_LOCK:
-                state = _read_queue_state()
-            cur = state.get("currentRoute") or {}
-            pickup = cur.get("pickup")
-            if pickup and cur.get("taskName") and not cur.get("unloadOnly") and not state.get("pickupCleared"):
-                route_id = cur.get("id")
-                pose = robot_pose()
-                pallet = robot_find_point_position(pickup)
-                docking = robot_find_point_position("H" + pickup)
-                if pallet is not None:
-                    dists = [math.hypot(pose["x"] - pt["x"], pose["y"] - pt["y"]) for pt in (pallet, docking) if pt is not None]
-                    diff = abs(_normalize_angle_degrees(pallet["theta"] - pose["theta"]))
-                    result = min(dists) <= STALL_AT_ORIGIN_RADIUS_METERS and diff <= STALL_AT_ORIGIN_MARGIN_DEGREES
-                    print("robô parado: perto da origem '%s'=%s (dist=%.2fm, diff angular=%.1f°)" % (pickup, result, min(dists), diff))
-    except Exception as err:  # robô/rede indisponível: cai na mensagem genérica
-        print("robô parado: não deu pra checar a origem (%s) -- usa o aviso genérico." % err)
-        result, route_id = False, None
-    _robot_status_cache["stalledAtOrigin"] = result
-    _robot_status_cache["stalledAtOriginRouteId"] = route_id
-
-
 # --- Aviso de "planejando a rota" no corredor P3–P10 (pedido do usuário, 2026-10-14)
 # O dispatch demora ~130 s pra publicar a ordem quando o robô está parado num
 # ponto de docking do corredor (28 ciclos de planejamento de ~4,7 s por causa
@@ -1273,8 +1230,8 @@ def _refresh_stall_at_origin():
 #   - menta enquanto a rota atual já foi criada no robô, ainda não está
 #     RUNNING, o robô está parado e dentro da faixa entre P3 e P10;
 #   - vermelho se passar de ROUTE_PLANNING_LATE_SECONDS sem começar.
-# Enquanto o aviso vale, o alerta genérico de "robô parado" (STALL_ALERT_SECONDS) é
-# suprimido — o robô está parado de propósito, esperando o planejador.
+# Enquanto o aviso vale, os avisos de obstáculo ficam desligados — o robô
+# está parado de propósito, esperando o planejador.
 ROUTE_PLANNING_MESSAGE = "Planejando a rota... pode levar até ~2 min. Aguarde."
 ROUTE_PLANNING_LATE_MESSAGE = "Planejamento da rota demorando mais de 140 s. Verifique o robô ou cancele e tente de novo."
 ROUTE_PLANNING_LATE_SECONDS = 140
@@ -1359,7 +1316,7 @@ def _in_planning_corridor(pose):
 
 
 def _refresh_route_planning_wait():
-    """Thread de fundo (junto de _refresh_stall_at_origin): só pergunta a pose
+    """Thread de fundo (junto de _refresh_robot_status): só pergunta a pose
     ao robô quando a rota atual já foi disparada, ainda não está RUNNING e o
     robô está parado — o resto do tempo não gasta chamada nenhuma."""
     inside, route_id = False, None
@@ -1449,13 +1406,15 @@ OBSTACLE_DOCKING_STOPPED_SECONDS = 10
 OBSTACLE_DOCKING_LATERAL_METERS = 0.5
 OBSTACLE_DOCKING_AHEAD_METERS = 0.8  # quanto além do H (saindo do lote) ainda conta -- o robô gira/espera até ~0,5 m dele
 OBSTACLE_READING_MAX_AGE_SECONDS = 2.0
-OBSTACLE_BRIDGE_HEALTHY_SECONDS = 5  # bridge respondeu há menos que isso = confia nele (desliga o chute por posição)
 OBSTACLE_POINTS_CACHE_SECONDS = 600
-OBSTACLE_FRONT_MESSAGE = "OBSTÁCULO À FRENTE do robô (%d cm)! Libere o caminho."
-OBSTACLE_BACK_MESSAGE = "OBSTÁCULO ATRÁS, no lado dos garfos (%d cm)! Libere o caminho."
-OBSTACLE_LEFT_MESSAGE = "OBSTÁCULO NA LATERAL ESQUERDA do robô (%d cm)! Libere o caminho."
-OBSTACLE_RIGHT_MESSAGE = "OBSTÁCULO NA LATERAL DIREITA do robô (%d cm)! Libere o caminho."
-_obstacle_watch = {"message": None, "routeId": None, "stoppedSince": None, "healthyAt": None, "points": None, "pointsAt": -1e9}
+# Instrução comum (pedido do usuário, 2026-10-29). Esquerda/direita já
+# incluem os sensores frente-esquerda/frente-direita (ver _refresh_obstacle).
+OBSTACLE_ACTION = " Remova o obstáculo ou utilize o modo manual para levá-lo à energia."
+OBSTACLE_FRONT_MESSAGE = "OBSTÁCULO À FRENTE do robô (%d cm)!" + OBSTACLE_ACTION
+OBSTACLE_BACK_MESSAGE = "OBSTÁCULO ATRÁS, no lado dos garfos (%d cm)!" + OBSTACLE_ACTION
+OBSTACLE_LEFT_MESSAGE = "OBSTÁCULO NA LATERAL ESQUERDA do robô (%d cm)!" + OBSTACLE_ACTION
+OBSTACLE_RIGHT_MESSAGE = "OBSTÁCULO NA LATERAL DIREITA do robô (%d cm)!" + OBSTACLE_ACTION
+_obstacle_watch = {"message": None, "routeId": None, "stoppedSince": None, "points": None, "pointsAt": -1e9}
 _obstacle_thread = {"t": None}
 
 
@@ -1470,17 +1429,20 @@ def robot_obstacle_distances():
         return None
     if data.get("age") is None or data["age"] > OBSTACLE_READING_MAX_AGE_SECONDS:
         return None
-    _obstacle_watch["healthyAt"] = time.monotonic()
     return data
+
+
+def _obstacle_points():
+    if time.monotonic() - _obstacle_watch["pointsAt"] >= OBSTACLE_POINTS_CACHE_SECONDS or not _obstacle_watch["points"]:
+        _obstacle_watch["points"] = robot_point_positions() or {}
+        _obstacle_watch["pointsAt"] = time.monotonic()
+    return _obstacle_watch["points"]
 
 
 def _in_docking_zone(pose, state, current):
     """Robô sobre o eixo do docking da coleta (ainda não feita) ou da entrega
     da rota atual, entre o pallet e um pouco além do H."""
-    if time.monotonic() - _obstacle_watch["pointsAt"] >= OBSTACLE_POINTS_CACHE_SECONDS or not _obstacle_watch["points"]:
-        _obstacle_watch["points"] = robot_point_positions() or {}
-        _obstacle_watch["pointsAt"] = time.monotonic()
-    points = _obstacle_watch["points"]
+    points = _obstacle_points()
     names = [current.get("dropoff")]
     if current.get("pickup") and not state.get("pickupCleared"):
         names.append(current["pickup"])
@@ -1521,7 +1483,7 @@ def _refresh_obstacle():
         return
     d = robot_obstacle_distances()
     if d is None:
-        _set_obstacle_message(None, None)  # sem leitura: o alerta antigo de 40 s cobre
+        _set_obstacle_message(None, None)  # sem leitura (bridge fora do ar): sem aviso -- a vigia do bridge o religa
         return
 
     def reading(*keys):
@@ -1578,45 +1540,266 @@ def _start_obstacle_thread():
             except Exception:  # robô/rede indisponível agora -- sem aviso, tenta no próximo segundo
                 _obstacle_watch["stoppedSince"] = None
                 _set_obstacle_message(None, None)
+            if DOCK_SHADOW_ENABLED:
+                try:
+                    _refresh_dock_shadow()
+                except Exception as err:  # só registro -- nunca derruba a vigia de obstáculo
+                    print("Sombra: erro (%s)" % err)
 
     _obstacle_thread["t"] = threading.Thread(target=_loop, daemon=True)
     _obstacle_thread["t"].start()
 
 
-# Condição final do alerta (ver "Alerta de robô parado" acima): combina o
-# rastreio de velocidade (stationarySince) com o estado da fila. QUALQUER
-# rota conta -- reservada esperando giro seguro pra começar (turnBlocked),
-# esperando terminar de voltar pra carga sozinho (awaitingCharge), ou já
-# disparada de verdade (normal, unloadOnly, ou esperando giro seguro pra
-# CANCELAR) -- obstrução por obstáculo pode travar o robô em qualquer uma
-# dessas situações, não só numa rota já em andamento (pedido explícito do
-# usuário, 2026-10-02 -- a 1ª versão só considerava `taskName` de verdade).
+# --- Modo sombra: pallet empurrado na coleta (pedido do usuário, 2026-10-29) --
+# SÓ REGISTRA "eu teria parado aqui" -- não para, não avisa no tablet, não
+# mexe na fila. Vira parada de verdade só depois de dias sem alarme falso.
+# Dois sinais independentes:
+#   - câmera x odometria (no bridge, GET /dock-shadow): empurrando, o robô anda
+#     mas o pallet anda junto -- a câmera o vê parado em relação ao robô;
+#   - profundidade no mapa (aqui): a pose do SLAM vem do laser contra as
+#     paredes, não do pallet. Empurrando, o robô vai mais fundo que o ponto do
+#     pallet. Normal em 53 coletas (27-28/10): final entre -0,205 e +0,351 m do
+#     ponto (neg = pra dentro).
+# O sensor do garfo fica em 255 durante o encaixe (o app o desliga lá) -- o
+# bridge registra o mínimo mesmo assim, pra confirmar.
+# Tudo vai pro dock_shadow.jsonl (uma linha por evento) e pro log.
+DOCK_SHADOW_ENABLED = True
+DOCK_SHADOW_PATH = "/dock-shadow"
+DOCK_SHADOW_LOG_FILE = _app_dir() / "dock_shadow.jsonl"
+DOCK_SHADOW_DEPTH_LIMIT_METERS = -0.30
+DOCK_SHADOW_LATERAL_METERS = 0.35
+DOCK_SHADOW_NEAR_METERS = 1.0  # só conta a profundidade já perto do pallet, sobre o eixo
+DOCK_SHADOW_REPLAY_SKIP_SECONDS = 60  # 1ª leitura do bridge: encaixes mais velhos que isso já foram registrados antes
+_dock_shadow = {"seen": None, "liveFlagged": set(), "depth": None, "active": False}
+
+
+def _dock_shadow_record(kind, payload, message):
+    print("Sombra: " + message)
+    line = dict(payload, type=kind, at=time.strftime("%Y-%m-%d %H:%M:%S"))
+    with open(DOCK_SHADOW_LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(line, ensure_ascii=False) + "\n")
+
+
+def _dock_shadow_route_info(state):
+    current = state.get("currentRoute") or {}
+    return {"routeId": current.get("id"), "task": current.get("taskName"), "pickup": current.get("pickup")}
+
+
+def _dock_shadow_finish_depth():
+    depth = _dock_shadow["depth"]
+    _dock_shadow["depth"] = None
+    if depth is None or depth["min"] is None:
+        return
+    verdict = "TERIA PARADO" if depth["min"] < DOCK_SHADOW_DEPTH_LIMIT_METERS else "normal"
+    _dock_shadow_record("depth", depth, "profundidade na coleta %s (%s): %s -- %+.3f m do ponto do pallet (limite %+.2f)" % (
+        depth["pickup"], depth["task"], verdict, depth["min"], DOCK_SHADOW_DEPTH_LIMIT_METERS))
+
+
+def _refresh_dock_depth(state):
+    """Acompanha o quão fundo o robô foi em relação ao ponto do pallet durante
+    a coleta da rota atual; fecha o registro quando a coleta termina."""
+    current = state.get("currentRoute") or {}
+    picking = current.get("taskName") and current.get("pickup") and not state.get("pickupCleared")
+    key = (current.get("id"), current.get("pickup")) if picking else None
+    depth = _dock_shadow["depth"]
+    if depth is not None and depth["key"] != key:
+        _dock_shadow_finish_depth()
+        depth = None
+    if key is None:
+        return
+    points = _obstacle_points()
+    pallet, docking = points.get(current["pickup"]), points.get("H" + current["pickup"])
+    pose = _cached_robot_pose()
+    if not pallet or not docking or not pose.get("ok"):
+        return
+    s, lateral, _diff = _docking_axis_geometry(pose, docking, pallet)
+    pallet_s, _, _ = _docking_axis_geometry(pallet, docking, pallet)
+    from_pallet = s - pallet_s  # 0 = sobre o ponto do pallet, neg = além dele (pra dentro)
+    if lateral > DOCK_SHADOW_LATERAL_METERS or from_pallet > DOCK_SHADOW_NEAR_METERS:
+        return
+    if depth is None:
+        depth = _dock_shadow["depth"] = dict(_dock_shadow_route_info(state), key=key, min=None, lateralAtMin=None, flagged=False)
+    if depth["min"] is None or from_pallet < depth["min"]:
+        depth["min"], depth["lateralAtMin"] = round(from_pallet, 3), round(lateral, 3)
+    if from_pallet < DOCK_SHADOW_DEPTH_LIMIT_METERS and not depth["flagged"]:
+        depth["flagged"] = True
+        _dock_shadow_record("depth-live", dict(depth, now=round(from_pallet, 3)),
+                            "TERIA PARADO AGORA (profundidade): coleta %s, %+.3f m do ponto do pallet" % (current["pickup"], from_pallet))
+
+
+def _refresh_dock_shadow():
+    with QUEUE_LOCK:
+        state = _read_queue_state()
+    _refresh_dock_depth(state)
+    # bridge: só com rota rodando (coleta só acontece em rota) ou encaixe em curso
+    if not (state.get("currentRoute") or {}).get("taskName") and not _dock_shadow["active"]:
+        return
+    host = urllib.parse.urlparse(ROBOT_HOST).hostname
+    try:
+        with urllib.request.urlopen("http://%s:%d%s" % (host, TURN_CHECK_PORT, DOCK_SHADOW_PATH), timeout=1.5) as resp:
+            data = json.loads(resp.read())
+    except Exception:
+        return  # bridge fora do ar / versão antiga sem /dock-shadow
+    cur = data.get("current")
+    _dock_shadow["active"] = cur is not None
+    info = _dock_shadow_route_info(state)
+    if cur and cur["push"] and (cur["boot"], cur["id"]) not in _dock_shadow["liveFlagged"]:
+        _dock_shadow["liveFlagged"].add((cur["boot"], cur["id"]))
+        p = cur["push"][0]
+        _dock_shadow_record("camera-live", dict(cur, **info),
+                            "TERIA PARADO AGORA (câmera): coleta %s, pallet acompanhou o robô (razão %.2f em %.2f m, %.1f s após detectar)" % (
+                                info["pickup"], p["ratio"], abs(p["moved"]), p["t"]))
+    done = data.get("done") or []
+    if _dock_shadow["seen"] is None:  # 1ª leitura desde que o server subiu
+        _dock_shadow["seen"] = {(e["boot"], e["id"]) for e in done if e.get("ended_ago", 0) > DOCK_SHADOW_REPLAY_SKIP_SECONDS}
+    for e in done:
+        key = (e["boot"], e["id"])
+        if key in _dock_shadow["seen"]:
+            continue
+        _dock_shadow["seen"].add(key)
+        verdict = "TERIA PARADO" if e["push"] else "normal"
+        _dock_shadow_record("camera", dict(e, **info), "câmera na coleta %s (%s): %s -- razão mín %s em %d janelas, %.1f s, garfo trás mín %s" % (
+            info["pickup"], info["task"], verdict, e["min_ratio"], e["windows"], e.get("duration", 0), e["fork_back_min"]))
+
+
+# --- Vigia do bridge do robô (pedido do usuário, 2026-10-29) ---------------
+# O bridge (robot-bridge/, porta 8091: garfo, obstáculo, modo sombra) roda com
+# nohup no robô e NÃO volta sozinho quando o robô reinicia. A inicialização do
+# robô é o crontab do usuário reeman -- da REEMAN (sobe o ROS inteiro), então
+# fica intocado; systemd pediria sudo. Em vez disso o servidor (24/7) confere
+# a 8091 e, fora do ar, entra por SSH e roda o MESMO comando fixo que se usa à
+# mão. Nada vindo da rede vai no comando. Não instala nem atualiza o bridge:
+# só inicia o ~/lifty_turn_check_bridge.py que já está lá.
+# Precisa: cliente OpenSSH (ssh.exe) e a chave do robô na máquina do servidor
+# (BRIDGE_SSH_KEY_CANDIDATES, fora do git), e a porta 22 do robô alcançável.
+BRIDGE_WATCHDOG_ENABLED = True
+BRIDGE_WATCHDOG_INTERVAL_SECONDS = 30
+BRIDGE_WATCHDOG_COOLDOWN_SECONDS = 120  # entre tentativas -- o bridge leva uns segundos pra abrir a porta
+BRIDGE_WATCHDOG_HUNG_SECONDS = 300  # processo vivo mas porta muda por isso = trava -> mata e sobe de novo
+BRIDGE_SSH_USER = "reeman"
+BRIDGE_SSH_KEY_CANDIDATES = (_app_dir() / "lifty_robot", Path.home() / ".ssh" / "lifty_robot")
+BRIDGE_SSH_KNOWN_HOSTS = _app_dir() / "robot_known_hosts"
+# [.] no padrão: a própria linha de comando do bash remoto contém o texto do
+# padrão, e sem isso o pgrep acharia ele mesmo.
+BRIDGE_START_SCRIPT = """
+P='python3 (-u )?lifty_turn_check_bridge[.]py'
+if pgrep -f "$P" >/dev/null; then
+  if [ "$1" = restart ]; then pkill -9 -f "$P"; sleep 1; else echo ja-rodando; exit 0; fi
+fi
+cd ~ || exit 3
+[ -f lifty_turn_check_bridge.py ] || { echo sem-arquivo; exit 3; }
+source /opt/ros/*/setup.bash
+setsid nohup python3 -u lifty_turn_check_bridge.py > bridge.log 2>&1 < /dev/null &
+echo iniciado
+"""
+_bridge_watch = {"lastAttempt": -1e9, "deadSince": None, "lastNote": None}
+
+
+def _bridge_note(message):
+    """Log só quando a situação muda -- robô desligado não enche o log a cada 30 s."""
+    if message != _bridge_watch["lastNote"]:
+        print("Bridge: " + message)
+    _bridge_watch["lastNote"] = message
+
+
+def _bridge_alive(host):
+    """True se a 8091 responde (qualquer status HTTP -- 503 é o bridge sem
+    leitura ainda, mas vivo)."""
+    try:
+        with urllib.request.urlopen("http://%s:%d%s" % (host, TURN_CHECK_PORT, OBSTACLE_PATH), timeout=3) as resp:
+            resp.read()
+        return True
+    except urllib.error.HTTPError:
+        return True
+    except Exception:
+        return False
+
+
+def _bridge_ssh_start(host, restart=False):
+    """Roda BRIDGE_START_SCRIPT no robô. Devolve a última linha da saída
+    ('iniciado', 'ja-rodando', 'sem-arquivo') ou None se o SSH falhou."""
+    import shutil
+    import subprocess
+    ssh = shutil.which("ssh")
+    key = next((k for k in BRIDGE_SSH_KEY_CANDIDATES if k.exists()), None)
+    if ssh is None or key is None:
+        _bridge_note("fora do ar e não dá pra religar: %s" % ("cliente ssh não instalado" if ssh is None else "chave lifty_robot não encontrada"))
+        return None
+    script = base64.b64encode(BRIDGE_START_SCRIPT.encode("utf-8")).decode("ascii")
+    remote = "echo %s | base64 -d | bash -s %s" % (script, "restart" if restart else "start")
+    cmd = [ssh, "-i", str(key), "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+           "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=%s" % BRIDGE_SSH_KNOWN_HOSTS,
+           "%s@%s" % (BRIDGE_SSH_USER, host), remote]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception as err:
+        _bridge_note("SSH falhou (%s)" % err)
+        return None
+    lines = (out.stdout or "").strip().splitlines()
+    if out.returncode not in (0, 3) or not lines:
+        _bridge_note("SSH falhou (código %s): %s" % (out.returncode, (out.stderr or "").strip()[:200]))
+        return None
+    return lines[-1]
+
+
+def _refresh_bridge_watch():
+    host = urllib.parse.urlparse(ROBOT_HOST).hostname
+    if _bridge_alive(host):
+        _bridge_watch["deadSince"] = None
+        _bridge_note("no ar")
+        return
+    now = time.monotonic()
+    if _bridge_watch["deadSince"] is None:
+        _bridge_watch["deadSince"] = now
+    if now - _bridge_watch["lastAttempt"] < BRIDGE_WATCHDOG_COOLDOWN_SECONDS:
+        return
+    try:  # robô desligado/fora da rede: nada a fazer, sem gastar o SSH
+        socket.create_connection((host, 22), timeout=3).close()
+    except OSError:
+        _bridge_note("fora do ar (robô não responde na porta 22 -- desligado?)")
+        return
+    _bridge_watch["lastAttempt"] = now
+    hung = now - _bridge_watch["deadSince"] >= BRIDGE_WATCHDOG_HUNG_SECONDS
+    result = _bridge_ssh_start(host, restart=hung)
+    if result == "iniciado":
+        _bridge_watch["deadSince"] = now if hung else _bridge_watch["deadSince"]
+        print("Bridge: estava fora do ar -- %s via SSH." % ("REINICIADO (travado)" if hung else "iniciado"))
+        _bridge_watch["lastNote"] = None
+    elif result == "ja-rodando":
+        _bridge_note("processo vivo mas a porta %d não responde (ROS subindo?) -- aguardando" % TURN_CHECK_PORT)
+    elif result == "sem-arquivo":
+        _bridge_note("~/lifty_turn_check_bridge.py não existe no robô -- instalar à mão")
+
+
+def _start_bridge_watchdog_thread():
+    if not BRIDGE_WATCHDOG_ENABLED:
+        return
+
+    def _loop():
+        while not _queue_stop.wait(BRIDGE_WATCHDOG_INTERVAL_SECONDS):
+            try:
+                _refresh_bridge_watch()
+            except Exception as err:  # nunca derruba o servidor
+                _bridge_note("erro na vigia (%s)" % err)
+
+    threading.Thread(target=_loop, daemon=True).start()
+
+
+# Aviso vermelho do tablet (robotStalledMessage): planejamento da rota
+# passando do limite, ou obstáculo/garfo visto pelos sensores do robô (ver
+# "Obstáculo pelos sensores do robô"). Desde 2026-10-29 não existe mais o
+# "ROBÔ PARADO!" por tempo parado, que não olhava sensor nenhum.
 def _robot_stalled_message(state):
     # Esperando o planejador do dispatch no corredor P3–P10 (ver acima): o
-    # robô está parado de propósito — sem o alerta genérico de "parado"; só passa
-    # do limite vira vermelho (mensagem própria).
+    # robô está parado de propósito; só passa do limite vira vermelho.
     planning = _route_planning_elapsed(state)
     if planning is not None:
         return ROUTE_PLANNING_LATE_MESSAGE if planning >= ROUTE_PLANNING_LATE_SECONDS else None
-    # Sensores do robô (ver "Obstáculo pelos sensores do robô"): na hora, com o lado.
     current = state.get("currentRoute") or {}
     if _obstacle_watch["message"] and _obstacle_watch["routeId"] == current.get("id"):
         return _obstacle_watch["message"]
-    since = _robot_status_cache.get("stationarySince")
-    if since is None or _robot_status_cache.get("charging"):
-        return None
-    if not state.get("currentRoute"):
-        return None
-    if time.monotonic() - since < STALL_ALERT_SECONDS:
-        return None
-    # Bridge respondendo = os sensores já disseram se é o garfo vendo o
-    # pallet (acima); o chute por posição só vale com o bridge fora do ar.
-    healthy_at = _obstacle_watch["healthyAt"]
-    bridge_healthy = healthy_at is not None and time.monotonic() - healthy_at < OBSTACLE_BRIDGE_HEALTHY_SECONDS
-    if not bridge_healthy and _robot_status_cache.get("stalledAtOrigin") \
-            and _robot_status_cache.get("stalledAtOriginRouteId") == current.get("id"):
-        return ROBOT_STALLED_AT_ORIGIN_MESSAGE
-    return ROBOT_STALLED_MESSAGE
+    return None
 
 
 # O nome do template CODIFICA o "recipe" da rota (ver CONTEXT.md): rotas com
@@ -1910,6 +2093,16 @@ def _write_queue_state(state):
 
 # --- calibração (leitura estruturada — só pro que este bloco precisa: lotes
 # da vista "top" pra validar fronteira, e o array occupied) ----------------
+# Carimbo da última gravação pelo EDITOR (POST /api/calibration) -- não muda
+# com ocupação/altura de pallet, que gravam o mesmo arquivo o tempo todo e
+# não exigem os aparelhos recarregarem a calibração.
+_calibration_saved_at = {"stamp": int(time.time() * 1000)}
+
+
+def _calibration_stamp():
+    return _calibration_saved_at["stamp"]
+
+
 def _read_calibration():
     if not CALIBRATION_FILE.exists():
         return json.loads(EMPTY_CALIBRATION)
@@ -2946,7 +3139,6 @@ def _refresh_idle_queue_timeout():
 
 def _queue_tick():
     _refresh_robot_status()  # sempre, independente de emergência/rota em andamento
-    _refresh_stall_at_origin()  # só gasta chamadas ao robô com o alerta de parado já disparado
     _refresh_route_planning_wait()  # só pergunta a pose com rota disparada, não-RUNNING e robô parado
 
     # Emergência tem precedência sobre tudo: a fila já foi esvaziada (ver
@@ -3318,6 +3510,7 @@ def start_server(robot_host=None, port=None):
     _reconcile_queue_state_on_startup()
     _start_queue_thread()
     _start_obstacle_thread()
+    _start_bridge_watchdog_thread()
     handler = functools.partial(Handler, directory=STATIC_DIR)
     _httpd = http.server.ThreadingHTTPServer(("0.0.0.0", listen_port), handler)
     threading.Thread(target=_httpd.serve_forever, daemon=True).start()
@@ -3993,7 +4186,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # própria (/api/pallet-heights), o cliente não manda no snapshot,
             # então preserva o que já está em disco.
             data["palletHeights"] = _pallet_heights(current)
+            # Campos do grafo do robô (2026-10-28/29): um site antigo ainda
+            # aberto num tablet não os conhece e mandava o snapshot sem eles,
+            # apagando o ajuste feito em outro aparelho (aconteceu 2026-10-29).
+            # Chave ausente no payload = preserva o que está em disco.
+            for view in ("top", "iso"):
+                sent, saved = data.get(view), current.get(view)
+                if isinstance(sent, dict) and isinstance(saved, dict):
+                    for key in CALIBRATION_PRESERVED_VIEW_KEYS:
+                        if key not in sent and key in saved:
+                            sent[key] = saved[key]
             CALIBRATION_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            _calibration_saved_at["stamp"] = int(time.time() * 1000)
         self._relay(200, "application/json", b'{"ok":true}')
 
     # Altura do pallet azul (editor, modo desenvolvedor, sub-seção "Altura de
@@ -4068,6 +4272,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # Devolução do pallet decidida mas o UNLOAD ainda não criado no
             # robô (janela de ~1 tick): o mapa já desenha o caminho até ela.
             "pendingUnloadDropoff": (state.get("pendingPostPickupUnload") or {}).get("dropoff"),
+            # Muda a cada gravação do calibration.json: os outros aparelhos
+            # recarregam a calibração (ajuste do grafo, opacidade da rota,
+            # pontos...) sem precisar de F5.
+            "calibrationStamp": _calibration_stamp(),
         }, ensure_ascii=False).encode("utf-8")
         self._relay(200, "application/json", body)
 

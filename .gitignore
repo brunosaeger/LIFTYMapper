@@ -17,6 +17,12 @@ node_modules/
 calibration.json
 route_log.json
 queue_state.json
+dock_shadow.jsonl
+# Vigia do bridge: chave SSH do robô (se copiada pra pasta do servidor) e
+# known_hosts gerado na 1ª conexão -- nunca no repositório
+lifty_robot
+lifty_robot.pub
+robot_known_hosts
 robot_host.txt
 
 # Log de console do server.py (nohup/redirecionamento) — saída de runtime,

@@ -245,6 +245,7 @@ export function useLiveState() {
     // Destino da devolução do pallet ainda não disparada (ver server.py,
     // pendingPostPickupUnload) — só pro desenho da rota no mapa.
     pendingUnloadDropoff: state.pendingUnloadDropoff,
+    calibrationStamp: state.calibrationStamp ?? null,
     status,
     enqueueRoutes,
     setLimitBreakerLease,

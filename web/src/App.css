@@ -320,6 +320,39 @@
   font-weight: 600;
 }
 
+/* --- aviso central com OK (ver NoticeModal.jsx) --------------------------- */
+.notice-modal__backdrop { z-index: 2100; }
+
+.notice-modal {
+  width: 380px;
+  border-width: 2px;
+}
+.notice-modal--error { border-color: var(--state-error); background: #3a1416; }
+.notice-modal--warn { border-color: #facc15; background: #3a330a; }
+
+.notice-modal__text {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.4;
+  color: var(--text-primary);
+  text-align: center;
+}
+
+.notice-modal__actions { justify-content: center; }
+
+.notice-modal__ok {
+  min-width: 110px;
+  padding: 10px 18px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 700;
+  border: none;
+  color: #fff;
+}
+.notice-modal--error .notice-modal__ok { background: var(--state-error); }
+.notice-modal--warn .notice-modal__ok { background: #facc15; color: #1a1a1a; }
+
 /* --- tela de login (ver LoginScreen.jsx) ----------------------------------
    Ao contrário do dev-modal (que fica SOBRE o app), esta ocupa a tela
    inteira — enquanto não há sessão, MainApp não chega a montar (ver
@@ -679,7 +712,7 @@
 
 /* "Alerta de robô parado" (ver server.py, robotStalledMessage) — anomalia
    que pede ação do operador, não uma espera normal: vermelho pulsando
-   (mesmo padrão do emergency-toggle.is-active) pra chamar atenção de
+   (@keyframes emergency-pulse) pra chamar atenção de
    verdade, diferente do âmbar discreto das esperas que o sistema resolve
    sozinho. */
 .cancel-pending-banner--danger {
@@ -701,53 +734,15 @@
   color: #fff;
 }
 
-/* --- parada de emergência (canto superior esquerdo) -----------------------
-   Repouso: só o ícone vermelho a 70%. Ativa: cor cheia + halo vermelho/rosa
-   claro pulsando atrás. Clicar de novo libera. O estado real vem do
-   servidor (/api/live-state), então todos os tablets mostram igual. */
-.emergency-toggle {
-  position: absolute;
-  top: 12px;
-  left: 12px;
-  z-index: 11;
-  width: 86px;
-  height: 86px;
-  padding: 0;
-  border-radius: 50%;
-  border: 1px solid var(--panel-line);
-  background: var(--panel-raised);
-  color: var(--state-error);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  opacity: 0.7;
-  cursor: pointer;
-  transition: opacity 0.15s ease, box-shadow 0.2s ease, background 0.2s ease, border-color 0.2s ease;
-}
-
-.emergency-toggle svg {
-  width: 48px;
-  height: 48px;
-}
-
-.emergency-toggle:hover {
-  opacity: 0.85;
-}
-
-.emergency-toggle.is-active {
-  opacity: 1;
-  background: rgba(244, 91, 105, 0.18);
-  border-color: var(--state-error);
-  animation: emergency-pulse 1.3s ease-in-out infinite;
-}
-
+/* Halo vermelho pulsando do alerta de robô parado (.cancel-pending-banner--danger).
+   O nome vem do antigo botão de emergência do mapa, removido em 2026-10-29. */
 @keyframes emergency-pulse {
   0%, 100% { box-shadow: 0 0 0 3px rgba(244, 91, 105, 0.30), 0 0 14px 4px rgba(244, 91, 105, 0.40); }
   50%      { box-shadow: 0 0 0 5px rgba(244, 91, 105, 0.45), 0 0 24px 8px rgba(244, 91, 105, 0.65); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .emergency-toggle.is-active { animation: none; box-shadow: 0 0 0 4px rgba(244, 91, 105, 0.40), 0 0 20px 6px rgba(244, 91, 105, 0.55); }
+  .cancel-pending-banner--danger { animation: none; }
 }
 
 /* --- botões flutuantes empilhados (reset/olho/marcar/ponto-a-ponto) --------
@@ -1069,6 +1064,56 @@
 .closeups-panel__add.is-active {
   background: var(--accent-orange-dim);
   color: var(--text-primary);
+}
+
+.closeups-panel__add:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Grafo do robô (painel do Editar closes): ferramenta + raio da deformação */
+.graph-tools {
+  display: flex;
+  gap: 0;
+  margin-bottom: 12px;
+  border: 1px solid var(--accent-orange-dim);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.graph-tools__option {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--accent-orange);
+  padding: 6px 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.graph-tools__option.is-active {
+  background: var(--accent-orange-dim);
+  color: var(--text-primary);
+}
+
+.graph-tools__radius {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.graph-tools__radius input {
+  width: 100%;
+  accent-color: var(--accent-orange);
+}
+
+.graph-tools__row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .points-panel__delete {
@@ -1512,7 +1557,11 @@
   color: var(--text-primary);
   padding: 6px 26px 6px 30px;
   font-size: 13px;
+  -webkit-appearance: none;
+  appearance: none;
 }
+/* type="search" ganha um X nativo — já existe o nosso (.users-panel__search-clear). */
+.users-panel__search-input::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }
 
 .users-panel__search-clear {
   position: absolute;
@@ -1743,6 +1792,29 @@
   padding-top: 12px;
   border-top: 1px solid var(--panel-line);
 }
+
+.users-panel__password {
+  position: relative;
+  display: flex;
+}
+.users-panel__password .points-panel__input { padding-right: 34px; }
+.users-panel__row-actions .users-panel__password { flex: 1; min-width: 0; }
+.users-panel__password-toggle {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.users-panel__password-toggle[aria-pressed='true'] { color: var(--accent-cyan); }
 
 .users-panel__new-title {
   font-family: 'Arial Black', 'Helvetica Neue', Arial, sans-serif;

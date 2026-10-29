@@ -6,7 +6,8 @@ import { displayCellName } from '../hooks/useCalibration';
 // fica levemente elevado do chão em 4 pezinhos — o robô precisa de uma
 // altura no ponto de PICKUP pra alinhar o garfo corretamente; o de madeira
 // fica rente ao chão (altura 0, o comportamento que já existia antes dessa
-// feature). Azul vem selecionado por padrão porque é o mais comum na planta.
+// feature). Nenhum vem selecionado (2026-10-29): o operador escolhe a cada
+// tarefa — ver MainApp, handleStageSelection.
 // `editing`: null (montando uma tarefa nova), 'single' ou 'group' — tocou
 // numa barrinha de "Tarefas aguardando envio" (ver StagedTasksPanel) e está
 // alterando ela. Enviar vira Salvar, Limpar vira Cancelar edição, e o

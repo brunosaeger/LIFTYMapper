@@ -16,6 +16,7 @@ import UsersPanel from './components/UsersPanel';
 import FloorPlanCanvas from './components/FloorPlanCanvas';
 import Toast from './components/Toast';
 import DevModeModal from './components/DevModeModal';
+import NoticeModal from './components/NoticeModal';
 import ManualViewer from './components/ManualViewer';
 import { useCalibration, lotCellName, displayCellName } from './hooks/useCalibration';
 import { useLiveState } from './hooks/useLiveState';
@@ -63,7 +64,10 @@ export default function MainApp({ user, onLogout }) {
     lots, addLot, updateLot, removeLot,
     closeUps, addCloseUp, updateCloseUp, removeCloseUp,
     robotFrame, updateRobotFrame,
+    robotWarp, updateRobotWarp,
+    routeOpacity, updateRouteOpacity,
     palletHeights, savePalletHeights,
+    syncRemoteStamp,
     status: saveStatus,
   } = useCalibration();
   // Estado ao vivo compartilhado entre dispositivos (ver CONTEXT.md, "Fila
@@ -72,9 +76,12 @@ export default function MainApp({ user, onLogout }) {
   // pra ele em vez de mudar estado local direto (quem decide/dispara de
   // verdade é sempre o server.py, nunca o navegador).
   const {
-    currentRoute, pendingRoute, routeQueue, occupied, emergency, cancelPending, cancelPendingMessage, turnBlockedMessage, awaitingChargeMessage, postPickupUnloadMessage, robotCharging, robotBattery, robotReturningToCharge, robotStalledMessage, routePlanningMessage, robotCarrying, pendingUnloadDropoff, status: liveStatus,
-    enqueueRoutes, cancelCurrent, clearQueue, removeQueued, reorderQueue, setOccupiedMany, toggleOccupied, setEmergency, setLimitBreakerLease,
+    currentRoute, pendingRoute, routeQueue, occupied, cancelPending, cancelPendingMessage, turnBlockedMessage, awaitingChargeMessage, postPickupUnloadMessage, robotCharging, robotBattery, robotReturningToCharge, robotStalledMessage, routePlanningMessage, robotCarrying, pendingUnloadDropoff, calibrationStamp, status: liveStatus,
+    enqueueRoutes, cancelCurrent, clearQueue, removeQueued, reorderQueue, setOccupiedMany, toggleOccupied, setLimitBreakerLease,
   } = useLiveState();
+  // Calibração editada em outro aparelho (ajuste do grafo, opacidade da
+  // rota...) -> recarrega aqui também, sem F5.
+  useEffect(() => { syncRemoteStamp(calibrationStamp); }, [calibrationStamp, syncRemoteStamp]);
   const [toast, showToast] = useToast();
 
   // Destinos das tarefas que estão na fila -> posição na ordem de execução
@@ -247,6 +254,34 @@ export default function MainApp({ user, onLogout }) {
   // Banner "VISUALIZANDO: ROBÔ" — true enquanto o mapa segue o robô (tocou no
   // ícone dele; qualquer gesto de câmera solta, ver FloorPlanCanvas).
   const [robotFollowing, setRobotFollowing] = useState(false);
+  // "Visualizando o robô" (pedido do usuário, 2026-10-29): tocar no robô (ou
+  // no painel ROBÔ do header) mostra o trajeto AO VIVO dele + banner com
+  // status e origem → destino da tarefa atual, clicáveis. Diferente de
+  // robotFollowing (câmera seguindo): tocar na origem/destino move a câmera
+  // e solta o seguir, mas a visualização continua até outra seleção (rota
+  // da Fila/Histórico, tarefa preparada, kanban tocado, troca de modo).
+  const [robotViewing, setRobotViewing] = useState(false);
+  const [robotFocusedEndpoint, setRobotFocusedEndpoint] = useState(null);
+  // O zoom pedido pelo banner do robô passa por handleCloseUpActivate — não
+  // pode encerrar a visualização como um toque num kanban encerraria.
+  const robotEndpointFocusRef = useRef(false);
+  // "Ajustar grafo do robô" (painel do Editar closes): mostra o grafo com a
+  // caixa de arrastar/esticar só enquanto ligado. Vale só no modo closeup.
+  const [robotGraphEditing, setRobotGraphEditing] = useState(false);
+  // 'frame' = mover/esticar/girar tudo; 'warp' = deformação livre (raio em m)
+  const [robotGraphTool, setRobotGraphTool] = useState('frame');
+  const [robotWarpRadiusM, setRobotWarpRadiusM] = useState(8);
+  // Rota de exemplo no mapa só enquanto mexe no slider de opacidade (e 3 s
+  // depois), pra ver o efeito sem tarefa rodando.
+  const [routePreviewVisible, setRoutePreviewVisible] = useState(false);
+  const routePreviewTimerRef = useRef(null);
+  function handleRouteOpacityChange(value) {
+    updateRouteOpacity(value);
+    setRoutePreviewVisible(true);
+    clearTimeout(routePreviewTimerRef.current);
+    routePreviewTimerRef.current = setTimeout(() => setRoutePreviewVisible(false), 3000);
+  }
+  useEffect(() => () => clearTimeout(routePreviewTimerRef.current), []);
   // Toque no painel "ROBÔ: ..." do header -> zoom/seguir o robô no mapa
   // (contador: cada toque é um pedido novo, mesmo repetido).
   const [robotFocusRequest, setRobotFocusRequest] = useState(0);
@@ -345,12 +380,18 @@ export default function MainApp({ user, onLogout }) {
   // normal a alternância continua automática (primeiro clique = origem,
   // segundo = destino).
   const [activeSlot, setActiveSlot] = useState('pickup');
-  // Diferenciação de pallets (ver CONTEXT.md) — azul vem selecionado por
-  // padrão porque é o mais comum na planta. Não é resetado por
-  // resetSelection: é uma preferência de "com que pallet estou trabalhando
-  // agora", independente de qual origem/destino está selecionado no
-  // momento.
-  const [palletType, setPalletType] = useState('blue'); // 'wood' | 'blue'
+  // Diferenciação de pallets (ver CONTEXT.md). Pedido do usuário
+  // (2026-10-29): nenhum vem marcado por padrão — o operador escolhe a cada
+  // tarefa (volta pra null depois de cada "Enviar"). Tarefa avulsa sem
+  // escolha é barrada com o aviso vermelho; em "Lotes em sequência" não
+  // trava (sem escolha vai madeira, trocável em cada barrinha) e o aviso
+  // amarelo aparece no 1º "Iniciar tarefas".
+  const [palletType, setPalletType] = useState(null); // null | 'wood' | 'blue'
+  // Aviso central com OK (NoticeModal) — local deste aparelho.
+  const [notice, setNotice] = useState(null); // { tone, text }
+  // "Iniciar tarefas" com sequência na lista: o 1º toque só avisa (amarelo),
+  // o seguinte envia. Volta a false quando a lista esvazia.
+  const [sequenceWarned, setSequenceWarned] = useState(false);
   // "Pallet de cima": 2º andar do pallet azul de dois níveis (layer 3,
   // altura configurável no editor). Só faz sentido com azul. Também NÃO é
   // resetado por resetSelection — é preferência de sessão, igual palletType.
@@ -370,6 +411,9 @@ export default function MainApp({ user, onLogout }) {
   // mesmo pallet. Estado deste dispositivo só (não é compartilhado entre
   // tablets — nada disso existe no servidor até o "Iniciar").
   const [stagedUnits, setStagedUnits] = useState([]);
+  useEffect(() => {
+    if (!stagedUnits.length) setSequenceWarned(false);
+  }, [stagedUnits.length]);
   // Unidade sendo editada (tocar numa barrinha): a origem/destino dela vão
   // pra seleção do Ponto a Ponto (e pro mapa, ampliados), e "Enviar" vira
   // "Salvar alterações". editPrevRef guarda as preferências de sessão
@@ -440,6 +484,7 @@ export default function MainApp({ user, onLogout }) {
     setSelectedHistoryRoute(null);
     setHistoryFocusedEndpoint(null);
     setActiveCloseUpId(null); // banner "VISUALIZANDO: KANBAN X" — nunca sobrevive a uma troca de modo, nem entrando/saindo de Interação
+    setRobotViewing(false);
     if (!keepRoute) {
       setPickupNames([]);
       setDropoffNames([]);
@@ -527,6 +572,7 @@ export default function MainApp({ user, onLogout }) {
   // andamento só resetava), ou um id de verdade (rota de espera).
   function handleSelectQueueRoute(id) {
     setSelectedQueueRouteId(id);
+    setRobotViewing(false);
     if (!id) {
       setQueueFocusedEndpoint(null);
       return;
@@ -769,6 +815,19 @@ export default function MainApp({ user, onLogout }) {
   // "VISUALIZANDO: KANBAN X" (leve), imediatamente.
   function handleCloseUpActivate(closeUp) {
     setActiveCloseUpId(closeUp ? closeUp.id : null);
+    if (robotEndpointFocusRef.current) robotEndpointFocusRef.current = false;
+    else if (closeUp) setRobotViewing(false);
+  }
+
+  // Toque no robô (FloorPlanCanvas, ícone ou painel do header): larga a
+  // seleção da Fila/Histórico — o mapa passa a mostrar o trajeto ao vivo.
+  function handleRobotSelect() {
+    setRobotViewing(true);
+    setRobotFocusedEndpoint(null);
+    setSelectedQueueRouteId(null);
+    setQueueFocusedEndpoint(null);
+    setSelectedHistoryRoute(null);
+    setHistoryFocusedEndpoint(null);
   }
 
   // O zoom até o Close Up acabou: agora sim abre o Ponto a Ponto, mantendo a
@@ -791,6 +850,7 @@ export default function MainApp({ user, onLogout }) {
   // desenvolvedor (editar pontos/closes, histórico, usuários) não trocam.
   // keepRoute: mesma regra do botão ZOOM + (handleToggleInteractionMode).
   function handleResetViewClick() {
+    setRobotViewing(false);
     if (mode === 'ptp' || mode === 'mark' || mode === 'queue') {
       setMode('interaction');
       resetSelection({ keepRoute: true });
@@ -988,17 +1048,25 @@ export default function MainApp({ user, onLogout }) {
       handleSaveEdit();
       return;
     }
+    if (!palletType && !sequenceMode) {
+      setNotice({ tone: 'error', text: 'Selecione o tipo do pallet: Madeira ou Azul (Metal)' });
+      return;
+    }
+    const type = palletType || 'wood';
     // palletType vai POR TAREFA (pedido do usuário, 2026-10-05) — o valor
     // escolhido agora na barra vira só o ponto de partida de cada uma,
     // editável depois individualmente (ver PalletSwatch/handleChangeStagedPallet).
-    const tasks = pickupNames.map((pickup, i) => ({ id: newStagedId('t'), pickup, dropoff: dropoffNames[i], palletType }));
+    const tasks = pickupNames.map((pickup, i) => ({ id: newStagedId('t'), pickup, dropoff: dropoffNames[i], palletType: type }));
     const unitId = newStagedId('u');
     const unit = {
       id: unitId,
       // Só vira grupo (tracejado laranja, move junto) com sequência de verdade.
       groupKey: tasks.length > 1 ? unitId : null,
-      palletType,
-      palletTop: palletType === 'blue' && palletTop,
+      // Montada em "Lotes em sequência" (mesmo que de 1 tarefa só): pede o
+      // aviso amarelo no "Iniciar tarefas".
+      sequence: sequenceMode,
+      palletType: type,
+      palletTop: type === 'blue' && palletTop,
       tasks,
     };
     const next = [...stagedUnits, unit];
@@ -1015,6 +1083,7 @@ export default function MainApp({ user, onLogout }) {
       'info',
     );
     handleClearSelection();
+    setPalletType(null);
   }
 
   // Tocar numa barrinha: carrega a unidade na seleção do Ponto a Ponto
@@ -1042,6 +1111,7 @@ export default function MainApp({ user, onLogout }) {
     const viewingGroup = !taskId && !!unit.groupKey;
     const index = viewingGroup ? null : Math.max(0, taskId ? unit.tasks.findIndex((t) => t.id === taskId) : 0);
     const focusPickup = viewingGroup ? unit.tasks[0].pickup : unit.tasks[index].pickup;
+    setRobotViewing(false);
     if (editingUnitId === unitId) {
       if (viewTask && viewTask.index !== index) {
         setViewTask({ index, active: 'pickup', activeIndex: 0 });
@@ -1075,6 +1145,14 @@ export default function MainApp({ user, onLogout }) {
   // empilhadas foi tocada; nos outros casos (uma tarefa só, ou Histórico)
   // é sempre 0, já que só existe um par.
   function handleFocusEndpoint(kind, index = 0) {
+    if (robotViewing) {
+      const name = robotTask && (kind === 'pickup' ? robotTask.pickup : robotTask.dropoff);
+      if (!name) return;
+      setRobotFocusedEndpoint(kind);
+      robotEndpointFocusRef.current = true;
+      requestFocus(name);
+      return;
+    }
     if (mode === 'queue') {
       if (!selectedQueueRoute) return;
       const name = kind === 'pickup' ? selectedQueueRoute.pickup : selectedQueueRoute.dropoff;
@@ -1112,6 +1190,7 @@ export default function MainApp({ user, onLogout }) {
   // pós-pickup") e liga o banner "VISUALIZANDO" com origem/destino
   // clicáveis, mesmo espírito de "Visualizar tarefa" no Ponto a Ponto.
   function handleSelectHistoryEntry(entry) {
+    setRobotViewing(false);
     setSelectedHistoryRoute((cur) => {
       if (cur && cur.id === entry.id) {
         setHistoryFocusedEndpoint(null);
@@ -1159,13 +1238,13 @@ export default function MainApp({ user, onLogout }) {
       id: editingUnit.tasks[i]?.id || newStagedId('t'),
       pickup,
       dropoff: dropoffNames[i],
-      palletType: editingUnit.tasks[i]?.palletType || palletType,
+      palletType: editingUnit.tasks[i]?.palletType || palletType || 'wood',
     }));
     const edited = {
       ...editingUnit,
       tasks,
       groupKey: tasks.length > 1 ? (editingUnit.groupKey || editingUnit.id) : null,
-      palletType,
+      palletType: palletType || editingUnit.palletType,
       palletTop: palletType === 'blue' && palletTop,
     };
     const next = stagedUnits.map((u) => (u.id === edited.id ? edited : u));
@@ -1234,6 +1313,14 @@ export default function MainApp({ user, onLogout }) {
       rejectStaged(err, 'Ordem inválida: ');
       return;
     }
+    if (!sequenceWarned && stagedUnits.some((u) => u.sequence)) {
+      setSequenceWarned(true);
+      setNotice({
+        tone: 'warn',
+        text: 'Antes de iniciar a tarefa, verifique se os materiais dos pallets correspondem às posições marcadas em sequência',
+      });
+      return;
+    }
     // A lista inteira num envio só: o servidor valida a cadeia com ocupação
     // projetada através de TODAS (mandadas uma a uma, uma tarefa que depende
     // de outra anterior seria recusada, porque no instante do envio a origem
@@ -1299,29 +1386,6 @@ export default function MainApp({ user, onLogout }) {
       else showToast('Fila limpa.', 'success');
     } catch (err) {
       showToast('Erro ao limpar a fila: ' + err.message, 'error');
-    }
-  }
-
-  // Parada de emergência: liga/desliga. Ligada, o servidor cancela tudo e
-  // mantém o robô parado (reprimindo a task de carga). É melhor esforço,
-  // não substitui o E-stop físico — ver CONTEXT.md.
-  async function handleToggleEmergency() {
-    const turningOn = !emergency;
-    try {
-      const result = await setEmergency(turningOn);
-      if (turningOn && result && result.warning) {
-        // A emergência ENGATOU (o servidor segue martelando cancel_goal +
-        // all-cancel a cada tick), mas algum comando imediato ao robô
-        // falhou — o operador precisa saber que pode não ter parado na hora.
-        showToast('EMERGÊNCIA ativa, mas o robô recusou um comando (' + result.warning + '). Se ele não parar, use o E-stop físico.', 'error');
-      } else {
-        showToast(
-          turningOn ? 'PARADA DE EMERGÊNCIA ativa — robô sendo mantido parado.' : 'Emergência liberada — robô voltando ao normal.',
-          turningOn ? 'error' : 'success',
-        );
-      }
-    } catch (err) {
-      showToast('Erro na parada de emergência: ' + err.message, 'error');
     }
   }
 
@@ -1415,10 +1479,19 @@ export default function MainApp({ user, onLogout }) {
     }
     const r = sel || currentRoute;
     if (!r || !r.dropoff) return null;
-    const live = !!currentRoute?.taskName && (!sel || sel === currentRoute || (sel.id != null && sel.id === currentRoute.id));
+    // Rota clicada na Fila/Histórico — inclusive a EM ANDAMENTO — é sempre o
+    // traçado estático da tarefa inteira (origem → destino); o trajeto ao
+    // vivo é o padrão sem seleção, e é o que tocar no robô mostra (ver
+    // handleRobotSelect, pedido do usuário 2026-10-29).
+    const live = !!currentRoute?.taskName && !sel;
     const pickupDone = live && (!!robotCarrying || !!r.unloadOnly);
     return { id: String(r.id ?? r.taskName ?? r.dropoff), pickup: pickupDone ? null : (r.pickup || null), dropoff: r.dropoff, live };
   }, [selectedQueueRoute, selectedHistoryRoute, currentRoute, robotCarrying, robotReturningToCharge, pendingUnloadDropoff]);
+  // Origem → destino do banner "VISUALIZANDO: ROBÔ" — a tarefa atual, ou só
+  // o destino da devolução do pallet. Voltando pra energia não tem tarefa.
+  const robotTask = currentRoute
+    ? { pickup: currentRoute.pickup || null, dropoff: currentRoute.dropoff || null }
+    : pendingUnloadDropoff ? { pickup: null, dropoff: pendingUnloadDropoff } : null;
   const robotStatus = robotStatusOf({
     robotStalledMessage, routePlanningMessage, cancelPending, postPickupUnloadMessage, robotReturningToCharge, robotCharging, currentRoute,
   });
@@ -1450,14 +1523,18 @@ export default function MainApp({ user, onLogout }) {
       />
       <CloseUpStatusBanner
         name={activeCloseUpId ? closeUps.find((c) => c.id === activeCloseUpId)?.name : null}
-        robot={robotFollowing ? { label: ROBOT_STATUS[robotStatus].label, color: ROBOT_STATUS[robotStatus].color() } : null}
+        robot={robotViewing || robotFollowing ? { label: ROBOT_STATUS[robotStatus].label, color: ROBOT_STATUS[robotStatus].color() } : null}
         // Nomes AO VIVO da seleção em edição (mudar a origem no mapa já
         // atualiza aqui), no apelido visual — nunca o nome técnico.
         // pickups/dropoffs SEMPRE em lista (mesmo quando só existe um par) —
         // uniformiza o banner pros dois casos: uma tarefa só (lista de 1) e
         // o GRUPO inteiro de "Lotes em sequência" (lista de N, uma por
         // tarefa — bug corrigido 2026-10-02, antes só mostrava a 1ª).
-        task={viewTask && editingUnitId && mode === 'ptp' ? {
+        task={robotViewing ? (robotTask ? {
+          pickups: [robotTask.pickup ? displayCellName(robotTask.pickup, lots, points) : null],
+          dropoffs: [robotTask.dropoff ? displayCellName(robotTask.dropoff, lots, points) : null],
+          active: { kind: robotFocusedEndpoint, index: 0 },
+        } : null) : viewTask && editingUnitId && mode === 'ptp' ? {
           pickups: (viewTask.index === null ? pickupNames : [pickupNames[viewTask.index]])
             .map((n) => (n ? displayCellName(n, lots, points) : null)),
           dropoffs: (viewTask.index === null ? dropoffNames : [dropoffNames[viewTask.index]])
@@ -1473,7 +1550,7 @@ export default function MainApp({ user, onLogout }) {
           active: { kind: historyFocusedEndpoint, index: 0 },
         } : null}
         onFocusEndpoint={handleFocusEndpoint}
-        wide={mode === 'ptp' || mode === 'queue' || mode === 'history'}
+        wide={robotViewing || mode === 'ptp' || mode === 'queue' || mode === 'history'}
       />
       {/* cancelPendingMessage (esperando girar pra CANCELAR), turnBlockedMessage
           (esperando girar pra COMEÇAR uma rota nova), awaitingChargeMessage
@@ -1547,14 +1624,20 @@ export default function MainApp({ user, onLogout }) {
           queuePulseId={queuePulseId}
           invalidPulseName={invalidPulse?.name ?? null}
           invalidPulseId={invalidPulse?.id ?? null}
-          emergencyActive={emergency}
-          onToggleEmergency={handleToggleEmergency}
           robotStatus={robotStatus}
           robotCarrying={robotCarrying}
           robotRoute={robotRoute}
           robotFrame={robotFrame}
+          robotWarp={robotWarp}
+          routeOpacity={routeOpacity}
+          showRoutePreview={mode === 'closeup' && robotGraphEditing && routePreviewVisible}
+          robotGraphEditing={mode === 'closeup' && robotGraphEditing}
+          robotGraphTool={robotGraphTool}
+          robotWarpRadiusM={robotWarpRadiusM}
           onRobotFrameChange={updateRobotFrame}
+          onRobotWarpChange={updateRobotWarp}
           onRobotFollowChange={setRobotFollowing}
+          onRobotSelect={handleRobotSelect}
           robotFocusRequest={robotFocusRequest}
         />
 
@@ -1593,6 +1676,19 @@ export default function MainApp({ user, onLogout }) {
               onSelect={handleSelectCloseUp}
               onRename={handleRenameCloseUp}
               onDelete={handleDeleteCloseUp}
+              robotGraphEditing={robotGraphEditing}
+              onToggleRobotGraph={() => setRobotGraphEditing((v) => !v)}
+              robotFrameAdjusted={!!robotFrame}
+              onResetRobotFrame={() => updateRobotFrame(null)}
+              robotGraphTool={robotGraphTool}
+              onRobotGraphToolChange={setRobotGraphTool}
+              robotWarpRadiusM={robotWarpRadiusM}
+              onRobotWarpRadiusChange={setRobotWarpRadiusM}
+              robotWarpCount={(robotWarp || []).length}
+              onUndoRobotWarp={() => updateRobotWarp((robotWarp || []).slice(0, -1))}
+              onClearRobotWarp={() => updateRobotWarp([])}
+              routeOpacity={routeOpacity}
+              onRouteOpacityChange={handleRouteOpacityChange}
             />
           </aside>
         )}
@@ -1686,6 +1782,7 @@ export default function MainApp({ user, onLogout }) {
       <Toast toast={toast} />
       <ManualViewer target={manualPage} onClose={() => setManualPage(null)} />
       <DevModeModal open={devModalOpen} onSubmit={handleDevModalSubmit} onClose={handleDevModalClose} />
+      <NoticeModal notice={notice} onClose={() => setNotice(null)} />
     </div>
   );
 }

@@ -5,7 +5,8 @@ import Konva from 'konva';
 import { COLORS } from '../theme';
 import {
   namedContentPositions, fitMapToContent, mapToContent, contentPxPerMeter, iconRotationDegrees, ROBOT_STATUS,
-  buildAdjacency, routeStops, routePolyline, nearestNode,
+  buildAdjacency, routeStops, routePolyline, nearestNode, validRobotFrame,
+  warpPoint, unwarpPoint, warpRotationDelta, WARP_MAX_SHIFT,
 } from '../robotMap';
 import emptyUrl from '../assets/robot-empty.webp';
 import blueUrl from '../assets/robot-blue.webp';
@@ -67,7 +68,14 @@ function shortestRotation(from, to) {
 // `route`: { id, pickup, dropoff, live } — tarefa cujo caminho aparece no
 // mapa (a atual, ou a clicada na Fila/Histórico); `live` = é a que o robô
 // está fazendo agora: começa na posição dele e vai encolhendo enquanto anda.
-function RobotOverlay({ image, points, lots, frame, editable, interactive, status, carrying, route, bounceId, onFrameChange, onRobotClick, onPoseRef }) {
+// `editable` + `graphTool`: 'frame' = caixa pra mover/esticar/girar o grafo
+// inteiro; 'warp' = deformação livre (arrasta um trecho, a vizinhança até
+// `warpRadiusM` metros vai junto). `warp` = pinos salvos (ver robotMap.js).
+// `routeOpacity`: multiplicador (0,1-1) da opacidade da rota desenhada.
+function RobotOverlay({
+  image, points, lots, frame, warp, routeOpacity = 1, showRoutePreview = false, editable, graphTool = 'frame', warpRadiusM = 8, interactive, status, carrying, route, bounceId,
+  onFrameChange, onWarpChange, onRobotClick, onPoseRef,
+}) {
   const [graph, setGraph] = useState(null);
   const routeRef = useRef(null);
   const trRef = useRef(null);
@@ -108,24 +116,65 @@ function RobotOverlay({ image, points, lots, frame, editable, interactive, statu
     return fitMapToContent(graph.points, namedContentPositions(points, lots, image.width, image.height));
   }, [graph, image, points, lots]);
 
-  const lengthPx = transform ? ROBOT_ICON_LENGTH_M * contentPxPerMeter(transform) : 0;
+  const pxPerMeter = transform ? contentPxPerMeter(transform) : 0;
+  const lengthPx = ROBOT_ICON_LENGTH_M * pxPerMeter;
   const iconScale = lengthPx / ICON.robotLengthPx;
 
-  // Segmentos do grafo já em px de conteúdo — desenhados num Shape só (um
-  // path), não 558 Lines. Só existe no modo "Editar closes".
+  // Deformação livre: tudo que vai do mapa do robô pra planta passa por aqui
+  // (grafo, rota, robô). pinsRef = os pinos salvos, ou salvos + o arrasto em
+  // andamento (prévia) -- lido pelo desenho do grafo e pelo loop da pose.
+  const pins = useMemo(() => warp || [], [warp]);
+  const pinsRef = useRef(pins);
+  const warpDragRef = useRef(null);
+  if (!warpDragRef.current) pinsRef.current = pins;
+  function toLocal(x, y) {
+    const p = mapToContent(transform, x, y);
+    return pinsRef.current.length ? warpPoint(pinsRef.current, p.x, p.y) : p;
+  }
+
+  // Segmentos do grafo em px de conteúdo SEM deformação (a deformação é
+  // aplicada no desenho, pra prévia do arrasto não recalcular memo nenhum) —
+  // num Shape só (um path), não 558 Lines. Só existe no modo "Editar closes".
+  // `box` é o retângulo que contém o grafo já deformado: o Konva não sabe o
+  // tamanho de um Shape com sceneFunc próprio, e sem ele a caixa do
+  // Transformer nascia com tamanho zero no canto da planta (qualquer puxão
+  // virava escala absurda).
   const segments = useMemo(() => {
-    if (!editable || !graph || !transform) return null;
-    const out = new Float32Array(graph.edges.length * 4);
+    if (!editable || !graph || !transform || !graph.edges.length) return null;
+    const data = new Float32Array(graph.edges.length * 4);
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     graph.edges.forEach(([x1, y1, x2, y2], i) => {
       const p = mapToContent(transform, x1, y1);
       const q = mapToContent(transform, x2, y2);
-      out.set([p.x, p.y, q.x, q.y], i * 4);
+      data.set([p.x, p.y, q.x, q.y], i * 4);
+      const pw = warpPoint(pins, p.x, p.y);
+      const qw = warpPoint(pins, q.x, q.y);
+      minX = Math.min(minX, pw.x, qw.x);
+      minY = Math.min(minY, pw.y, qw.y);
+      maxX = Math.max(maxX, pw.x, qw.x);
+      maxY = Math.max(maxY, pw.y, qw.y);
     });
-    return out;
-  }, [editable, graph, transform]);
+    return { data, box: { x: minX, y: minY, width: maxX - minX, height: maxY - minY } };
+  }, [editable, graph, transform, pins]);
 
   // --- rota planejada ------------------------------------------------------
   const adjacency = useMemo(() => (graph?.links ? buildAdjacency(graph.links) : null), [graph]);
+  // Mexendo no slider de opacidade sem nenhuma rota na tela: uma rota de
+  // exemplo entre dois lotes distantes, só enquanto mexe (`showRoutePreview`)
+  // -- fixa na tela ela parecia uma rota "fantasma" de verdade.
+  const previewRoute = useMemo(() => {
+    if (!showRoutePreview || !graph) return null;
+    const lotsWithH = Object.keys(graph.points).filter((n) => graph.points['H' + n]);
+    if (lotsWithH.length < 2) return null;
+    const [ax, ay] = graph.points[lotsWithH[0]];
+    const far = lotsWithH.reduce((best, n) => {
+      const [x, y] = graph.points[n];
+      const d = (x - ax) ** 2 + (y - ay) ** 2;
+      return d > best.d ? { n, d } : best;
+    }, { n: null, d: -1 }).n;
+    return { id: 'preview', pickup: lotsWithH[0], dropoff: far, live: false };
+  }, [showRoutePreview, graph]);
+  route = route || previewRoute;
   // Ponto de partida da rota ao vivo: o nó do grafo mais perto do robô no
   // momento em que a tarefa (ou a fase dela: antes/depois da coleta) apareceu.
   const [liveStart, setLiveStart] = useState(null); // { key, node }
@@ -145,25 +194,33 @@ function RobotOverlay({ image, points, lots, frame, editable, interactive, statu
     if (poly.length < 2) return null;
     return poly.flatMap(([x, y]) => {
       const p = mapToContent(transform, x, y);
-      return [p.x, p.y];
+      const w = warpPoint(pins, p.x, p.y);
+      return [w.x, w.y];
     });
-  }, [route, routeKey, adjacency, graph, transform, liveStart]);
+  }, [route, routeKey, adjacency, graph, transform, liveStart, pins]);
   const routeOuterRef = useRef(null);
   const routeInnerRef = useRef(null);
-  const routeProgressRef = useRef(0);
-  useEffect(() => { routeProgressRef.current = 0; }, [routePoints]);
+  // -1 = ainda não sabe onde o robô está nesta rota (procura na rota toda).
+  const routeProgressRef = useRef(-1);
+  useEffect(() => { routeProgressRef.current = -1; }, [routePoints]);
 
   // Rota ao vivo: o traço começa no robô e descarta o que ele já passou.
   // Avança só pra frente (a rota vai e volta no mesmo trecho ao entrar/sair
-  // do lote — procurar o mais perto na rota toda pularia de volta).
+  // do lote — procurar o mais perto na rota toda pularia de volta). Só a 1ª
+  // leitura depois da rota ser (re)calculada procura na rota toda: ela pode
+  // ser recalculada no meio do caminho (mesma tarefa, ponto de partida do
+  // início dela) e procurar só 12 trechos à frente do começo desenhava a
+  // rota voltando até o início, por cima dela mesma.
   function trimRouteTo(pos) {
     const pts = routePoints;
     const outer = routeOuterRef.current;
     if (!pts || !outer || !route?.live) return;
     const n = pts.length / 2;
-    let best = routeProgressRef.current;
+    const from = Math.max(0, routeProgressRef.current);
+    const to = routeProgressRef.current < 0 ? n - 1 : Math.min(n - 1, from + ROUTE_PROGRESS_LOOKAHEAD);
+    let best = from;
     let bestD = Infinity;
-    for (let i = routeProgressRef.current; i < Math.min(n - 1, routeProgressRef.current + ROUTE_PROGRESS_LOOKAHEAD); i++) {
+    for (let i = from; i < to; i++) {
       const ax = pts[2 * i], ay = pts[2 * i + 1], bx = pts[2 * i + 2], by = pts[2 * i + 3];
       const len2 = (bx - ax) ** 2 + (by - ay) ** 2 || 1;
       const t = Math.max(0, Math.min(1, ((pos.x - ax) * (bx - ax) + (pos.y - ay) * (by - ay)) / len2));
@@ -181,11 +238,11 @@ function RobotOverlay({ image, points, lots, frame, editable, interactive, statu
   trimRouteRef.current = trimRouteTo;
 
   useEffect(() => {
-    if (editable && segments && trRef.current && routeRef.current) {
+    if (editable && segments && graphTool === 'frame' && trRef.current && routeRef.current) {
       trRef.current.nodes([routeRef.current]);
       trRef.current.getLayer().batchDraw();
     }
-  }, [editable, segments]);
+  }, [editable, segments, graphTool]);
 
   // Posição do robô em px de conteúdo do Stage (já com o ajuste fino do frame).
   function contentPosition() {
@@ -203,8 +260,10 @@ function RobotOverlay({ image, points, lots, frame, editable, interactive, statu
     function apply(pose) {
       const robot = robotRef.current;
       if (!robot) return;
-      const pos = mapToContent(transform, pose.x, pose.y);
-      const rot = iconRotationDegrees(transform, pose.theta);
+      const base = mapToContent(transform, pose.x, pose.y);
+      const pos = toLocal(pose.x, pose.y);
+      const baseRot = iconRotationDegrees(transform, pose.theta);
+      const rot = baseRot + warpRotationDelta(pinsRef.current, base.x, base.y, baseRot);
       robot.opacity(pose.ok ? 1 : STALE_OPACITY);
       const last = lastPoseRef.current;
       lastPoseRef.current = pose;
@@ -325,13 +384,67 @@ function RobotOverlay({ image, points, lots, frame, editable, interactive, statu
       frameRef.current.setAttrs({ x: r.x(), y: r.y(), scaleX: r.scaleX(), scaleY: r.scaleY(), rotation: r.rotation() });
     }
   }
-  function commitFrame() {
+  function commitFrame(e) {
     const r = routeRef.current;
-    if (r) onFrameChange?.({ x: r.x(), y: r.y(), scaleX: r.scaleX(), scaleY: r.scaleY(), rotation: r.rotation() });
+    if (!r || (e && e.target !== r && e.type === 'dragend')) return; // dragend do pegador da deformação sobe até aqui
+    const next = validRobotFrame({ x: r.x(), y: r.y(), scaleX: r.scaleX(), scaleY: r.scaleY(), rotation: r.rotation() });
+    if (next) {
+      onFrameChange?.(next);
+      return;
+    }
+    // passou do limite: volta pro último ajuste bom em vez de salvar lixo
+    r.setAttrs(fr);
+    syncFrame();
+    r.getLayer()?.batchDraw();
+  }
+
+  // Deformação livre: o pegador (Rect arrastável do tamanho do grafo) não
+  // anda -- o arrasto só serve pra ler o dedo. Âncora = o ponto SEM
+  // deformação que está debaixo do dedo agora; o pino leva ele até o dedo.
+  const warpCursorRef = useRef(null);
+  const warpRadiusPx = warpRadiusM * pxPerMeter;
+  function placeWarpCursor(at) {
+    const c = warpCursorRef.current;
+    if (!c) return;
+    c.setAttrs(at ? { x: at.x, y: at.y, visible: true } : { visible: false });
+    c.getLayer()?.batchDraw();
+  }
+  function handleWarpHover() {
+    if (!warpDragRef.current) placeWarpCursor(routeRef.current?.getRelativePointerPosition());
+  }
+  function handleWarpDragStart(e) {
+    const start = routeRef.current.getRelativePointerPosition();
+    const anchor = unwarpPoint(pins, start.x, start.y);
+    warpDragRef.current = { start, anchor, rect: { x: e.target.x(), y: e.target.y() }, pin: null };
+  }
+  function handleWarpDragMove(e) {
+    const drag = warpDragRef.current;
+    if (!drag) return;
+    e.target.position(drag.rect);
+    const cur = routeRef.current.getRelativePointerPosition();
+    let dx = cur.x - drag.start.x;
+    let dy = cur.y - drag.start.y;
+    const max = warpRadiusPx * WARP_MAX_SHIFT;
+    const len = Math.hypot(dx, dy);
+    if (len > max) {
+      dx *= max / len;
+      dy *= max / len;
+    }
+    drag.pin = { x: drag.anchor.x, y: drag.anchor.y, dx, dy, r: warpRadiusPx };
+    pinsRef.current = [...pins, drag.pin];
+    placeWarpCursor({ x: drag.start.x + dx, y: drag.start.y + dy });
+  }
+  function handleWarpDragEnd(e) {
+    const drag = warpDragRef.current;
+    warpDragRef.current = null;
+    e.target.position(drag?.rect || e.target.position());
+    pinsRef.current = pins;
+    if (drag?.pin && Math.hypot(drag.pin.dx, drag.pin.dy) >= 0.5) onWarpChange?.([...pins, drag.pin]);
+    else e.target.getLayer()?.batchDraw();
   }
 
   if (!transform) return null;
-  const fr = { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, ...(frame || {}) };
+  const fr = validRobotFrame(frame) || { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0 };
   const statusColor = ROBOT_STATUS[status]?.color() || COLORS.accentCyan;
   const offsetToCenter = (ICON.centerX - ICON.pivotX) * iconScale; // centro geométrico do robô, no eixo dele
 
@@ -342,36 +455,78 @@ function RobotOverlay({ image, points, lots, frame, editable, interactive, statu
           <Group
             ref={routeRef}
             {...fr}
-            draggable
-            onDragMove={syncFrame}
+            draggable={graphTool === 'frame'}
+            onDragMove={(e) => { if (e.target === routeRef.current) syncFrame(); }}
             onTransform={syncFrame}
             onDragEnd={commitFrame}
             onTransformEnd={commitFrame}
           >
+            {graphTool === 'warp' ? (
+              // pegador da deformação: cobre o grafo + um raio de folga
+              <Rect
+                x={segments.box.x - warpRadiusPx}
+                y={segments.box.y - warpRadiusPx}
+                width={segments.box.width + 2 * warpRadiusPx}
+                height={segments.box.height + 2 * warpRadiusPx}
+                fill="transparent"
+                draggable
+                onMouseMove={handleWarpHover}
+                onMouseLeave={() => placeWarpCursor(null)}
+                onDragStart={handleWarpDragStart}
+                onDragMove={handleWarpDragMove}
+                onDragEnd={handleWarpDragEnd}
+              />
+            ) : (
+              // área de pegar: o grafo inteiro arrasta por qualquer ponto da caixa, não só pelas linhas
+              <Rect {...segments.box} fill="transparent" />
+            )}
             <Shape
+              {...segments.box}
+              listening={false}
               sceneFunc={(ctx, shape) => {
+                const { data, box } = segments;
+                const live = pinsRef.current;
                 ctx.beginPath();
-                for (let i = 0; i < segments.length; i += 4) {
-                  ctx.moveTo(segments[i], segments[i + 1]);
-                  ctx.lineTo(segments[i + 2], segments[i + 3]);
+                for (let i = 0; i < data.length; i += 4) {
+                  const p = live.length ? warpPoint(live, data[i], data[i + 1]) : { x: data[i], y: data[i + 1] };
+                  const q = live.length ? warpPoint(live, data[i + 2], data[i + 3]) : { x: data[i + 2], y: data[i + 3] };
+                  ctx.moveTo(p.x - box.x, p.y - box.y);
+                  ctx.lineTo(q.x - box.x, q.y - box.y);
                 }
                 ctx.strokeShape(shape);
               }}
               stroke={COLORS.accentCyan}
               strokeWidth={1.5}
               strokeScaleEnabled={false}
-              hitStrokeWidth={10}
               opacity={0.85}
             />
+            {graphTool === 'warp' && (
+              <Circle
+                ref={warpCursorRef}
+                radius={warpRadiusPx}
+                visible={false}
+                listening={false}
+                stroke={COLORS.accentAmber}
+                strokeWidth={1.5}
+                strokeScaleEnabled={false}
+                dash={[6, 4]}
+                fill="rgba(245, 158, 11, 0.08)"
+              />
+            )}
           </Group>
-          <Transformer
-            ref={trRef}
-            rotateEnabled
-            keepRatio={false}
-            borderStroke={COLORS.accentAmber}
-            anchorStroke={COLORS.accentAmber}
-            anchorFill={COLORS.panelBase}
-          />
+          {graphTool === 'frame' && (
+            <Transformer
+              ref={trRef}
+              rotateEnabled
+              keepRatio={false}
+              flipEnabled={false}
+              ignoreStroke
+              boundBoxFunc={(oldBox, newBox) => (newBox.width < 40 || newBox.height < 40 ? oldBox : newBox)}
+              borderStroke={COLORS.accentAmber}
+              anchorStroke={COLORS.accentAmber}
+              anchorFill={COLORS.panelBase}
+            />
+          )}
         </>
       )}
       <Group ref={frameRef} {...fr} listening={interactive}>
@@ -382,7 +537,7 @@ function RobotOverlay({ image, points, lots, frame, editable, interactive, statu
               points={routePoints}
               stroke={ROUTE_OUTER.color}
               strokeWidth={ROUTE_OUTER.width}
-              opacity={ROUTE_OUTER.opacity}
+              opacity={ROUTE_OUTER.opacity * routeOpacity}
               lineCap="round"
               lineJoin="round"
               listening={false}
@@ -393,6 +548,7 @@ function RobotOverlay({ image, points, lots, frame, editable, interactive, statu
               points={routePoints}
               stroke={ROUTE_INNER.color}
               strokeWidth={ROUTE_INNER.width}
+              opacity={routeOpacity}
               lineCap="round"
               lineJoin="round"
               listening={false}

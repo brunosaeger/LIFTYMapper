@@ -40,10 +40,17 @@ independente dos topicos ROS que ja existem no robo, nada mais:
   na hora a partir da definicao que o proprio publicador manda no cabecalho
   da conexao (genpy.dynamic) -- sem compilar, sem ler arquivo nenhum da
   REEMAN, mesmo metodo do leitor de coleta (tools/field-data).
+- /lx_camera_pallet_node/forklift_pallet_pose + /mobile/odom -- GET
+  /dock-shadow: MODO SOMBRA da colisao com o pallet (2026-10-29). Compara,
+  durante cada coleta, o quanto a camera ve o pallet se aproximar com o
+  quanto o robo andou; anota onde "teria parado". SO LEITURA, nao para
+  nada -- quem registra e o server.py. Mesmo metodo de decodificacao acima.
 
-Modo de uso pretendido (por enquanto): MANUAL, sob demanda, via SSH — nao
-e um systemd service, nao inicia sozinho no boot. So vira permanente se/
-quando isso for decidido explicitamente depois de validado em campo.
+Modo de uso: nao e um systemd service e nada no boot do robo foi mexido. Quem
+mantem no ar e o server.py (2026-10-29, "Vigia do bridge"): se a 8091 nao
+responde, ele entra por SSH e roda `setsid nohup python3 -u
+lifty_turn_check_bridge.py > bridge.log` em ~ -- o mesmo comando de antes,
+so que automatico. Atualizar este arquivo no robo continua sendo manual (scp).
 
 Uso:
     source /opt/ros/*/setup.bash   # so ambiente da sessao, nada em disco
@@ -140,6 +147,11 @@ def _on_fork_info(raw):
         _obstacle["t"] = time.time()
     except Exception as err:  # formato inesperado: /obstacle responde 503 e o server.py cai no alerta antigo
         print("fork_info: nao consegui ler (%s)" % err)
+        return
+    with _dock_lock:  # sensor do garfo durante o encaixe (o app o deixa em 255 la -- registra pra confirmar)
+        cur = _dock["current"]
+        if cur is not None:
+            cur["fork_back_min"] = min(cur["fork_back_min"], _obstacle["values"]["back"])
 
 
 def _on_avoid_distance(raw):
@@ -148,6 +160,111 @@ def _on_avoid_distance(raw):
         _obstacle["avoid"] = {f: int(round(float(getattr(msg, f)) * 100)) for f in ("front", "back", "left", "right")}
     except Exception as err:  # sem isso o server.py usa limites fixos
         print("avoid_distance: nao consegui ler (%s)" % err)
+
+
+# Modo sombra: pallet EMPURRADO na coleta (ver GET /dock-shadow). Empurrando,
+# o robo anda (odometria) mas o pallet anda junto -- a camera o ve parado em
+# relacao ao robo. Numa coleta normal o dis_x da camera muda na mesma medida
+# que o robo anda: razao ~1,0, pior caso 0,44 em 167 janelas de 15 cm (53
+# coletas de 27-28/10). A camera so publica deteccao (valores != 0) durante a
+# coleta, entao uma sequencia de deteccoes = um encaixe.
+PALLET_CAMERA_TOPIC = "/lx_camera_pallet_node/forklift_pallet_pose"
+ODOM_TOPIC = "/mobile/odom"
+DOCK_GAP_SECONDS = 3.0  # sem deteccao por isso = o encaixe acabou
+DOCK_WINDOW_METERS = 0.15
+DOCK_PUSH_RATIO = 0.25  # abaixo disso o pallet acompanhou o robo = "teria parado"
+DOCK_HISTORY = 30
+ODOM_MAX_GAP_SECONDS = 0.5  # buraco maior que isso na odometria nao e integrado
+_dock_lock = threading.Lock()
+_odom = {"cum": 0.0, "stamp": None, "vx": None}
+_dock = {"boot": int(time.time()), "next_id": 1, "current": None, "done": []}
+_decode_failed = set()
+
+
+def _decode_once(raw, topic):
+    """_decode, mas avisa uma vez so por topico (odometria chega a dezenas de Hz)."""
+    try:
+        return _decode(raw)
+    except Exception as err:
+        if topic not in _decode_failed:
+            _decode_failed.add(topic)
+            print("%s: nao consegui ler (%s)" % (topic, err))
+        return None
+
+
+def _on_odom(raw):
+    msg = _decode_once(raw, ODOM_TOPIC)
+    if msg is None:
+        return
+    stamp, vx = msg.header.stamp.to_sec(), float(msg.twist.twist.linear.x)
+    with _dock_lock:
+        if _odom["stamp"] is not None and 0 < stamp - _odom["stamp"] <= ODOM_MAX_GAP_SECONDS:
+            _odom["cum"] += (vx + _odom["vx"]) / 2 * (stamp - _odom["stamp"])
+        _odom["stamp"], _odom["vx"] = stamp, vx
+
+
+def _finish_stale_dock(now):
+    cur = _dock["current"]
+    if cur is None or now - cur["last_t"] <= DOCK_GAP_SECONDS:
+        return
+    cur["ended"] = cur["last_t"]
+    cur["moved"] = _odom["cum"] - cur["odom_start"]
+    _dock["done"] = (_dock["done"] + [cur])[-DOCK_HISTORY:]
+    _dock["current"] = None
+
+
+def _on_pallet_camera(raw):
+    msg = _decode_once(raw, PALLET_CAMERA_TOPIC)
+    if msg is None:
+        return
+    x, y, angle = float(msg.dis_x), float(msg.dis_y), float(msg.angle)
+    now = time.time()
+    with _dock_lock:
+        _finish_stale_dock(now)
+        if not (x or y or angle):
+            return
+        odom = _odom["cum"]
+        cur = _dock["current"]
+        if cur is None:
+            cur = {"id": _dock["next_id"], "start": now, "first": [x, y, angle], "samples": 0, "windows": 0,
+                   "min_ratio": None, "push": [], "anchor": (x, odom), "odom_start": odom, "fork_back_min": 255}
+            _dock["next_id"] += 1
+            _dock["current"] = cur
+        cur["samples"] += 1
+        cur["last_t"], cur["last"] = now, [x, y, angle]
+        anchor_x, anchor_odom = cur["anchor"]
+        moved = odom - anchor_odom
+        if abs(moved) < DOCK_WINDOW_METERS:
+            return
+        ratio = -(x - anchor_x) / moved  # dis_x anda ao contrario da odometria: 1 = normal, 0 = pallet junto
+        cur["windows"] += 1
+        if cur["min_ratio"] is None or ratio < cur["min_ratio"]:
+            cur["min_ratio"] = ratio
+        if ratio < DOCK_PUSH_RATIO:
+            cur["push"].append({"t": round(now - cur["start"], 1), "ratio": round(ratio, 2), "moved": round(moved, 3)})
+        cur["anchor"] = (x, odom)
+
+
+def _dock_summary(cur, now):
+    out = {"boot": _dock["boot"], "id": cur["id"], "started_ago": round(now - cur["start"], 1),
+           "samples": cur["samples"], "windows": cur["windows"],
+           "min_ratio": None if cur["min_ratio"] is None else round(cur["min_ratio"], 2),
+           "push": cur["push"], "fork_back_min": cur["fork_back_min"],
+           "first": [round(v, 3) for v in cur["first"]], "last": [round(v, 3) for v in cur["last"]]}
+    if "ended" in cur:
+        out["ended_ago"] = round(now - cur["ended"], 1)
+        out["duration"] = round(cur["ended"] - cur["start"], 1)
+        out["moved"] = round(cur["moved"], 3)
+    return out
+
+
+def _dock_shadow_payload():
+    now = time.time()
+    with _dock_lock:
+        _finish_stale_dock(now)
+        cur = _dock["current"]
+        return {"current": _dock_summary(cur, now) if cur else None,
+                "done": [_dock_summary(d, now) for d in _dock["done"]]}
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -162,6 +279,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json(503, {"error": "ainda sem leitura de %s" % OBSTACLE_TOPIC})
             else:
                 self._json(200, dict(_obstacle["values"], age=round(time.time() - _obstacle["t"], 2), avoid=_obstacle["avoid"]))
+        elif parsed.path == "/dock-shadow":
+            self._json(200, _dock_shadow_payload())
         else:
             self.send_response(404)
             self.end_headers()
@@ -230,6 +349,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # o IP puro, sem lookup nenhum.
         return self.client_address[0]
 
+    # Consultas de rotina (/obstacle a cada 1 s, /dock-shadow) que deram certo
+    # nao vao pro log: rodando 24/7 o bridge.log cresceria sem parar no disco
+    # do robo. Comandos (garfo, obs3d, check-turn) e erros continuam.
+    QUIET_PATHS = ("/obstacle", "/dock-shadow")
+
+    def log_request(self, code="-", size="-"):
+        if str(code) == "200" and urllib.parse.urlparse(self.path).path in self.QUIET_PATHS:
+            return
+        super().log_request(code, size)
+
     def log_message(self, fmt, *args):
         print("[%s] %s" % (self.address_string(), fmt % args))
 
@@ -242,6 +371,9 @@ if __name__ == "__main__":
     fork_pub = rospy.Publisher(FORK_NAV_HEIGHT_TOPIC, String, queue_size=1)
     rospy.Subscriber(OBSTACLE_TOPIC, rospy.AnyMsg, _on_fork_info, queue_size=1)
     rospy.Subscriber(AVOID_TOPIC, rospy.AnyMsg, _on_avoid_distance, queue_size=1)
+    # fila maior: perder mensagem aqui = buraco na integracao / janela perdida
+    rospy.Subscriber(ODOM_TOPIC, rospy.AnyMsg, _on_odom, queue_size=50)
+    rospy.Subscriber(PALLET_CAMERA_TOPIC, rospy.AnyMsg, _on_pallet_camera, queue_size=20)
     rospy.sleep(0.5)  # da tempo dos publishers se registrarem no master antes do 1o uso
 
     # Threading: o /check-turn pode esperar ate 5 s pela resposta do robo e nao
@@ -252,6 +384,7 @@ if __name__ == "__main__":
     print("  http://0.0.0.0:%d/obstacle-3d?on=<1 ou 0>" % PORT)
     print("  POST http://0.0.0.0:%d/fork-nav-height  (garfo -> altura de navegacao)" % PORT)
     print("  http://0.0.0.0:%d/obstacle  (distancias dos sensores de obstaculo, cm)" % PORT)
+    print("  http://0.0.0.0:%d/dock-shadow  (modo sombra: pallet empurrado na coleta)" % PORT)
     print("Ctrl+C pra parar.")
     try:
         httpd.serve_forever()

@@ -5,7 +5,7 @@ name: Build LIFTY.exe
 # "Build LIFTY.exe" -> "Run workflow") ou empurrando uma tag v*.
 # Gera DOIS artefatos: LIFTY-windows (GUI, uso manual numa máquina com
 # alguém na frente) e LIFTY-SERVICE-windows (sem interface, sobe sozinho —
-# pensado pra virar Serviço do Windows numa VM, ver MIGRACAO_VM.md).
+# pensado pra virar Serviço do Windows numa VM, ver MIGRACAO_VM_FINAL.md).
 on:
   workflow_dispatch:
   push:

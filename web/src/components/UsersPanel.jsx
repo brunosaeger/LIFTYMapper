@@ -119,8 +119,13 @@ export default function UsersPanel({ onOpenManual, currentUsername, showToast, o
             <circle cx="11" cy="11" r="7" />
             <line x1="21" y1="21" x2="16.65" y2="16.65" />
           </svg>
+          {/* Sem isso o gerenciador de senhas do navegador toma a busca
+              pelo "usuário" de um login (há campos de senha no painel) e
+              preenche o login salvo — e preenche de novo ao limpar. */}
           <input
-            type="text"
+            type="search"
+            name="lifty-user-search"
+            autoComplete="off"
             className="users-panel__search-input"
             placeholder="Buscar usuário…"
             value={query}
@@ -269,13 +274,7 @@ function UserRow({ user, isSelf, kanbans, onFocusKanban, onToggleAdmin, onToggle
         </span>
       </div>
       <div className="users-panel__row-actions">
-        <input
-          type="password"
-          className="points-panel__input"
-          placeholder="nova senha"
-          value={newPassword}
-          onChange={(e) => setNewPassword(e.target.value)}
-        />
+        <PasswordInput placeholder="nova senha" value={newPassword} onChange={setNewPassword} />
         <button type="button" className="users-panel__btn" onClick={submitPassword} disabled={!newPassword}>Trocar</button>
         <button
           type="button"
@@ -305,9 +304,46 @@ function UserRow({ user, isSelf, kanbans, onFocusKanban, onToggleAdmin, onToggle
   );
 }
 
+// Campo de senha com olhinho pro admin conferir o que está digitando (senha
+// nova de um usuário, ou a de um usuário sendo criado). Só a senha DIGITADA:
+// as existentes ficam só como hash no servidor, não há o que mostrar.
+// `visible`/`onToggle` opcionais — sem eles o próprio campo guarda o estado.
+function PasswordInput({ placeholder, value, onChange, visible, onToggle }) {
+  const [ownVisible, setOwnVisible] = useState(false);
+  const shown = visible ?? ownVisible;
+  const toggle = onToggle || setOwnVisible;
+  return (
+    <div className="users-panel__password">
+      <input
+        type={shown ? 'text' : 'password'}
+        autoComplete="new-password"
+        className="points-panel__input"
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <button
+        type="button"
+        className="users-panel__password-toggle"
+        onClick={() => toggle(!shown)}
+        aria-label={shown ? 'Esconder senha' : 'Mostrar senha'}
+        title={shown ? 'Esconder senha' : 'Mostrar senha'}
+        aria-pressed={shown}
+      >
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z" />
+          <circle cx="12" cy="12" r="3" />
+          {shown && <line x1="3" y1="3" x2="21" y2="21" />}
+        </svg>
+      </button>
+    </div>
+  );
+}
+
 function NewUserForm({ onCreate, kanbans, onFocusKanban, onOpenManual }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [isMaster, setIsMaster] = useState(false);
   const [kanbanIds, setKanbanIds] = useState([]);
@@ -329,6 +365,7 @@ function NewUserForm({ onCreate, kanbans, onFocusKanban, onOpenManual }) {
       await onCreate({ username: username.trim(), password, isAdmin, isMaster, kanbanIds });
       setUsername('');
       setPassword('');
+      setShowPassword(false);
       setIsAdmin(false);
       setIsMaster(false);
       setKanbanIds([]);
@@ -346,18 +383,13 @@ function NewUserForm({ onCreate, kanbans, onFocusKanban, onOpenManual }) {
         type="text"
         className="points-panel__input"
         placeholder="usuário"
+        autoComplete="off"
         value={username}
         onChange={(e) => setUsername(e.target.value)}
         autoCapitalize="none"
         autoCorrect="off"
       />
-      <input
-        type="password"
-        className="points-panel__input"
-        placeholder="senha"
-        value={password}
-        onChange={(e) => setPassword(e.target.value)}
-      />
+      <PasswordInput placeholder="senha" value={password} onChange={setPassword} visible={showPassword} onToggle={setShowPassword} />
       <span className="users-panel__role-toggles">
         <label className="users-panel__admin-toggle">
           <input type="checkbox" checked={isAdmin} onChange={(e) => setIsAdmin(e.target.checked)} />
