@@ -5501,10 +5501,13 @@ cada arquivo; guarda 30 dias. Restaurar é manual (assistência técnica) — pa
   cores vivas (o fundo delas é sempre escuro). `--warn-text` = amarelo dos avisos de texto.
 - **Mapa virado 180°** (TESTE): botão redondo ao lado do VISUALIZANDO: KANBAN. Só vista, só no
   aparelho: o Stage gira em torno do centro da tela (`flipStageTo`); toque continua certo; nomes
-  e números de pé (`viewRotation`, `uprightTextProps`). Câmera automática (zoom em kanban/ponto,
-  seguir robô, roda, reset) desvira antes (`clearViewFlip`); sair do kanban desvira. Testado:
-  37 células espelhadas com erro 0 px, toque marca a célula certa. Os nomes de pé não foram
-  conferidos em campo (nenhum lote está com nome visível hoje).
+  e números de pé (`viewRotation`, `uprightTextProps`). Fica virado trocando de modo e ampliando
+  outro kanban — só desvira pelo próprio botão ou pela lupa "−" (`clearViewFlip` em
+  `handleResetView`). A câmera automática (zoom em kanban/ponto, seguir robô, roda) faz a conta
+  já com o giro (`flipSign`/`stagePosCentering`: com 180°, tela = pos − conteúdo·escala).
+  Testado: 37 células espelhadas com erro 0 px, toque marca a célula certa, kanban enquadrado
+  igual virado e normal. Os nomes de pé não foram conferidos em campo (nenhum lote está com nome
+  visível hoje).
 - Fullscreen do tablet: navegador não deixa um SITE entrar sozinho em tela cheia; solução
   proposta (não feita) = instalar como app (`display: fullscreen` no manifest já existe) com o
   endereço tratado como seguro no Chrome do tablet, ou navegador de quiosque.

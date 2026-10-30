@@ -259,15 +259,13 @@ export default function MainApp({ user, onLogout }) {
   // ptp) e ao resetar o zoom (ver onCloseUpActivate passado pro
   // FloorPlanCanvas, chamado com null de dentro de handleResetView).
   const [activeCloseUpId, setActiveCloseUpId] = useState(null);
-  useEffect(() => {
-    if (!activeCloseUpId) setViewFlipped(false); // saiu do kanban: desvira
-  }, [activeCloseUpId]);
   // Banner "VISUALIZANDO: ROBÔ" — true enquanto o mapa segue o robô (tocou no
   // ícone dele; qualquer gesto de câmera solta, ver FloorPlanCanvas).
   const [robotFollowing, setRobotFollowing] = useState(false);
   // Mapa virado 180° (TESTE, botão ao lado do VISUALIZANDO: KANBAN — ver
-  // FloorPlanCanvas "Girar a visualização"). Só deste aparelho; desfaz ao
-  // sair do kanban (lupa "−", outro zoom...) ou tocando de novo no botão.
+  // FloorPlanCanvas "Girar a visualização"). Só deste aparelho. Fica virado
+  // trocando de modo, ampliando outro kanban etc. — só desvira tocando de
+  // novo no botão ou na lupa "−" (pedido do usuário, 2026-10-30).
   const [viewFlipped, setViewFlipped] = useState(false);
   // "Visualizando o robô" (pedido do usuário, 2026-10-29): tocar no robô (ou
   // no painel ROBÔ do header) mostra o trajeto AO VIVO dele + banner com

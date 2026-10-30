@@ -978,14 +978,28 @@ export default function FloorPlanCanvas({
   // Stage inteiro gira em torno do centro da tela — planta, lotes, rotas,
   // robô e grafo giram juntos e continuam alinhados; nenhum dado muda, e o
   // toque continua certo (o Konva desconta a rotação no hit test). Textos
-  // ficam de pé (viewRotation nos nomes/números). Os movimentos automáticos
-  // de câmera (zoom em kanban/ponto, seguir o robô, roda, reset) fazem conta
-  // sem giro — desfazem o giro na hora (clearViewFlip) antes de mexer.
+  // ficam de pé (viewRotation nos nomes/números). Fica virado até o próprio
+  // botão ou a lupa "−" (handleResetView -> clearViewFlip): os movimentos
+  // automáticos de câmera (zoom em kanban/ponto, seguir o robô, roda) fazem
+  // a conta já com o giro (flipSign/stagePosCentering).
   const FLIP_DURATION_MS = 450;
   const flipAnimRef = useRef(null);
+  const flipTargetRef = useRef(0);
+  // +1 sem giro, -1 virado: com 180° tela = pos − conteúdo·escala.
+  function flipSign() {
+    const stage = stageRef.current;
+    if (stage && stage.rotation() !== flipTargetRef.current) flipStageTo(flipTargetRef.current, false); // giro no meio: termina já
+    return flipTargetRef.current === 180 ? -1 : 1;
+  }
+  // Posição do Stage que põe o ponto de conteúdo `c` no centro da tela na escala `s`.
+  function stagePosCentering(c, s) {
+    const k = flipSign();
+    return { x: containerWidth / 2 - k * c.x * s, y: containerHeight / 2 - k * c.y * s };
+  }
   function flipStageTo(targetDeg, animate) {
     const stage = stageRef.current;
     if (!stage) return;
+    flipTargetRef.current = targetDeg;
     cancelAnimationFrame(flipAnimRef.current);
     const from = stage.rotation();
     if (from === targetDeg) return;
@@ -1069,7 +1083,6 @@ export default function FloorPlanCanvas({
   function handleCloseUpClick(closeUp) {
     const stage = stageRef.current;
     if (!stage || !image || !containerWidth || !containerHeight) return;
-    clearViewFlip();
     setFollow(false);
     // Banner "VISUALIZANDO: KANBAN X" (ver CloseUpStatusBanner.jsx) — avisa
     // MainApp.jsx já no toque, sem esperar a animação de zoom terminar.
@@ -1090,10 +1103,7 @@ export default function FloorPlanCanvas({
       containerHeight / (height * CLOSEUP_ZOOM_MARGIN),
     );
     const newScale = clampScale(fitScale);
-    const newPos = {
-      x: containerWidth / 2 - centerX * newScale,
-      y: containerHeight / 2 - centerY * newScale,
-    };
+    const newPos = stagePosCentering({ x: centerX, y: centerY }, newScale);
     stage.to({
       scaleX: newScale,
       scaleY: newScale,
@@ -1152,10 +1162,9 @@ export default function FloorPlanCanvas({
   function zoomToContentPoint(pos) {
     const stage = stageRef.current;
     if (!stage) return;
-    clearViewFlip();
     setFollow(false);
     const newScale = clampScale(baseScale * POINT_FOCUS_ZOOM_MULT);
-    const newPos = { x: containerWidth / 2 - pos.x * newScale, y: containerHeight / 2 - pos.y * newScale };
+    const newPos = stagePosCentering(pos, newScale);
     stage.to({
       scaleX: newScale,
       scaleY: newScale,
@@ -1188,8 +1197,7 @@ export default function FloorPlanCanvas({
   function centerStageOn(pos, scale, duration) {
     const stage = stageRef.current;
     if (!stage) return;
-    clearViewFlip();
-    const newPos = { x: containerWidth / 2 - pos.x * scale, y: containerHeight / 2 - pos.y * scale };
+    const newPos = stagePosCentering(pos, scale);
     followTweenRef.current = true;
     stage.to({
       scaleX: scale,
@@ -1221,8 +1229,9 @@ export default function FloorPlanCanvas({
     const stage = stageRef.current;
     if (!followRef.current || !stage || followTweenRef.current) return;
     const scale = stage.scaleX();
-    const sx = pos.x * scale + stage.x();
-    const sy = pos.y * scale + stage.y();
+    const k = flipTargetRef.current === 180 ? -1 : 1; // mapa virado: tela = pos − conteúdo·escala
+    const sx = k * pos.x * scale + stage.x();
+    const sy = k * pos.y * scale + stage.y();
     const mx = containerWidth * ROBOT_FOLLOW_MARGIN;
     const my = containerHeight * ROBOT_FOLLOW_MARGIN;
     if (sx < mx || sx > containerWidth - mx || sy < my || sy > containerHeight - my) {
@@ -1634,7 +1643,7 @@ export default function FloorPlanCanvas({
   function handleWheel(e) {
     e.evt.preventDefault();
     const stage = e.target.getStage();
-    clearViewFlip();
+    const k = flipSign(); // mapa virado: as contas abaixo trocam de sinal
     const pointer = stage.getPointerPosition();
     if (!pointer) return;
     // Qualquer mudança de ZOOM (roda, pinça, reset — não pan/arrasto) some
@@ -1644,14 +1653,14 @@ export default function FloorPlanCanvas({
     setFollow(false);
     const oldScale = stage.scaleX();
     const pointTo = {
-      x: (pointer.x - stage.x()) / oldScale,
-      y: (pointer.y - stage.y()) / oldScale,
+      x: (k * (pointer.x - stage.x())) / oldScale,
+      y: (k * (pointer.y - stage.y())) / oldScale,
     };
     const direction = e.evt.deltaY > 0 ? -1 : 1;
     const newScale = clampScale(direction > 0 ? oldScale / ZOOM_STEP : oldScale * ZOOM_STEP);
     const newPos = {
-      x: pointer.x - pointTo.x * newScale,
-      y: pointer.y - pointTo.y * newScale,
+      x: pointer.x - k * pointTo.x * newScale,
+      y: pointer.y - k * pointTo.y * newScale,
     };
     stage.scale({ x: newScale, y: newScale });
     stage.position(newPos);
