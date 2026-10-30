@@ -75,6 +75,7 @@ pasta do `.exe` na VM. **Não estão no GitHub** (de propósito):
 | `route_log.json` | histórico de rotas | opcional |
 | `dock_shadow.jsonl` | registros do modo sombra (pallet empurrado) | opcional — leve se ainda estiver em observação |
 | `queue_state.json` | fila | **não** — ver seção 5 |
+| `backups/` | cópias automáticas do `calibration.json`/`users.json` (seção 11) | **não** — a VM começa as dela no 1º início |
 | `robot_known_hosts` | identidade do robô vista pelo SSH | **não** — a VM gera o dela na 1ª conexão |
 
 Sem `calibration.json`/`users.json`, o servidor cria tudo do zero (mapa de
@@ -110,6 +111,9 @@ opacidade da rota em 60%; 51 posições ocupadas (esse número muda com o uso).
 3. **IP fixo da VM** (reserva por MAC no DHCP ou estático). É o endereço do
    atalho dos tablets.
 4. **Firewall da VM**: entrada **TCP 8000**.
+4b. **Backup da pasta `C:\LIFTY\backups`** no backup normal das VMs da infra. O
+   LIFTY já guarda 30 dias de cópias ali (seção 11), mas no MESMO disco — se o
+   disco da VM se perder, elas vão junto.
 5. **Rotas de rede — o ponto mais arriscado**:
 
    | De → Para | Porta | Pra quê | Sem ela |
@@ -267,3 +271,28 @@ C:\LIFTY\nssm.exe start LIFTY-SERVICE
 3. Se a atualização mexeu em `robot-bridge/`: copiar o bridge novo pro robô
    (`scp` pro `~/lifty_turn_check_bridge.py`, com backup do anterior) e derrubar
    o processo antigo — a vigia sobe o novo sozinha.
+
+## 11. Backups automáticos e como restaurar
+
+O serviço copia `calibration.json` (mapa, ocupação, material de cada posição,
+grafo do robô) e `users.json` (contas) pra `C:\LIFTY\backups\`:
+
+- uma vez **ao iniciar** (`...-inicio.json`) e uma vez **por dia**
+  (`...-diario.json`, na virada do dia);
+- nome com data e hora, ex. `calibration-2026-10-30_080000-diario.json`;
+- guarda **30 dias**; os mais antigos são apagados sozinhos (~3 MB no total);
+- log: `Backup: dados copiados ...` (ou `Backup: falhou ...` — não derruba nada).
+
+**Restaurar** (assistência técnica — com o robô ocioso e a fila vazia):
+
+1. `C:\LIFTY\nssm.exe stop LIFTY-SERVICE`
+2. Guardar o arquivo atual (pode ser preciso voltar atrás):
+   `copy C:\LIFTY\calibration.json C:\LIFTY\calibration.antes-restaurar.json`
+3. Copiar o backup escolhido por cima, com o nome original:
+   `copy C:\LIFTY\backups\calibration-AAAA-MM-DD_HHMMSS-diario.json C:\LIFTY\calibration.json`
+4. `C:\LIFTY\nssm.exe start LIFTY-SERVICE` e F5 nos tablets.
+
+Atenção ao escolher: o backup `-inicio` mais recente pode já conter o problema
+(se o serviço foi reiniciado depois dele). Na dúvida, use o `-diario` do dia
+anterior. Restaurar `users.json` desfaz senhas trocadas e contas criadas depois
+da cópia — só se for esse o problema.

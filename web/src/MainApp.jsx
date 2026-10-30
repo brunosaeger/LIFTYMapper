@@ -16,7 +16,6 @@ import UsersPanel from './components/UsersPanel';
 import FloorPlanCanvas from './components/FloorPlanCanvas';
 import Toast from './components/Toast';
 import DevModeModal from './components/DevModeModal';
-import NoticeModal from './components/NoticeModal';
 import ManualViewer from './components/ManualViewer';
 import { useCalibration, lotCellName, displayCellName } from './hooks/useCalibration';
 import { useLiveState } from './hooks/useLiveState';
@@ -76,9 +75,14 @@ export default function MainApp({ user, onLogout }) {
   // pra ele em vez de mudar estado local direto (quem decide/dispara de
   // verdade é sempre o server.py, nunca o navegador).
   const {
-    currentRoute, pendingRoute, routeQueue, occupied, cancelPending, cancelPendingMessage, turnBlockedMessage, awaitingChargeMessage, postPickupUnloadMessage, robotCharging, robotBattery, robotReturningToCharge, robotStalledMessage, routePlanningMessage, robotCarrying, pendingUnloadDropoff, calibrationStamp, status: liveStatus,
-    enqueueRoutes, cancelCurrent, clearQueue, removeQueued, reorderQueue, setOccupiedMany, toggleOccupied, setLimitBreakerLease,
+    currentRoute, pendingRoute, routeQueue, occupied, palletMaterials, reservedPositions, cancelPending, cancelPendingMessage, turnBlockedMessage, awaitingChargeMessage, postPickupUnloadMessage, robotCharging, robotBattery, robotReturningToCharge, robotStalledMessage, routePlanningMessage, robotCarrying, pendingUnloadDropoff, calibrationStamp, status: liveStatus,
+    enqueueRoutes, cancelCurrent, clearQueue, removeQueued, reorderQueue, setOccupiedMany, setPalletMaterial, toggleOccupied, setLimitBreakerLease,
   } = useLiveState();
+  // Pincel do modo Marcação (ver OccupancyPanel): o material que o toque no
+  // mapa marca. Desde 2026-10-30 é o ÚNICO jeito de marcar (o X sem material
+  // saiu). 'erase' ("Remover marcação") ou nada escolhido = o toque esvazia a
+  // posição. Local do aparelho.
+  const [brushMaterial, setBrushMaterial] = useState(null); // null | 'wood' | 'blue' | 'erase'
   // Calibração editada em outro aparelho (ajuste do grafo, opacidade da
   // rota...) -> recarrega aqui também, sem F5.
   useEffect(() => { syncRemoteStamp(calibrationStamp); }, [calibrationStamp, syncRemoteStamp]);
@@ -220,6 +224,10 @@ export default function MainApp({ user, onLogout }) {
   const [mode, setMode] = useState('ptp');
   const modeRef = useRef(mode); // lido por handlers assíncronos (ver handleCloseUpZoomEnd)
   modeRef.current = mode; // 'edit' | 'ptp' | 'mark' | 'queue'
+  // Último modo de trabalho (Ponto a Ponto ou Marcação) — o "+" de um
+  // kanban volta pra ele ao ampliar (ver handleCloseUpZoomEnd).
+  const lastWorkModeRef = useRef('ptp');
+  if (mode === 'ptp' || mode === 'mark') lastWorkModeRef.current = mode;
   const [addTool, setAddTool] = useState(null); // null | 'point' | 'lot'
   const [pendingLotPrefix, setPendingLotPrefix] = useState('');
   const [selectedId, setSelectedId] = useState(null);
@@ -251,9 +259,16 @@ export default function MainApp({ user, onLogout }) {
   // ptp) e ao resetar o zoom (ver onCloseUpActivate passado pro
   // FloorPlanCanvas, chamado com null de dentro de handleResetView).
   const [activeCloseUpId, setActiveCloseUpId] = useState(null);
+  useEffect(() => {
+    if (!activeCloseUpId) setViewFlipped(false); // saiu do kanban: desvira
+  }, [activeCloseUpId]);
   // Banner "VISUALIZANDO: ROBÔ" — true enquanto o mapa segue o robô (tocou no
   // ícone dele; qualquer gesto de câmera solta, ver FloorPlanCanvas).
   const [robotFollowing, setRobotFollowing] = useState(false);
+  // Mapa virado 180° (TESTE, botão ao lado do VISUALIZANDO: KANBAN — ver
+  // FloorPlanCanvas "Girar a visualização"). Só deste aparelho; desfaz ao
+  // sair do kanban (lupa "−", outro zoom...) ou tocando de novo no botão.
+  const [viewFlipped, setViewFlipped] = useState(false);
   // "Visualizando o robô" (pedido do usuário, 2026-10-29): tocar no robô (ou
   // no painel ROBÔ do header) mostra o trajeto AO VIVO dele + banner com
   // status e origem → destino da tarefa atual, clicáveis. Diferente de
@@ -296,6 +311,25 @@ export default function MainApp({ user, onLogout }) {
   // estado React só serve pra disparar o efeito uma vez.
   const [invalidPulse, setInvalidPulse] = useState(null); // { name, id }
   const pulseIdRef = useRef(0);
+
+  // Marcação numa posição reservada por rota da fila/execução (ver server.py,
+  // _reserved_positions): não muda nada — pisca a posição e explica que é
+  // preciso cancelar/remover a tarefa antes.
+  function notifyReserved(name) {
+    const r = reservedPositions[name];
+    const route = r
+      ? (r.pickup ? displayCellName(r.pickup, lots, points) + ' → ' : 'devolução em ') + displayCellName(r.dropoff, lots, points)
+      : null;
+    showToast('Posição ' + displayCellName(name, lots, points) + ' reservada pela tarefa ' + (route || 'da fila')
+      + '. Cancele ou remova a tarefa da fila antes de mudar a marcação.', 'error');
+    triggerInvalidPulse(name);
+  }
+
+  // Resposta do servidor com posições recusadas (corrida: entrou na fila
+  // entre o toque e a gravação).
+  function reportBlocked(result) {
+    if (result && result.blocked && result.blocked.length) notifyReserved(result.blocked[0]);
+  }
 
   function triggerInvalidPulse(name, { silent = false } = {}) {
     if (!silent) playOnce(SOUND_FAILED_ROUTE, SOUND_FAILED_ROUTE_VOLUME);
@@ -380,27 +414,13 @@ export default function MainApp({ user, onLogout }) {
   // normal a alternância continua automática (primeiro clique = origem,
   // segundo = destino).
   const [activeSlot, setActiveSlot] = useState('pickup');
-  // Diferenciação de pallets (ver CONTEXT.md). Pedido do usuário
-  // (2026-10-29): nenhum vem marcado por padrão — o operador escolhe a cada
-  // tarefa (volta pra null depois de cada "Enviar"). Tarefa avulsa sem
-  // escolha é barrada com o aviso vermelho; em "Lotes em sequência" não
-  // trava (sem escolha vai madeira, trocável em cada barrinha) e o aviso
-  // amarelo aparece no 1º "Iniciar tarefas".
-  const [palletType, setPalletType] = useState(null); // null | 'wood' | 'blue'
-  // Aviso central com OK (NoticeModal) — local deste aparelho.
-  const [notice, setNotice] = useState(null); // { tone, text }
-  // "Iniciar tarefas" com sequência na lista: o 1º toque só avisa (amarelo),
-  // o seguinte envia. Volta a false quando a lista esvazia.
-  const [sequenceWarned, setSequenceWarned] = useState(false);
-  // "Pallet de cima": 2º andar do pallet azul de dois níveis (layer 3,
-  // altura configurável no editor). Só faz sentido com azul. Também NÃO é
-  // resetado por resetSelection — é preferência de sessão, igual palletType.
-  // Pedido do usuário (2026-10-05): a opção de marcar isso ficou fora da
-  // versão final (removida de PointToPointBar/StagedTasksPanel) — este
-  // estado fica sempre false agora, dormente, mas o restante da
-  // canalização (payload pro servidor, StagedTasksPanel) continua intacto
-  // caso a feature volte depois.
-  const [palletTop, setPalletTop] = useState(false);
+  // Diferenciação de pallets (ver CONTEXT.md): desde 2026-10-30 o Ponto a
+  // Ponto NÃO escolhe o pallet — cada tarefa usa o MATERIAL marcado na
+  // posição de origem (modo Marcação / entrega do robô, ver palletMaterials
+  // e materialForPickup). Na lista de envio ainda dá pra trocar o pallet de
+  // uma tarefa, e a marcação da posição muda junto (handleChangeStagedPallet).
+  // "Pallet de cima" (2º andar do azul) continua dormente: sempre false.
+  const palletTop = false;
 
   // "Tarefas aguardando envio" (ver StagedTasksPanel.jsx e CONTEXT.md):
   // "Enviar tarefa" não manda mais direto pro robô — a tarefa entra nesta
@@ -411,13 +431,10 @@ export default function MainApp({ user, onLogout }) {
   // mesmo pallet. Estado deste dispositivo só (não é compartilhado entre
   // tablets — nada disso existe no servidor até o "Iniciar").
   const [stagedUnits, setStagedUnits] = useState([]);
-  useEffect(() => {
-    if (!stagedUnits.length) setSequenceWarned(false);
-  }, [stagedUnits.length]);
   // Unidade sendo editada (tocar numa barrinha): a origem/destino dela vão
   // pra seleção do Ponto a Ponto (e pro mapa, ampliados), e "Enviar" vira
-  // "Salvar alterações". editPrevRef guarda as preferências de sessão
-  // (sequência/pallet) de antes, pra devolver ao sair da edição.
+  // "Salvar alterações". editPrevRef guarda o modo sequência de antes, pra
+  // devolver ao sair da edição.
   const [editingUnitId, setEditingUnitId] = useState(null);
   const editPrevRef = useRef(null);
   // "Visualizar tarefa": qual tarefa (índice dentro da unidade em edição) o
@@ -664,6 +681,35 @@ export default function MainApp({ user, onLogout }) {
     })));
   }
 
+  // Material do pallet que estará na origem quando a tarefa rodar: se uma
+  // tarefa ANTERIOR (`earlier`, na ordem de execução) entrega nessa posição,
+  // é o pallet dela; senão, o material marcado no mapa. null = posição sem
+  // material conhecido (marcação antiga, só com X).
+  function materialForPickup(pickup, earlier) {
+    for (let i = earlier.length - 1; i >= 0; i--) {
+      if (earlier[i].dropoff === pickup) return earlier[i].palletType;
+    }
+    return palletMaterials[pickup] || null;
+  }
+
+  // Preenche o palletType de cada tarefa nova a partir da origem. Devolve o
+  // nome da 1ª origem sem material (a tarefa não pode ir), ou null.
+  function fillMaterials(tasks, earlier) {
+    const chain = [...earlier];
+    for (const t of tasks) {
+      if (!t.palletType) t.palletType = materialForPickup(t.pickup, chain);
+      if (!t.palletType) return t.pickup;
+      chain.push(t);
+    }
+    return null;
+  }
+
+  function rejectNoMaterial(pickup) {
+    showToast('A origem ' + displayCellName(pickup, lots, points)
+      + ' não tem material marcado. Marque Madeira ou Azul no modo Marcação.', 'error');
+    triggerInvalidPulse(pickup);
+  }
+
   function occupancyAfter(pairs) {
     const set = new Set(occupied);
     for (const p of pairs) {
@@ -836,9 +882,14 @@ export default function MainApp({ user, onLogout }) {
   // "Visualizar tarefa" não trocam de modo. Idempotente (se o modo já mudou
   // por outro caminho nesse meio-tempo, não faz nada) — por isso lê o modo
   // pelo ref, não pelo valor do render que criou o handler.
+  //
+  // TESTE (pedido do usuário, 2026-10-30): abre o ÚLTIMO modo de trabalho
+  // usado antes de ampliar (Ponto a Ponto ou Marcação — lastWorkModeRef),
+  // não sempre o Ponto a Ponto. Mesmo momento da troca (fim do zoom), então
+  // o desempenho é o mesmo de antes. Pra reverter: setMode('ptp') de novo.
   function handleCloseUpZoomEnd(closeUp) {
     if (!closeUp || modeRef.current !== 'interaction') return;
-    setMode('ptp');
+    setMode(lastWorkModeRef.current);
     resetSelection({ keepRoute: true });
     setActiveCloseUpId(closeUp.id); // resetSelection zera o banner; religa pro mesmo Close Up
   }
@@ -1048,25 +1099,17 @@ export default function MainApp({ user, onLogout }) {
       handleSaveEdit();
       return;
     }
-    if (!palletType && !sequenceMode) {
-      setNotice({ tone: 'error', text: 'Selecione o tipo do pallet: Madeira ou Azul (Metal)' });
-      return;
-    }
-    const type = palletType || 'wood';
-    // palletType vai POR TAREFA (pedido do usuário, 2026-10-05) — o valor
-    // escolhido agora na barra vira só o ponto de partida de cada uma,
-    // editável depois individualmente (ver PalletSwatch/handleChangeStagedPallet).
-    const tasks = pickupNames.map((pickup, i) => ({ id: newStagedId('t'), pickup, dropoff: dropoffNames[i], palletType: type }));
+    // palletType vai POR TAREFA (pedido do usuário, 2026-10-05) e vem do
+    // material da origem (2026-10-30) — trocável depois em cada barrinha
+    // (ver PalletSwatch/handleChangeStagedPallet).
+    const tasks = pickupNames.map((pickup, i) => ({ id: newStagedId('t'), pickup, dropoff: dropoffNames[i], palletType: null }));
     const unitId = newStagedId('u');
     const unit = {
       id: unitId,
       // Só vira grupo (tracejado laranja, move junto) com sequência de verdade.
       groupKey: tasks.length > 1 ? unitId : null,
-      // Montada em "Lotes em sequência" (mesmo que de 1 tarefa só): pede o
-      // aviso amarelo no "Iniciar tarefas".
-      sequence: sequenceMode,
-      palletType: type,
-      palletTop: type === 'blue' && palletTop,
+      palletType: null,
+      palletTop,
       tasks,
     };
     const next = [...stagedUnits, unit];
@@ -1075,6 +1118,12 @@ export default function MainApp({ user, onLogout }) {
       rejectStaged(err, '');
       return;
     }
+    const missing = fillMaterials(tasks, flattenUnits(stagedUnits));
+    if (missing) {
+      rejectNoMaterial(missing);
+      return;
+    }
+    unit.palletType = tasks[0].palletType;
     setStagedUnits(next);
     showToast(
       tasks.length > 1
@@ -1083,7 +1132,6 @@ export default function MainApp({ user, onLogout }) {
       'info',
     );
     handleClearSelection();
-    setPalletType(null);
   }
 
   // Tocar numa barrinha: carrega a unidade na seleção do Ponto a Ponto
@@ -1123,17 +1171,12 @@ export default function MainApp({ user, onLogout }) {
     }
     setViewTask({ index, active: 'pickup', activeIndex: 0 });
     requestFocus(focusPickup);
-    if (!editingUnitId) editPrevRef.current = { sequenceMode, palletType, palletTop };
+    if (!editingUnitId) editPrevRef.current = { sequenceMode };
     setEditingUnitId(unitId);
     setSequenceMode(!!unit.groupKey);
     setPickupNames(unit.tasks.map((t) => t.pickup));
     setDropoffNames(unit.tasks.map((t) => t.dropoff));
     setActiveSlot('pickup');
-    // Carrega o pallet da tarefa ESPECÍFICA sendo vista (índice 0 na
-    // visualização de grupo inteiro) — cada uma pode ter um tipo
-    // diferente agora (pedido do usuário, 2026-10-05).
-    setPalletType(unit.tasks[index ?? 0].palletType);
-    setPalletTop(!!unit.palletTop);
   }
 
   // Banner: toca na origem ou no destino → mapa vai até o kanban daquele
@@ -1211,11 +1254,7 @@ export default function MainApp({ user, onLogout }) {
     // (o mapa fica onde está).
     setViewTask(null);
     setActiveCloseUpId(null);
-    if (prev) {
-      setSequenceMode(prev.sequenceMode);
-      setPalletType(prev.palletType);
-      setPalletTop(prev.palletTop);
-    }
+    if (prev) setSequenceMode(prev.sequenceMode);
   }
 
   function handleCancelEdit() {
@@ -1229,23 +1268,23 @@ export default function MainApp({ user, onLogout }) {
       return;
     }
     // Reaproveita o id das tarefas que já existiam (não reanima a barrinha à
-    // toa); só as novas de um grupo que cresceu ganham id novo. Mesma
-    // lógica pro palletType: reeditar origem/destino não deve apagar o
-    // pallet que cada tarefa já tinha individualmente (pedido do usuário,
-    // 2026-10-05) — só tarefa NOVA (grupo que cresceu) herda o valor
-    // escolhido agora na barra.
-    const tasks = pickupNames.map((pickup, i) => ({
-      id: editingUnit.tasks[i]?.id || newStagedId('t'),
-      pickup,
-      dropoff: dropoffNames[i],
-      palletType: editingUnit.tasks[i]?.palletType || palletType || 'wood',
-    }));
+    // toa); só as novas de um grupo que cresceu ganham id novo. O pallet
+    // também: mesma origem = mantém o que a tarefa já tinha (pode ter sido
+    // trocado na barrinha); origem nova = material da origem nova.
+    const tasks = pickupNames.map((pickup, i) => {
+      const old = editingUnit.tasks[i];
+      return {
+        id: old?.id || newStagedId('t'),
+        pickup,
+        dropoff: dropoffNames[i],
+        palletType: old && old.pickup === pickup ? old.palletType : null,
+      };
+    });
     const edited = {
       ...editingUnit,
       tasks,
       groupKey: tasks.length > 1 ? (editingUnit.groupKey || editingUnit.id) : null,
-      palletType: palletType || editingUnit.palletType,
-      palletTop: palletType === 'blue' && palletTop,
+      palletTop,
     };
     const next = stagedUnits.map((u) => (u.id === edited.id ? edited : u));
     const err = checkStagedChange(next, tasks.map((t) => t.id));
@@ -1253,6 +1292,12 @@ export default function MainApp({ user, onLogout }) {
       rejectStaged(err, 'Não dá pra salvar: ');
       return;
     }
+    const missing = fillMaterials(tasks, flattenUnits(stagedBeforeSelection));
+    if (missing) {
+      rejectNoMaterial(missing);
+      return;
+    }
+    edited.palletType = tasks[0].palletType;
     setStagedUnits(next);
     showToast(tasks.length > 1 ? 'Sequência atualizada.' : 'Tarefa atualizada: ' + routeLabel(tasks[0].pickup, tasks[0].dropoff), 'success');
     handleCancelEdit();
@@ -1292,12 +1337,38 @@ export default function MainApp({ user, onLogout }) {
   // Troca o pallet de UMA tarefa só dentro da unidade (pedido do usuário,
   // 2026-10-05: num grupo de "Lotes em sequência", cada tarefa pode ter um
   // pallet diferente — trocar o ícone de uma barrinha não mexe nas outras).
+  // Desde 2026-10-30 a marcação da posição muda junto: se a origem é um
+  // pallet que JÁ está lá (não um que uma tarefa anterior da lista vai
+  // entregar), o material dela no mapa vira o escolhido. E o mesmo pallet,
+  // levado adiante por tarefas seguintes da lista (origem = este destino),
+  // troca de tipo junto.
   function handleChangeStagedPallet(unitId, taskId, type) {
-    setStagedUnits((units) => units.map((u) => (
-      u.id === unitId
-        ? { ...u, tasks: u.tasks.map((t) => (t.id === taskId ? { ...t, palletType: type } : t)) }
-        : u
-    )));
+    const flat = flattenUnits(stagedUnits);
+    const idx = flat.findIndex((t) => t.taskId === taskId);
+    if (idx === -1) return;
+    const changed = new Set([taskId]);
+    let carried = flat[idx].dropoff;
+    for (let i = idx + 1; i < flat.length; i++) {
+      if (flat[i].pickup === carried) {
+        changed.add(flat[i].taskId);
+        carried = flat[i].dropoff;
+      } else if (flat[i].dropoff === carried) {
+        break; // outro pallet chegou nessa posição antes: a cadeia acaba
+      }
+    }
+    const pickup = flat[idx].pickup;
+    if (reservedPositions[pickup]) {
+      notifyReserved(pickup); // o pallet de lá já está comprometido com outra tarefa
+      return;
+    }
+    const deliveredEarlier = flat.slice(0, idx).some((t) => t.dropoff === pickup);
+    if (!deliveredEarlier && occupied.includes(pickup) && palletMaterials[pickup] !== type) {
+      setPalletMaterial([pickup], type).catch((e) => showToast('Erro ao mudar o material da posição: ' + e.message, 'error'));
+    }
+    setStagedUnits((units) => units.map((u) => ({
+      ...u,
+      tasks: u.tasks.map((t) => (changed.has(t.id) ? { ...t, palletType: type } : t)),
+    })));
   }
 
   // Disparo/avanço/sondagem de verdade (falar com o robô, decidir
@@ -1311,14 +1382,6 @@ export default function MainApp({ user, onLogout }) {
     const err = validateChain(flat);
     if (err) {
       rejectStaged(err, 'Ordem inválida: ');
-      return;
-    }
-    if (!sequenceWarned && stagedUnits.some((u) => u.sequence)) {
-      setSequenceWarned(true);
-      setNotice({
-        tone: 'warn',
-        text: 'Antes de iniciar a tarefa, verifique se os materiais dos pallets correspondem às posições marcadas em sequência',
-      });
       return;
     }
     // A lista inteira num envio só: o servidor valida a cadeia com ocupação
@@ -1551,6 +1614,8 @@ export default function MainApp({ user, onLogout }) {
         } : null}
         onFocusEndpoint={handleFocusEndpoint}
         wide={robotViewing || mode === 'ptp' || mode === 'queue' || mode === 'history'}
+        flipped={viewFlipped}
+        onToggleFlip={() => setViewFlipped((v) => !v)}
       />
       {/* cancelPendingMessage (esperando girar pra CANCELAR), turnBlockedMessage
           (esperando girar pra COMEÇAR uma rota nova), awaitingChargeMessage
@@ -1611,7 +1676,14 @@ export default function MainApp({ user, onLogout }) {
           view={view}
           occupiedNames={occupied}
           queueMarks={queueMarks}
-          onMarkOccupied={setOccupiedMany}
+          onMarkOccupied={(names, isOccupied) => setOccupiedMany(names, isOccupied).then(reportBlocked)
+            .catch((err) => showToast('Erro ao marcar: ' + err.message, 'error'))}
+          palletMaterials={palletMaterials}
+          reservedPositions={reservedPositions}
+          onReservedTouch={notifyReserved}
+          brushMaterial={mode === 'mark' ? (brushMaterial || 'erase') : null}
+          onMarkMaterial={(names, material) => setPalletMaterial(names, material).then(reportBlocked)
+            .catch((err) => showToast('Erro ao marcar o material: ' + err.message, 'error'))}
           markModeActive={mode === 'mark'}
           onToggleMarkMode={handleToggleMarkMode}
           ptpModeActive={mode === 'ptp'}
@@ -1638,6 +1710,8 @@ export default function MainApp({ user, onLogout }) {
           onRobotWarpChange={updateRobotWarp}
           onRobotFollowChange={setRobotFollowing}
           onRobotSelect={handleRobotSelect}
+          viewFlipped={viewFlipped}
+          onViewFlipChange={setViewFlipped}
           robotFocusRequest={robotFocusRequest}
         />
 
@@ -1708,8 +1782,6 @@ export default function MainApp({ user, onLogout }) {
               onClear={editingUnitId ? handleCancelEdit : handleClearSelection}
               onSend={handleStageSelection}
               editing={editingUnit ? (editingUnit.groupKey ? 'group' : 'single') : null}
-              palletType={palletType}
-              onPalletTypeChange={setPalletType}
               sequenceMode={sequenceMode}
               onToggleSequenceMode={handleToggleSequenceMode}
               activeSlot={activeSlot}
@@ -1753,7 +1825,18 @@ export default function MainApp({ user, onLogout }) {
         )}
         {mode === 'mark' && (
           <aside className="sidebar">
-            <OccupancyPanel onOpenManual={setManualPage} occupied={occupied} lots={lots} points={points} onToggle={toggleOccupied} />
+            <OccupancyPanel
+              onOpenManual={setManualPage}
+              occupied={occupied}
+              lots={lots}
+              points={points}
+              onToggle={(name) => (reservedPositions[name]
+                ? notifyReserved(name)
+                : toggleOccupied(name).catch((err) => showToast('Erro ao desmarcar: ' + err.message, 'error')))}
+              brushMaterial={brushMaterial}
+              palletMaterials={palletMaterials}
+              onBrushMaterialChange={setBrushMaterial}
+            />
           </aside>
         )}
         {mode === 'history' && (
@@ -1782,7 +1865,6 @@ export default function MainApp({ user, onLogout }) {
       <Toast toast={toast} />
       <ManualViewer target={manualPage} onClose={() => setManualPage(null)} />
       <DevModeModal open={devModalOpen} onSubmit={handleDevModalSubmit} onClose={handleDevModalClose} />
-      <NoticeModal notice={notice} onClose={() => setNotice(null)} />
     </div>
   );
 }

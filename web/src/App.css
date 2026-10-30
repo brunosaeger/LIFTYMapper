@@ -320,39 +320,6 @@
   font-weight: 600;
 }
 
-/* --- aviso central com OK (ver NoticeModal.jsx) --------------------------- */
-.notice-modal__backdrop { z-index: 2100; }
-
-.notice-modal {
-  width: 380px;
-  border-width: 2px;
-}
-.notice-modal--error { border-color: var(--state-error); background: #3a1416; }
-.notice-modal--warn { border-color: #facc15; background: #3a330a; }
-
-.notice-modal__text {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 700;
-  line-height: 1.4;
-  color: var(--text-primary);
-  text-align: center;
-}
-
-.notice-modal__actions { justify-content: center; }
-
-.notice-modal__ok {
-  min-width: 110px;
-  padding: 10px 18px;
-  border-radius: 6px;
-  font-size: 14px;
-  font-weight: 700;
-  border: none;
-  color: #fff;
-}
-.notice-modal--error .notice-modal__ok { background: var(--state-error); }
-.notice-modal--warn .notice-modal__ok { background: #facc15; color: #1a1a1a; }
-
 /* --- tela de login (ver LoginScreen.jsx) ----------------------------------
    Ao contrário do dev-modal (que fica SOBRE o app), esta ocupa a tela
    inteira — enquanto não há sessão, MainApp não chega a montar (ver
@@ -558,6 +525,21 @@
    no `.app` inteiro (mapa + sidebar) e pareceria puxado pra direita em
    relação ao mapa de verdade. Ajustável — usuário revisa ao vivo no
    tablet. */
+/* Faixas escuras sobre o mapa (status do robô, VISUALIZANDO, avisos): o
+   fundo é SEMPRE escuro translúcido, nos dois temas — então usam sempre as
+   cores vivas do escuro, não as versões escurecidas do tema claro (que
+   sumiam no fundo escuro). Variável CSS redefinida aqui vale pra tudo dentro. */
+.robot-status-banner,
+.closeup-status-banner,
+.cancel-pending-banner {
+  --accent-cyan: #2dd4bf;
+  --accent-amber: #f5a524;
+  --accent-orange: #f4610a;
+  --state-error: #f45b69;
+  --state-success: #4ade80;
+  --panel-base: #0e1116;
+}
+
 .closeup-status-banner {
   position: absolute;
   bottom: 130px; /* subido a pedido do usuário (era 84px) */
@@ -576,6 +558,33 @@
   white-space: nowrap;
   pointer-events: none;
 }
+
+/* Botão redondo de girar o mapa, colado à direita do banner (ver
+   CloseUpStatusBanner.jsx, onToggleFlip). Mesmo vidro escuro do banner. */
+.closeup-flip {
+  position: absolute;
+  left: calc(100% + 12px);
+  top: 50%;
+  transform: translateY(-50%);
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(15, 17, 20, 0.55);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  pointer-events: auto;
+}
+.closeup-flip svg { width: 24px; height: 24px; }
+.closeup-flip.is-active {
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+  background: rgba(15, 17, 20, 0.75);
+}
+.closeup-flip:active { transform: translateY(-50%) scale(0.94); }
 
 .closeup-status-banner__prefix {
   color: var(--accent-cyan); /* "azul mint vibrante" */
@@ -1904,6 +1913,36 @@
   color: var(--accent-cyan);
 }
 
+/* "Lotes em sequência" ligado: a instrução fica amarela. */
+.ptp-bar__hint--sequence {
+  color: var(--warn-text);
+}
+
+/* Sequência: 2+ origens e destino vazio — o slot de destino pulsa laranja
+   (mesmo "sonar" do Salvar alterações: só transform/opacity, leve). */
+.ptp-bar__slot.is-calling {
+  position: relative;
+  border-color: var(--accent-orange);
+}
+.ptp-bar__slot.is-calling::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  border: 2.5px solid var(--accent-orange);
+  opacity: 0;
+  pointer-events: none;
+  animation: slot-call 1.8s ease-out infinite;
+}
+@keyframes slot-call {
+  0%   { transform: scale(1, 1); opacity: 0.8; }
+  70%  { transform: scale(1.05, 1.28); opacity: 0; }
+  100% { transform: scale(1.05, 1.28); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ptp-bar__slot.is-calling::after { animation: none; }
+}
+
 .ptp-bar__sequence-warn {
   font-size: 12px;
   line-height: 1.4;
@@ -2042,6 +2081,39 @@
 .ptp-bar__send {
   border-color: var(--accent-cyan-dim);
   background: var(--accent-cyan-dim);
+}
+/* Tema claro: o ciano suave do botão quase sumia no bege — teal cheio com
+   texto branco, mesmo peso visual do botão no escuro. */
+:root[data-theme='light'] .ptp-bar__send {
+  border-color: #1f7a6f;
+  background: #1f7a6f;
+  color: #fff;
+}
+
+/* "Salvar alterações" (editando uma tarefa da lista de envio): pulso de
+   sonar leve — um contorno no formato/cor do botão que sai dele e some,
+   pra lembrar de salvar. Só transform/opacity (a placa de vídeo anima, não
+   redesenha a página nem o mapa) e só existe enquanto edita. */
+.ptp-bar__send.is-editing {
+  position: relative;
+}
+.ptp-bar__send.is-editing::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  border: 2.5px solid var(--accent-cyan);
+  opacity: 0;
+  pointer-events: none;
+  animation: save-sonar 2.4s ease-out infinite;
+}
+@keyframes save-sonar {
+  0%   { transform: scale(1, 1); opacity: 0.75; }
+  70%  { transform: scale(1.06, 1.5); opacity: 0; }
+  100% { transform: scale(1.06, 1.5); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ptp-bar__send.is-editing::after { animation: none; }
 }
 
 /* --- painel Fila (botão "índice" no mapa, ver .queue-toggle) ---------------
@@ -2651,6 +2723,48 @@
   transform: scale(0.92);
   opacity: 1;
 }
+
+/* "Tarefas aguardando envio": lembrete do material (pallet vem da marcação). */
+.staged-panel__material-check {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--warn-text);
+}
+
+/* Material do pallet no painel de Ocupação (ver OccupancyPanel.jsx). */
+.brush-panel { margin-bottom: 4px; }
+.brush-panel__note { margin-top: 6px; }
+.brush-panel__warn { margin-top: 6px; color: var(--warn-text); }
+/* "Remover marcação": abaixo das duas opções de material, largura toda. */
+.brush-erase { width: 100%; margin-top: 8px; }
+.brush-erase__icon {
+  width: 100%;
+  height: 40px; /* mesma altura das texturas acima (.ptp-bar__pallet-swatch) */
+  border-radius: 6px;
+  border: 1px solid var(--panel-line);
+  background: #2b2f36;
+  color: #c9ced6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.brush-erase__icon svg { width: 26px; height: 26px; }
+.occupancy-swatch {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-right: 8px;
+  border-radius: 3px;
+  background-size: cover;
+  background-position: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.occupancy-swatch.is-unknown { border: 1px dashed var(--text-muted); }
 
 .manual-viewer__backdrop {
   position: fixed;

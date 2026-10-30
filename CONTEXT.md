@@ -5441,3 +5441,75 @@ planejamento passando de 140 s, ou a vigia dos sensores. Sem o bridge não há a
   gerenciador de senhas do navegador do PC preenchia "33dev" na busca (e podia preencher a senha
   salva em "nova senha"). Olhinho (mostrar/esconder) na senha do novo usuário e em "nova senha" de
   cada um. Senhas existentes são só hash PBKDF2 — não há como mostrá-las.
+
+## Material do pallet por posição — a tarefa usa o material da origem (2026-10-30, AINDA NÃO VALIDADO EM CAMPO)
+Substitui "Pallet sem padrão no Ponto a Ponto" (29/10): saíram a escolha de pallet do Ponto a
+Ponto, o aviso vermelho/amarelo (`NoticeModal`, apagado) e o X sem material.
+- **Dados**: `palletMaterials` {nome: "wood"|"blue"} no `calibration.json`, só pra posição
+  ocupada — `_prune_pallet_materials` (em toda gravação via `_write_calibration`) apaga o material
+  de posição desocupada. `POST /api/occupied/material {names, material|null}`
+  (`set_pallet_material_many`): material = marca e ocupa; null = esvazia. O POST do editor
+  (`_save_calibration`) preserva `palletMaterials`. Vai no live-state.
+- **Robô**: `_apply_record_status` FINISHED marca o destino com o `palletType` da rota (posição
+  ocupada COM material); coleta desocupa a origem e o material sai junto.
+- **Marcação** (OccupancyPanel = pincel): Madeira / Azul / "Remover marcação" (X cinza). Nada
+  escolhido = remover. Tocar/arrastar aplica; começar numa posição que já tem o material a esvazia.
+  Fundo vivo do lote (`MATERIAL_FILL_ALPHA` 0,85) + textura no lugar do X (texturas reduzidas
+  uma vez pra 64 px; azul do mapa = `pallet-blue-map.jpg`, foto do usuário, recorte central do
+  painel do meio — os botões continuam com `pallet-blue.png`). X ainda aparece em ocupação SEM
+  material (marcação antiga) — o painel conta quantas.
+- **Ponto a Ponto** (`materialForPickup`/`fillMaterials` em MainApp): palletType de cada tarefa =
+  pallet que uma tarefa ANTERIOR da lista entrega naquela origem, senão o material marcado. Origem
+  sem material = tarefa recusada (toast + pulso). Edição: mesma origem mantém o pallet da tarefa,
+  origem nova pega o material. Na lista de envio ainda dá pra trocar o pallet: muda a marcação da
+  origem (se o pallet já está lá) e as tarefas seguintes que levam o mesmo pallet adiante. Lista
+  com tarefa = texto amarelo "Confira se os materiais dos pallets correspondem à sua posição."
+- Ícone do botão de Marcação = pallet (SVG Repo "pallet-solid"). Pontos avulsos desenhados 1,4x
+  (`POINT_MARKER_SIZE`).
+
+## Posições reservadas pela fila (2026-10-30)
+Origem/destino de rota atual (origem só até a coleta — `pickupCleared`), pendente, na fila e
+destino de devolução pendente (`_reserved_positions`, vai no live-state como
+`reservedPositions`). Os 3 POSTs de ocupação/material recusam essas posições
+(`Handler._reject_reserved`: arrasto misto grava só as livres e devolve `blocked`; tudo
+reservado = 409). Motivo: a rota leva o material CONGELADO no envio e não revalida a ocupação —
+mudar a marcação depois não muda a tarefa. No site: a posição pisca + toast "reservada pela
+tarefa X → Y. Cancele ou remova a tarefa da fila antes". Gravações internas (coleta/entrega do
+robô) não passam por essa trava.
+
+## Marcação pelo dedo no tablet (2026-10-30, corrigido)
+Com toque o Konva não dispara mouseenter ao arrastar — o pincel só pintava a 1ª célula no
+tablet. `handleTouchMove` acha a célula debaixo do dedo (`getIntersection` + atributo próprio
+`cellName` nos Groups de LotCell/PointMarker). Confirmado: sem a correção só "A"; com ela A..A4.
+
+## Backup automático (2026-10-30)
+`_backup_data`: copia `calibration.json` e `users.json` pra `backups/` (fora do git) ao iniciar
+(`-inicio`) e 1x por dia (`-diario`, `_refresh_daily_backup` no `_queue_tick`), com a trava de
+cada arquivo; guarda 30 dias. Restaurar é manual (assistência técnica) — passo a passo na seção
+11 do `MIGRACAO_VM_FINAL.md`.
+
+## Avisos antigos e ajustes de UX (2026-10-30)
+- `+` de kanban abre o ÚLTIMO modo de trabalho (Ponto a Ponto ou Marcação — `lastWorkModeRef`),
+  no mesmo momento de antes (fim do zoom). TESTE: reverter = `setMode('ptp')` em
+  `handleCloseUpZoomEnd`.
+- "Salvar alterações" (editando tarefa da lista) pulsa um sonar ciano (`save-sonar`, CSS só
+  transform/opacity). "Lotes em sequência": instrução amarela; slot DESTINO pulsa laranja com 2+
+  origens e destino vazio (`slot-call`).
+- Tema claro: paleta bege do usuário (#b0ab98 fundo, #c3bda8 painéis, #b8b29d realce, #4b413d /
+  #594e4a texto, borda #958f7c). Acentos no claro: mesmo matiz, forte mais escuro/fundo mais claro.
+  Faixas escuras sobre o mapa (robô, VISUALIZANDO, avisos) redefinem as variáveis de acento pras
+  cores vivas (o fundo delas é sempre escuro). `--warn-text` = amarelo dos avisos de texto.
+- **Mapa virado 180°** (TESTE): botão redondo ao lado do VISUALIZANDO: KANBAN. Só vista, só no
+  aparelho: o Stage gira em torno do centro da tela (`flipStageTo`); toque continua certo; nomes
+  e números de pé (`viewRotation`, `uprightTextProps`). Câmera automática (zoom em kanban/ponto,
+  seguir robô, roda, reset) desvira antes (`clearViewFlip`); sair do kanban desvira. Testado:
+  37 células espelhadas com erro 0 px, toque marca a célula certa. Os nomes de pé não foram
+  conferidos em campo (nenhum lote está com nome visível hoje).
+- Fullscreen do tablet: navegador não deixa um SITE entrar sozinho em tela cheia; solução
+  proposta (não feita) = instalar como app (`display: fullscreen` no manifest já existe) com o
+  endereço tratado como seguro no Chrome do tablet, ou navegador de quiosque.
+
+**Pendente antes de dar o projeto por fechado**: remarcar TODO o armazém com material (a ocupação
+foi zerada em testes em 30/10 — sem material nenhuma tarefa sai); validar em campo uma coleta
+azul e uma de madeira com a altura vinda da marcação; reinício real do robô com a vigia;
+atualizar os manuais (páginas do "i" ainda falam de X e de escolher pallet no Ponto a Ponto).

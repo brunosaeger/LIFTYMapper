@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 const POLL_INTERVAL_MS = 4000; // mesmo intervalo que a sondagem client-side usava antes
+const EMPTY_MATERIALS = {};
 
 async function jsonRequest(path, options) {
   const res = await fetch(path, options);
@@ -173,12 +174,26 @@ export function useLiveState() {
   // FloorPlanCanvas/commitOnRelease) — todos os nomes tocados no arrasto
   // viram uma única chamada de rede, não N chamadas sequenciais.
   const setOccupiedMany = useCallback(async (names, isOccupied) => {
-    await jsonRequest('/api/occupied/set-many', {
+    const result = await jsonRequest('/api/occupied/set-many', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ names, occupied: isOccupied }),
     });
     await refresh();
+    return result; // { ok, blocked } — blocked = reservadas pela fila, recusadas
+  }, [refresh]);
+
+  // "Modo pincel" do modo Marcação (RESERVA, ver server.py
+  // set_pallet_material_many): material 'wood'/'blue' marca o material e
+  // ocupa; null só tira o material.
+  const setPalletMaterial = useCallback(async (names, material) => {
+    const result = await jsonRequest('/api/occupied/material', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ names, material }),
+    });
+    await refresh();
+    return result; // { ok, blocked } — blocked = reservadas pela fila, recusadas
   }, [refresh]);
 
   // Clique manual num item já ocupado (painel Ocupação) — sempre desmarca
@@ -195,6 +210,11 @@ export function useLiveState() {
     pendingRoute: state.pendingRoute,
     routeQueue: state.routeQueue,
     occupied: state.occupied,
+    // { nome: 'wood' | 'blue' } — material marcado com o pincel (só visual por enquanto).
+    palletMaterials: state.palletMaterials || EMPTY_MATERIALS,
+    // { nome: { pickup, dropoff } } — posições de rotas da fila/execução: a
+    // Marcação não pode mexer nelas (ver server.py, _reserved_positions).
+    reservedPositions: state.reservedPositions || EMPTY_MATERIALS,
     emergency: state.emergency,
     // Ver comentário de cancelCurrent acima — true enquanto o servidor
     // espera uma janela segura pra girar antes de cancelar de verdade.
@@ -256,6 +276,7 @@ export function useLiveState() {
     setEmergency,
     setOccupied,
     setOccupiedMany,
+    setPalletMaterial,
     toggleOccupied,
   };
 }

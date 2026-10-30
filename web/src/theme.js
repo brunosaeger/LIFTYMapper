@@ -33,12 +33,12 @@ const DARK_COLORS = {
 // temas.
 const LIGHT_COLORS = {
   ...DARK_COLORS,
-  panelBase: '#f4f5f7',
-  panelRaised: '#ffffff',
-  panelRaisedHi: '#e9ebef',
-  panelLine: '#d3d7de',
-  textPrimary: '#1b1f27',
-  textMuted: '#5b6270',
+  panelBase: '#b0ab98',
+  panelRaised: '#c3bda8',
+  panelRaisedHi: '#b8b29d',
+  panelLine: '#958f7c',
+  textPrimary: '#4b413d',
+  textMuted: '#594e4a',
 };
 
 // Konva lê `COLORS.xxx` direto (não é CSS, não reage a re-render sozinho)

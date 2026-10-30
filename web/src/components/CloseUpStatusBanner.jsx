@@ -18,15 +18,38 @@
 // dele, ver RobotOverlay.jsx) — "VISUALIZANDO: ROBÔ / STATUS: ...", com o
 // status na mesma cor do brilho do ícone. Tem prioridade sobre `name` (tocar
 // no robô já solta o kanban).
-export default function CloseUpStatusBanner({ name, task, robot, onFocusEndpoint, wide }) {
+//
+// `onToggleFlip`/`flipped` (TESTE, 2026-10-30): botão redondo ao lado do
+// banner quando ele mostra um KANBAN — vira a visualização do mapa 180° (só
+// neste aparelho), pra quem marca do outro lado do lote. Ver FloorPlanCanvas,
+// "Girar a visualização".
+export default function CloseUpStatusBanner({ name, task, robot, onFocusEndpoint, wide, flipped, onToggleFlip }) {
   if (!name && !task && !robot) return null;
+  const showFlip = !!name && !robot && !!onToggleFlip;
 
   const className = 'closeup-status-banner'
     + (task ? ' closeup-status-banner--task' : '')
     + (wide ? ' closeup-status-banner--wide' : '');
 
   return (
-    <div className={className} aria-hidden={task ? undefined : 'true'}>
+    <div className={className} aria-hidden={task || showFlip ? undefined : 'true'}>
+      {showFlip && (
+        <button
+          type="button"
+          className={'closeup-flip' + (flipped ? ' is-active' : '')}
+          onClick={onToggleFlip}
+          aria-pressed={!!flipped}
+          aria-label={flipped ? 'Desvirar o mapa' : 'Virar o mapa (ver do outro lado)'}
+          title={flipped ? 'Desvirar o mapa' : 'Virar o mapa'}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M20 11a8 8 0 0 0-14.3-4.9L4 8" />
+            <path d="M4 4v4h4" />
+            <path d="M4 13a8 8 0 0 0 14.3 4.9L20 16" />
+            <path d="M20 20v-4h-4" />
+          </svg>
+        </button>
+      )}
       <div>
         {/* Prefixo em destaque (mint vibrante), resto do texto em branco —
             pedido explícito do usuário, ver CONTEXT.md. */}

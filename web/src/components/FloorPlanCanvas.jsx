@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Stage, Layer, Image as KonvaImage, Rect, Text, Line, Circle, Group, Transformer } from 'react-konva';
 import useImage from 'use-image';
 import Konva from 'konva';
@@ -6,6 +6,8 @@ import { useContainerSize } from '../hooks/useContainerSize';
 import { lotCellName, lotCellDisplayName } from '../hooks/useCalibration';
 import { COLORS, LOT_COLORS, hexToRgba, darkenHex, lightenHex } from '../theme';
 import RobotOverlay from './RobotOverlay';
+import woodTextureUrl from '../assets/pallet-wood.png';
+import blueTextureUrl from '../assets/pallet-blue-map.jpg';
 import topViewUrl from '../assets/floorplan.jpg';
 import isoViewUrl from '../assets/isometric.jpg';
 
@@ -31,6 +33,12 @@ const LOT_FILL_ALPHA = 0.32;
 // bateram entre 11.67px e 12.29px. Usando a média pra não ter que
 // redimensionar todo lote novo na mão.
 const DEFAULT_CELL_SIZE = 11.97;
+// Pontos avulsos (quadrados laranja): maiores que uma célula de lote, pedido
+// do usuário (2026-10-30) — só o desenho; a posição calibrada não muda.
+const POINT_MARKER_SIZE = DEFAULT_CELL_SIZE * 1.4;
+// Pincel "Remover marcação" do modo Marcação (MainApp manda 'erase' também
+// quando nenhum material está escolhido): tocar/arrastar esvazia a posição.
+const ERASE_BRUSH = 'erase';
 // Tamanho padrão de uma área de Close Up quando o desenvolvedor só clica
 // (sem arrastar) — mesma filosofia "generosa" do lote acima: um clique sem
 // movimento ainda cria algo útil (aqui, um quadrado que dá pra
@@ -161,6 +169,56 @@ function occupiedColor(mode, lot, state) {
 // opacity < 1 é usado pela prévia do gesto de "pintar arrastando" no modo
 // mark (ver FloorPlanCanvas) — o X aparece translúcido nos quadrados
 // tocados durante o arrasto, antes de soltar e confirmar de vez.
+// --- Material do pallet ("modo pincel" do modo Marcação, RESERVA) ----------
+// Posição ocupada com material conhecido: fundo da célula na cor viva do lote
+// (borda igual) e, dentro, a textura do pallet no lugar do X. As texturas
+// originais são grandes (a do azul tem 1600 px) — reduzidas UMA vez pra um
+// quadrado pequeno (recorte central) e reaproveitadas por todas as células.
+const MATERIAL_TEXTURE_PX = 64;
+const MATERIAL_INSET = 0.66; // lado da textura / lado da célula
+const MATERIAL_FILL_ALPHA = 0.85; // fundo "vivo" (o normal é LOT_FILL_ALPHA)
+
+// `crop` = quadrado [x, y, lado] em fração da imagem; sem ele, recorte central.
+// Azul no MAPA: foto própria de chapa pintada de azul (pedido do usuário,
+// 2026-10-30) — os botões de escolha continuam com pallet-blue.png. Recorte =
+// meio do painel central, sem as emendas escuras dos lados.
+const MATERIAL_TEXTURE_CROP = { blue: [0.27, 0.2, 0.4] };
+
+function textureSquare(img, crop) {
+  if (!img) return null;
+  const side = crop ? crop[2] * img.width : Math.min(img.width, img.height);
+  const sx = crop ? crop[0] * img.width : (img.width - side) / 2;
+  const sy = crop ? crop[1] * img.height : (img.height - side) / 2;
+  const canvas = document.createElement('canvas');
+  canvas.width = MATERIAL_TEXTURE_PX;
+  canvas.height = MATERIAL_TEXTURE_PX;
+  canvas.getContext('2d').drawImage(img, sx, sy, side, side, 0, 0, MATERIAL_TEXTURE_PX, MATERIAL_TEXTURE_PX);
+  return canvas;
+}
+
+function MaterialMark({ size, texture, outlineColor, opacity = 1 }) {
+  const s = size * MATERIAL_INSET;
+  const k = s / MATERIAL_TEXTURE_PX;
+  return (
+    <Rect
+      x={-s / 2}
+      y={-s / 2}
+      width={s}
+      height={s}
+      cornerRadius={2}
+      fillPatternImage={texture}
+      fillPatternRepeat="no-repeat"
+      fillPatternScaleX={k}
+      fillPatternScaleY={k}
+      stroke={outlineColor}
+      strokeWidth={1}
+      opacity={opacity}
+      listening={false}
+      perfectDrawEnabled={false}
+    />
+  );
+}
+
 function XMark({ size, color, outlineColor, opacity = 1 }) {
   const half = size / 2 - Math.max(1.5, size * 0.06);
   const strokeWidth = Math.max(2, size * 0.16);
@@ -193,6 +251,14 @@ function computeEffectiveOccupied(occupiedNames, touched, target) {
 // Subconjunto dos tocados que vai de fato MUDAR de estado (ignora quem já
 // estava no estado alvo) — é esse subconjunto que ganha o X translúcido;
 // mostrar prévia em cima de quem não vai mudar nada seria ruído visual.
+function previewMaterials(materials, touched, material) {
+  const next = { ...materials };
+  for (const name of touched) {
+    if (material) next[name] = material; else delete next[name];
+  }
+  return next;
+}
+
 function computeChangingPreview(occupiedNames, touched, target) {
   if (touched.size === 0 || target === null) return touched;
   const changing = new Set();
@@ -274,6 +340,24 @@ function useInvalidPulse(ringRef, active, pulseId) {
 // Contra-rotaciona/contra-escala igual ao rótulo de nome logo abaixo: o
 // lote pode estar girado/esticado no mapa, mas o número precisa continuar
 // legível na horizontal e do mesmo tamanho em qualquer lote.
+// Nome embaixo de célula/ponto: normalmente gira em torno do canto do texto
+// (comportamento de sempre). Com o mapa virado 180° (botão de girar do
+// VISUALIZANDO) gira +180 em torno do PRÓPRIO centro — continua no mesmo
+// lugar e fica de pé na tela. `rot` = giro do lote/ponto (sem o da vista).
+function uprightTextProps(x, y, width, height, rot, flip, sx = 1, sy = 1) {
+  if (!flip) return { x, y, rotation: -rot };
+  const a = (-rot * Math.PI) / 180;
+  const hx = (width / 2) * sx;
+  const hy = (height / 2) * sy;
+  return {
+    x: x + hx * Math.cos(a) - hy * Math.sin(a),
+    y: y + hx * Math.sin(a) + hy * Math.cos(a),
+    offsetX: width / 2,
+    offsetY: height / 2,
+    rotation: -rot + 180,
+  };
+}
+
 function SeqBadge({ seq, size, color, rotation = 0, scaleX = 1, scaleY = 1 }) {
   if (!seq) return null;
   const r = Math.max(7, size * 0.36);
@@ -370,7 +454,7 @@ function QueueMark({ number, size, rotation = 0, scaleX = 1, scaleY = 1, selecte
   );
 }
 
-function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNumber, queueNumber, isHovered, isOccupied, isPreviewing, showName, invalidPulseActive, invalidPulseId, onSelect, onChange, onHoverEnter, onHoverLeave, onPressStart }) {
+function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNumber, queueNumber, isHovered, isOccupied, isPreviewing, texture, showName, viewRotation = 0, invalidPulseActive, invalidPulseId, onSelect, onChange, onHoverEnter, onHoverLeave, onPressStart }) {
   const groupRef = useRef(null);
   const trRef = useRef(null);
   const pulseRingRef = useRef(null);
@@ -403,6 +487,7 @@ function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNu
     <>
       <Group
         ref={groupRef}
+        cellName={point.name}
         x={point.x}
         y={point.y}
         rotation={point.rotation}
@@ -425,13 +510,15 @@ function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNu
           width={size}
           height={size}
           cornerRadius={3}
-          fill={fill}
+          fill={texture ? hexToRgba(xColor, MATERIAL_FILL_ALPHA) : fill}
           stroke={stroke}
           strokeWidth={2}
         />
-        {isOccupied && <XMark size={size} color={xColor} outlineColor={stroke} opacity={isPreviewing ? 0.5 : 1} />}
-        <QueueMark number={queueNumber} size={size} rotation={point.rotation} selectedColor={isPickup || isDropoff ? xColor : null} />
-        <SeqBadge seq={seqNumber} size={size} color={stroke} rotation={point.rotation} />
+        {texture
+          ? <MaterialMark size={size} texture={texture} outlineColor={stroke} opacity={isPreviewing ? 0.5 : 1} />
+          : isOccupied && <XMark size={size} color={xColor} outlineColor={stroke} opacity={isPreviewing ? 0.5 : 1} />}
+        <QueueMark number={queueNumber} size={size} rotation={(point.rotation || 0) + viewRotation} selectedColor={isPickup || isDropoff ? xColor : null} />
+        <SeqBadge seq={seqNumber} size={size} color={stroke} rotation={(point.rotation || 0) + viewRotation} />
         {showName && (
         <Text
           text={point.displayName || point.name}
@@ -440,9 +527,7 @@ function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNu
           fill={COLORS.textPrimary}
           align="center"
           width={size * 4}
-          x={-size * 2}
-          y={size / 2 + 6}
-          rotation={-point.rotation}
+          {...uprightTextProps(-size * 2, size / 2 + 6, size * 4, 12, point.rotation || 0, viewRotation !== 0)}
           listening={false}
         />
         )}
@@ -477,7 +562,7 @@ function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNu
 // muda de fato. `themeKey` não é usado no corpo: existe só pra invalidar o
 // memo quando o tema claro/escuro troca (COLORS é mutado em lugar — os
 // COLORS.* lidos aqui dentro não aparecem em nenhuma prop).
-const LotCell = memo(function LotCell({ name, displayName, index, cellSize, fill, stroke, xColor, showName, isOccupied, isPreviewing, seqNumber, queueNumber, lotRotation, lotScaleX, lotScaleY, gestureActive, isHovered, isSelectedEndpoint, invalidPulseActive, invalidPulseId, onHoverEnter, onHoverLeave, onPressStart, themeKey }) {
+const LotCell = memo(function LotCell({ name, displayName, index, cellSize, fill, stroke, xColor, showName, isOccupied, isPreviewing, texture, vividFill, viewRotation = 0, seqNumber, queueNumber, lotRotation, lotScaleX, lotScaleY, gestureActive, isHovered, isSelectedEndpoint, invalidPulseActive, invalidPulseId, onHoverEnter, onHoverLeave, onPressStart, themeKey }) {
   const cellRef = useRef(null);
   const pulseRingRef = useRef(null);
   usePtpScale(cellRef, gestureActive ? ptpTargetScale(isHovered, isSelectedEndpoint) : 1);
@@ -486,6 +571,7 @@ const LotCell = memo(function LotCell({ name, displayName, index, cellSize, fill
   return (
     <Group
       ref={cellRef}
+      cellName={name}
       x={index * cellSize}
       y={0}
       onMouseEnter={gestureActive ? () => onHoverEnter(name) : undefined}
@@ -499,15 +585,17 @@ const LotCell = memo(function LotCell({ name, displayName, index, cellSize, fill
         width={cellSize}
         height={cellSize}
         cornerRadius={3}
-        fill={fill}
+        fill={texture ? vividFill : fill}
         stroke={stroke}
         strokeWidth={2}
       />
-      {isOccupied && <XMark size={cellSize} color={xColor} outlineColor={stroke} opacity={isPreviewing ? 0.5 : 1} />}
+      {texture
+        ? <MaterialMark size={cellSize} texture={texture} outlineColor={stroke} opacity={isPreviewing ? 0.5 : 1} />
+        : isOccupied && <XMark size={cellSize} color={xColor} outlineColor={stroke} opacity={isPreviewing ? 0.5 : 1} />}
       {/* Destino de tarefa na fila (ver QueueMark). Se a célula também é
           origem/destino da rota em destaque, o destaque (cyan/âmbar) continua
           valendo e o número fica por cima na cor dele, sem o quadrado laranja. */}
-      <QueueMark number={queueNumber} size={cellSize} rotation={lotRotation} scaleX={lotScaleX} scaleY={lotScaleY} selectedColor={isSelectedEndpoint ? xColor : null} />
+      <QueueMark number={queueNumber} size={cellSize} rotation={lotRotation + viewRotation} scaleX={lotScaleX} scaleY={lotScaleY} selectedColor={isSelectedEndpoint ? xColor : null} />
       {/* Triângulo de "facing": só na célula 1 (índice 0, a sem numeração)
           de cada LOTE — pontos avulsos ("lotes coringa") são um componente
           totalmente separado (PointMarker) e nunca passam por aqui, então
@@ -527,7 +615,7 @@ const LotCell = memo(function LotCell({ name, displayName, index, cellSize, fill
         seq={seqNumber}
         size={cellSize}
         color={stroke}
-        rotation={lotRotation}
+        rotation={lotRotation + viewRotation}
         scaleX={lotScaleX}
         scaleY={lotScaleY}
       />
@@ -539,9 +627,7 @@ const LotCell = memo(function LotCell({ name, displayName, index, cellSize, fill
           fill={COLORS.textPrimary}
           align="center"
           width={cellSize * 2}
-          x={-cellSize}
-          y={cellSize / 2 + 4}
-          rotation={-lotRotation}
+          {...uprightTextProps(-cellSize, cellSize / 2 + 4, cellSize * 2, 11, lotRotation, viewRotation !== 0, 1 / lotScaleX, 1 / lotScaleY)}
           scaleX={1 / lotScaleX}
           scaleY={1 / lotScaleY}
           listening={false}
@@ -558,7 +644,7 @@ const LotCell = memo(function LotCell({ name, displayName, index, cellSize, fill
 // única unidade arrastável/rotacionável/redimensionável. Em Ponto a Ponto,
 // cada célula tem sua própria animação de hover (ver LotCell) — a seleção em
 // si acontece ao soltar o mouse/dedo, tratada no Stage.
-function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames, seqOverride, queueMarks = EMPTY_MARKS, hoverName, occupiedNames, previewingNames, invalidPulseName, invalidPulseId, onSelectLot, onHoverEnter, onHoverLeave, onPressStart, onChange, isPreview }) {
+function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames, seqOverride, queueMarks = EMPTY_MARKS, hoverName, occupiedNames, previewingNames, materials = EMPTY_MARKS, textures, viewRotation = 0, invalidPulseName, invalidPulseId, onSelectLot, onHoverEnter, onHoverLeave, onPressStart, onChange, isPreview }) {
   const groupRef = useRef(null);
   const trRef = useRef(null);
   const editable = mode === 'edit' && !isPreview;
@@ -623,6 +709,7 @@ function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames,
             : null;
           const { fill, stroke } = lotCellColors(mode, lot, { isSelected, isPickup, isDropoff });
           const xColor = occupiedColor(mode, lot, { isSelected, isPickup, isDropoff });
+          const material = occupiedNames.includes(name) ? materials[name] : null;
           return (
             <LotCell
               key={i}
@@ -633,6 +720,8 @@ function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames,
               fill={fill}
               stroke={stroke}
               xColor={xColor}
+              texture={(material && textures && textures[material]) || null}
+              vividFill={hexToRgba(xColor, MATERIAL_FILL_ALPHA)}
               showName={lot.namesVisible || isPreview}
               isOccupied={occupiedNames.includes(name)}
               isPreviewing={!!previewingNames && previewingNames.has(name)}
@@ -640,7 +729,8 @@ function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames,
               invalidPulseId={invalidPulseId}
               seqNumber={seqNumber}
               queueNumber={queueMarks[name] || null}
-              lotRotation={lot.rotation}
+              lotRotation={lot.rotation || 0}
+              viewRotation={viewRotation}
               lotScaleX={lot.scaleX}
               lotScaleY={lot.scaleY}
               gestureActive={gestureActive}
@@ -792,6 +882,11 @@ export default function FloorPlanCanvas({
   queueMarks = EMPTY_MARKS,
   occupiedNames,
   onMarkOccupied,
+  palletMaterials = EMPTY_MARKS,
+  brushMaterial = null, // 'wood' | 'blue' | ERASE_BRUSH (modo Marcação) | null (outros modos)
+  onMarkMaterial,
+  reservedPositions = EMPTY_MARKS, // posições de rotas da fila/execução — a Marcação pula
+  onReservedTouch,
   markModeActive,
   onToggleMarkMode,
   ptpModeActive,
@@ -822,6 +917,8 @@ export default function FloorPlanCanvas({
   // Toque no painel do robô no header: número que muda a cada pedido.
   robotFocusRequest,
   onRobotSelect,
+  viewFlipped = false, // mapa virado 180° (botão ao lado do VISUALIZANDO) — só vista
+  onViewFlipChange,
 }) {
   const containerRef = useRef(null);
   const { width: containerWidth, height: containerHeight } = useContainerSize(containerRef);
@@ -846,6 +943,7 @@ export default function FloorPlanCanvas({
   const [stageScale, setStageScale] = useState(0); // 0 = ainda não inicializado
   const [stagePos, setStagePos] = useState({ x: 0, y: 0 });
   const stageRef = useRef(null);
+  const viewRotation = viewFlipped ? 180 : 0; // ver "Girar a visualização"
   // Handler mais recente de "o zoom até um Close Up terminou" (ver MainApp). Em
   // ref porque é chamado ~0,35s depois do toque, de dentro do onFinish.
   const zoomEndRef = useRef(onCloseUpZoomEnd);
@@ -874,8 +972,77 @@ export default function FloorPlanCanvas({
   // vista aparece. Ação pontual (um clique), não um gesto de alta
   // frequência como o pinça/roda — setState direto é suficiente aqui, sem
   // precisar do caminho imperativo do Konva.
+  // --- Girar a visualização 180° (botão ao lado do VISUALIZANDO) ------------
+  // TESTE (pedido do usuário, 2026-10-30): operador que fica do outro lado do
+  // lote vira o mapa pra marcar "de frente". Só VISTA, só neste aparelho: o
+  // Stage inteiro gira em torno do centro da tela — planta, lotes, rotas,
+  // robô e grafo giram juntos e continuam alinhados; nenhum dado muda, e o
+  // toque continua certo (o Konva desconta a rotação no hit test). Textos
+  // ficam de pé (viewRotation nos nomes/números). Os movimentos automáticos
+  // de câmera (zoom em kanban/ponto, seguir o robô, roda, reset) fazem conta
+  // sem giro — desfazem o giro na hora (clearViewFlip) antes de mexer.
+  const FLIP_DURATION_MS = 450;
+  const flipAnimRef = useRef(null);
+  function flipStageTo(targetDeg, animate) {
+    const stage = stageRef.current;
+    if (!stage) return;
+    cancelAnimationFrame(flipAnimRef.current);
+    const from = stage.rotation();
+    if (from === targetDeg) return;
+    const s = stage.scaleX();
+    const C = { x: containerWidth / 2, y: containerHeight / 2 };
+    // ponto de conteúdo que está no centro da tela agora: c = R(-from)(C - pos) / s
+    const r0 = (-from * Math.PI) / 180;
+    const dx = (C.x - stage.x()) / s;
+    const dy = (C.y - stage.y()) / s;
+    const cx = dx * Math.cos(r0) - dy * Math.sin(r0);
+    const cy = dx * Math.sin(r0) + dy * Math.cos(r0);
+    const posFor = (deg) => {
+      const r = (deg * Math.PI) / 180;
+      return { x: C.x - (cx * Math.cos(r) - cy * Math.sin(r)) * s, y: C.y - (cx * Math.sin(r) + cy * Math.cos(r)) * s };
+    };
+    const finish = () => {
+      const pos = posFor(targetDeg);
+      stage.rotation(targetDeg);
+      stage.position(pos);
+      stage.batchDraw();
+      setStagePos(pos);
+    };
+    if (!animate) {
+      finish();
+      return;
+    }
+    const t0 = performance.now();
+    const step = (now) => {
+      const t = Math.min(1, (now - t0) / FLIP_DURATION_MS);
+      if (t >= 1) {
+        finish();
+        return;
+      }
+      const e = t < 0.5 ? 2 * t * t : 1 - ((-2 * t + 2) ** 2) / 2; // ease in-out
+      const deg = from + (targetDeg - from) * e;
+      stage.rotation(deg);
+      stage.position(posFor(deg));
+      stage.batchDraw();
+      flipAnimRef.current = requestAnimationFrame(step);
+    };
+    flipAnimRef.current = requestAnimationFrame(step);
+  }
+  useEffect(() => {
+    flipStageTo(viewRotation, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewRotation]);
+  function clearViewFlip() {
+    const stage = stageRef.current;
+    if (stage && stage.rotation() !== 0) {
+      flipStageTo(0, false);
+      onViewFlipChange?.(false);
+    }
+  }
+
   function handleResetView() {
     if (!baseScale) return;
+    clearViewFlip();
     setFollow(false);
     onResetViewClick?.(); // só o clique no botão ZOOM - (ver MainApp.jsx)
     // Voltar pro enquadramento geral não é mais "olhar de perto" nenhum
@@ -902,6 +1069,7 @@ export default function FloorPlanCanvas({
   function handleCloseUpClick(closeUp) {
     const stage = stageRef.current;
     if (!stage || !image || !containerWidth || !containerHeight) return;
+    clearViewFlip();
     setFollow(false);
     // Banner "VISUALIZANDO: KANBAN X" (ver CloseUpStatusBanner.jsx) — avisa
     // MainApp.jsx já no toque, sem esperar a animação de zoom terminar.
@@ -984,6 +1152,7 @@ export default function FloorPlanCanvas({
   function zoomToContentPoint(pos) {
     const stage = stageRef.current;
     if (!stage) return;
+    clearViewFlip();
     setFollow(false);
     const newScale = clampScale(baseScale * POINT_FOCUS_ZOOM_MULT);
     const newPos = { x: containerWidth / 2 - pos.x * newScale, y: containerHeight / 2 - pos.y * newScale };
@@ -1019,6 +1188,7 @@ export default function FloorPlanCanvas({
   function centerStageOn(pos, scale, duration) {
     const stage = stageRef.current;
     if (!stage) return;
+    clearViewFlip();
     const newPos = { x: containerWidth / 2 - pos.x * scale, y: containerHeight / 2 - pos.y * scale };
     followTweenRef.current = true;
     stage.to({
@@ -1185,7 +1355,14 @@ export default function FloorPlanCanvas({
   //
   // paintPathRef existe porque commitOnRelease precisa do valor mais
   // recente de forma síncrona (mesmo motivo do lotDraftRef, ver acima).
+  const [woodTextureImg] = useImage(woodTextureUrl);
+  const [blueTextureImg] = useImage(blueTextureUrl);
+  const materialTextures = useMemo(
+    () => ({ wood: textureSquare(woodTextureImg), blue: textureSquare(blueTextureImg, MATERIAL_TEXTURE_CROP.blue) }),
+    [woodTextureImg, blueTextureImg],
+  );
   const isPaintingRef = useRef(false);
+  const reservedWarnedRef = useRef(new Set()); // reservadas já avisadas no gesto atual
   const paintTargetRef = useRef(null); // true=vai ocupar, false=vai desocupar, null=ainda não decidido
   const paintPathRef = useRef([]); // ordem de entrada, sem repetição — permite truncar ao retraçar
   const [paintPreview, setPaintPreview] = useState(new Set());
@@ -1204,10 +1381,24 @@ export default function FloorPlanCanvas({
 
   function registerPaintTouch(name) {
     if (!isPaintingRef.current) return;
+    // Reservada por rota da fila/execução: não entra no arrasto (as outras
+    // do mesmo gesto seguem); avisa uma vez por posição por gesto.
+    if (mode === 'mark' && reservedPositions[name]) {
+      if (!reservedWarnedRef.current.has(name)) {
+        reservedWarnedRef.current.add(name);
+        onReservedTouch?.(name);
+      }
+      return;
+    }
     const path = paintPathRef.current;
     if (path[path.length - 1] === name) return; // já é o topo do caminho, nada muda
     if (paintTargetRef.current === null) {
-      const target = !occupiedNames.includes(name);
+      // Pincel: true = aplica o material, false = esvazia (borracha, ou
+      // começou numa posição que já tem esse material). Sem pincel:
+      // ocupar/desocupar, como sempre.
+      const target = brushMaterial === ERASE_BRUSH ? false
+        : brushMaterial ? palletMaterials[name] !== brushMaterial
+        : !occupiedNames.includes(name);
       paintTargetRef.current = target;
       setPaintTarget(target);
     }
@@ -1217,6 +1408,7 @@ export default function FloorPlanCanvas({
   }
 
   function startPaintGesture() {
+    reservedWarnedRef.current = new Set();
     isPaintingRef.current = true;
     setIsPaintingActive(true);
     paintTargetRef.current = null;
@@ -1278,7 +1470,8 @@ export default function FloorPlanCanvas({
     finishCloseUpDrag();
     if (mode === 'mark') {
       if (paintPathRef.current.length > 0 && paintTargetRef.current !== null) {
-        onMarkOccupied(paintPathRef.current, paintTargetRef.current);
+        if (brushMaterial) onMarkMaterial(paintPathRef.current, paintTargetRef.current && brushMaterial !== ERASE_BRUSH ? brushMaterial : null);
+        else onMarkOccupied(paintPathRef.current, paintTargetRef.current);
       }
       resetPaintGesture();
       setHoveredName(null);
@@ -1441,6 +1634,7 @@ export default function FloorPlanCanvas({
   function handleWheel(e) {
     e.evt.preventDefault();
     const stage = e.target.getStage();
+    clearViewFlip();
     const pointer = stage.getPointerPosition();
     if (!pointer) return;
     // Qualquer mudança de ZOOM (roda, pinça, reset — não pan/arrasto) some
@@ -1476,10 +1670,29 @@ export default function FloorPlanCanvas({
   const pinchActiveRef = useRef(false);
   const [pinchPulseId, setPinchPulseId] = useState(0);
 
+  // Célula/ponto debaixo do dedo. Com o dedo o Konva não dispara
+  // mouseenter ao arrastar (só com mouse) — sem isso o pincel do modo
+  // Marcação só pintava o 1º quadrado no tablet. `cellName` é um atributo
+  // próprio no Group de LotCell/PointMarker.
+  function cellNameUnderPointer(stage) {
+    const pointer = stage.getPointerPosition();
+    let node = pointer ? stage.getIntersection(pointer) : null;
+    while (node && node !== stage) {
+      const name = node.getAttr('cellName');
+      if (name) return name;
+      node = node.getParent();
+    }
+    return null;
+  }
+
   function handleTouchMove(e) {
     const touches = e.evt.touches;
     if (touches.length < 2) {
       pinchActiveRef.current = false;
+      if (mode === 'mark' && isPaintingRef.current) {
+        const name = cellNameUnderPointer(e.target.getStage());
+        if (name) registerPaintTouch(name);
+      }
       handleStageMouseMove(e);
       return;
     }
@@ -1501,8 +1714,14 @@ export default function FloorPlanCanvas({
   // andamento (ver registerPaintTouch) — os marcadores usam isso no lugar
   // de occupiedNames crua, então já mostram o resultado antes mesmo do
   // commit real acontecer ao soltar.
+  // Pincel: a prévia mexe no material (aplicar material ocupa; tirar esvazia
+  // a posição — não existe mais ocupação sem material marcada à mão).
+  const brushing = !!brushMaterial && paintTarget !== null && paintPreview.size > 0;
   const effectiveOccupied = computeEffectiveOccupied(occupiedNames, paintPreview, paintTarget);
-  const previewingNames = computeChangingPreview(occupiedNames, paintPreview, paintTarget);
+  const effectiveMaterials = brushing ? previewMaterials(palletMaterials, paintPreview, paintTarget ? brushMaterial : null) : palletMaterials;
+  const previewingNames = brushing
+    ? new Set([...paintPreview].filter((n) => (paintTarget ? palletMaterials[n] !== brushMaterial : occupiedNames.includes(n))))
+    : computeChangingPreview(occupiedNames, paintPreview, paintTarget);
 
   return (
     <div
@@ -1555,8 +1774,10 @@ export default function FloorPlanCanvas({
         aria-label={markModeActive ? 'Sair do modo de marcação de ocupação' : 'Entrar no modo de marcação de ocupação'}
         title="Marcar/desmarcar ocupação"
       >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M6 6l12 12M18 6L6 18" />
+        {/* Pallet (ícone "pallet-solid" do SVG Repo, escolhido pelo usuário) —
+            a marcação agora é por material do pallet, não mais o X. */}
+        <svg viewBox="0 0 32 32" fill="currentColor">
+          <path d="M 6.125 5 L 6 5.84375 L 4 19.84375 L 4 27 L 10 27 L 10 25 L 22 25 L 22 27 L 28 27 L 28 19.84375 L 26 5.84375 L 25.875 5 Z M 7.875 7 L 9.9375 7 L 9.0625 19 L 6.15625 19 Z M 11.9375 7 L 15 7 L 15 19 L 11.0625 19 Z M 17 7 L 20.0625 7 L 20.9375 19 L 17 19 Z M 22.0625 7 L 24.125 7 L 25.84375 19 L 22.9375 19 Z M 6 21 L 26 21 L 26 25 L 24 25 L 24 23 L 8 23 L 8 25 L 6 25 Z" />
         </svg>
       </button>
       <button
@@ -1637,6 +1858,9 @@ export default function FloorPlanCanvas({
                 hoverName={hoveredName}
                 occupiedNames={effectiveOccupied}
                 previewingNames={previewingNames}
+                materials={effectiveMaterials}
+                textures={materialTextures}
+                viewRotation={viewRotation}
                 invalidPulseName={invalidPulseName}
                 invalidPulseId={invalidPulseId}
                 onSelectLot={onSelectLot}
@@ -1655,7 +1879,7 @@ export default function FloorPlanCanvas({
               <PointMarker
                 key={p.id}
                 point={{ ...p, x: p.x * image.width, y: p.y * image.height }}
-                size={DEFAULT_CELL_SIZE}
+                size={POINT_MARKER_SIZE}
                 mode={mode}
                 isSelected={p.id === selectedId}
                 isPickup={pickupNames.includes(p.name)}
@@ -1670,7 +1894,9 @@ export default function FloorPlanCanvas({
                 isHovered={hoveredName === p.name}
                 isOccupied={effectiveOccupied.includes(p.name)}
                 isPreviewing={previewingNames.has(p.name)}
+                texture={(effectiveOccupied.includes(p.name) && materialTextures[effectiveMaterials[p.name]]) || null}
                 showName={!!p.namesVisible}
+                viewRotation={viewRotation}
                 invalidPulseActive={p.name === invalidPulseName}
                 invalidPulseId={invalidPulseId}
                 onSelect={onSelectPoint}

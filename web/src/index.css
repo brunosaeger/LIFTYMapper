@@ -16,6 +16,9 @@
   --text-muted: #8a93a3;
   --state-error: #f45b69;
   --state-success: #4ade80;
+  /* Texto de aviso "amarelo" sobre os painéis (ex. lembrete do material na
+     lista de envio) — no claro vira um amarelo escuro, senão some no bege. */
+  --warn-text: #facc15;
 
   color-scheme: dark;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
@@ -33,13 +36,31 @@
    painel (`.toolbar`, `.sidebar`, já usam `--panel-line`) ganham contraste
    de graça aqui, sem precisar de CSS extra — só o valor do token muda de
    "quase invisível no escuro" pra "cinza visível no claro".*/
+/* Paleta do claro (pedido do usuário, 2026-10-30): tons bege/terra, mesma
+   hierarquia do escuro — fundo #b0ab98, painéis (toolbar/menu/janelas) no
+   mais claro #c3bda8, realce #b8b29d, texto nos dois escuros (#4b413d
+   principal, #594e4a secundário). Borda derivada (#958f7c) pra continuar
+   visível sobre o bege.
+   Acentos/estado: MESMO matiz do escuro (reconhecimento: ciano = origem,
+   âmbar = destino...), só a luminosidade inverte pro bege — o "forte" (texto,
+   borda) escurece pra contrastar, o "-dim" (fundo de botão) clareia pra o
+   texto escuro aparecer em cima. O mapa (Konva, theme.js) não muda. */
 :root[data-theme='light'] {
-  --panel-base: #f4f5f7;
-  --panel-raised: #ffffff;
-  --panel-raised-hi: #e9ebef;
-  --panel-line: #d3d7de;
-  --text-primary: #1b1f27;
-  --text-muted: #5b6270;
+  --panel-base: #b0ab98;
+  --panel-raised: #c3bda8;
+  --panel-raised-hi: #b8b29d;
+  --panel-line: #958f7c;
+  --text-primary: #4b413d;
+  --text-muted: #594e4a;
+  --warn-text: #7a5a00;
+  --accent-cyan: #0b6158;
+  --accent-cyan-dim: #8cc0b4;
+  --accent-amber: #8a5300;
+  --accent-amber-dim: #d8b679;
+  --accent-orange: #a33f06;
+  --accent-orange-dim: #dba57f;
+  --state-error: #a8231b;
+  --state-success: #1d6b3a;
 
   color-scheme: light;
 }

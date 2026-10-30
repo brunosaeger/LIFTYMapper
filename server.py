@@ -49,6 +49,7 @@ import http.server
 import json
 import math
 import secrets
+import shutil
 import socket
 import sys
 import threading
@@ -404,6 +405,7 @@ QUEUE_EMERGENCY_PATH = "/api/queue/emergency"
 DEV_LIMIT_BREAKER_PATH = "/api/dev/limit-breaker"
 OCCUPIED_SET_PATH = "/api/occupied/set"
 OCCUPIED_SET_MANY_PATH = "/api/occupied/set-many"
+PALLET_MATERIAL_PATH = "/api/occupied/material"
 PALLET_HEIGHTS_PATH = "/api/pallet-heights"
 
 # --- cliente do dispatch service do robô (porta de src/api/lifty.js) ------
@@ -2122,7 +2124,47 @@ def _read_calibration():
 
 
 def _write_calibration(data):
+    _prune_pallet_materials(data)
     CALIBRATION_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# --- Material do pallet por posição (modo Marcação, 2026-10-30) ------------
+# `palletMaterials` {nome: "wood"|"blue"} no calibration.json. Marcado no modo
+# Marcação (pincel de material — não existe mais o X sem material) e
+# automaticamente quando o robô ENTREGA um pallet (material da tarefa, ver
+# _apply_record_status). O Ponto a Ponto não escolhe mais o pallet: a tarefa
+# usa o material da posição de origem. Só existe pra posição ocupada —
+# desocupar por qualquer caminho (pincel, painel, robô retirou o pallet) apaga
+# o material junto (_prune_pallet_materials, em toda gravação de ocupação).
+PALLET_MATERIALS = ("wood", "blue")
+
+
+def _prune_pallet_materials(data):
+    materials = data.get("palletMaterials")
+    if not isinstance(materials, dict):
+        data.pop("palletMaterials", None)
+        return
+    occupied = set(data.get("occupied") or [])
+    data["palletMaterials"] = {n: m for n, m in materials.items() if n in occupied and m in PALLET_MATERIALS}
+
+
+def set_pallet_material_many(names, material):
+    """material "wood"/"blue": marca o material E ocupa a posição (tem pallet
+    ali). None: esvazia a posição (tira material e ocupação)."""
+    with CALIBRATION_LOCK:
+        data = _read_calibration()
+        materials = dict(data.get("palletMaterials") or {})
+        occupied = set(data.get("occupied") or [])
+        for name in names:
+            if material:
+                materials[name] = material
+                occupied.add(name)
+            else:
+                materials.pop(name, None)
+                occupied.discard(name)
+        data["palletMaterials"] = materials
+        data["occupied"] = sorted(occupied)
+        _write_calibration(data)
 
 
 # --- Kanbans (grupos de lotes delimitados por um Close Up) — restrição de
@@ -2385,6 +2427,42 @@ def validate_route_chain(lots, occupied, pairs):
 # (ou pro mesmo dropoff de uma rota já na fila) passa pela validação de
 # ocupação sem problema nenhum. Aqui a checagem é contra a FILA de verdade,
 # não a calibração.
+# Posições RESERVADAS (pedido do usuário, 2026-10-30): origem/destino de rota
+# em execução, pendente, na fila ou de devolução de pallet pendente — o modo
+# Marcação não pode mudar material nem tirar a marcação delas (a tarefa já
+# leva o material congelado e não revalida a ocupação). Pra mudar, o
+# operador cancela/remove a rota primeiro. Origem da rota atual já coletada
+# (pickupCleared) não é mais reservada: o pallet já saiu de lá.
+# {nome: {"pickup": ..., "dropoff": ...}} — vai no live-state pros tablets.
+def _reserved_positions(state):
+    reserved = {}
+
+    def add(name, route):
+        if name and name not in reserved:
+            reserved[name] = {"pickup": route.get("pickup"), "dropoff": route.get("dropoff")}
+
+    current = state.get("currentRoute")
+    if current:
+        if not state.get("pickupCleared"):
+            add(current.get("pickup"), current)
+        add(current.get("dropoff"), current)
+    for route in [state.get("pendingRoute")] + list(state.get("routeQueue") or []):
+        if route:
+            add(route.get("pickup"), route)
+            add(route.get("dropoff"), route)
+    unload = state.get("pendingPostPickupUnload")
+    if unload:
+        add(unload.get("dropoff"), {"pickup": None, "dropoff": unload.get("dropoff")})
+    return reserved
+
+
+def _split_reserved(names):
+    """(liberados, bloqueados) — bloqueados = posições reservadas pela fila."""
+    with QUEUE_LOCK:
+        reserved = _reserved_positions(_read_queue_state())
+    return [n for n in names if n not in reserved], [n for n in names if n in reserved]
+
+
 def _active_routes(state):
     routes = []
     if state.get("currentRoute"):
@@ -2964,7 +3042,13 @@ def _cancel_reserved_current_locked(state, current):
 def _apply_record_status(state, current, record):
     status = record.get("status")
     if status == "FINISHED":
-        set_occupied_state(current["dropoff"], True)
+        # Destino passa a ter pallet DO MATERIAL da tarefa (ver "Material do
+        # pallet por posição") — a próxima coleta dali já sabe o que é.
+        material = current.get("palletType")
+        if material in PALLET_MATERIALS:
+            set_pallet_material_many([current["dropoff"]], material)
+        else:
+            set_occupied_state(current["dropoff"], True)
         log_route_completed(current["id"], "finished")
         _arm_fork_after_drop(current["dropoff"])  # garfo ficou no chão: sobe quando sair do pallet
         # A rota terminou de chegar por conta própria antes de existir uma
@@ -3138,6 +3222,7 @@ def _refresh_idle_queue_timeout():
 
 
 def _queue_tick():
+    _refresh_daily_backup()  # só copia na 1ª volta de cada dia (ver "Backup automático")
     _refresh_robot_status()  # sempre, independente de emergência/rota em andamento
     _refresh_route_planning_wait()  # só pergunta a pose com rota disparada, não-RUNNING e robô parado
 
@@ -3496,6 +3581,41 @@ def _stop_queue_thread():
 _httpd = None
 
 
+# --- Backup automático dos dados (pedido do usuário, 2026-10-30) -----------
+# calibration.json (mapa, ocupação, materiais, grafo) e users.json (contas)
+# copiados pra backups/ ao lado do programa: uma vez ao iniciar e uma vez por
+# dia (na 1ª volta da fila depois da virada do dia). Guarda BACKUP_KEEP_DAYS
+# dias. Restaurar é manual (assistência técnica, ver MIGRACAO_VM_FINAL.md):
+# parar o serviço, copiar o arquivo do dia por cima, subir de novo.
+BACKUP_DIR = _app_dir() / "backups"
+BACKUP_KEEP_DAYS = 30
+_backup_state = {"day": None}
+
+
+def _backup_data(reason):
+    try:
+        BACKUP_DIR.mkdir(exist_ok=True)
+        stamp = time.strftime("%Y-%m-%d_%H%M%S")
+        for src, lock in ((CALIBRATION_FILE, CALIBRATION_LOCK), (USERS_FILE, USERS_LOCK)):
+            if not src.exists():
+                continue
+            with lock:  # nunca copia um arquivo no meio de uma gravação
+                shutil.copy2(src, BACKUP_DIR / ("%s-%s-%s%s" % (src.stem, stamp, reason, src.suffix)))
+        cutoff = time.time() - BACKUP_KEEP_DAYS * 86400
+        for old in BACKUP_DIR.glob("*.json"):
+            if old.stat().st_mtime < cutoff:
+                old.unlink()
+        _backup_state["day"] = time.strftime("%Y-%m-%d")
+        print("Backup: dados copiados pra %s (%s)" % (BACKUP_DIR, reason))
+    except Exception as err:  # backup nunca derruba o servidor
+        print("Backup: falhou (%s)" % err)
+
+
+def _refresh_daily_backup():
+    if _backup_state["day"] != time.strftime("%Y-%m-%d"):
+        _backup_data("diario")
+
+
 def start_server(robot_host=None, port=None):
     global _httpd
     if _httpd is not None:
@@ -3507,6 +3627,7 @@ def start_server(robot_host=None, port=None):
     listen_port = port or LISTEN_PORT
     _seed_calibration_if_missing()
     _bootstrap_users_if_missing()
+    _backup_data("inicio")
     _reconcile_queue_state_on_startup()
     _start_queue_thread()
     _start_obstacle_thread()
@@ -3802,6 +3923,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not self._require_auth():
                 return
             self._occupied_set_many()
+        elif self.path == PALLET_MATERIAL_PATH:
+            if not self._require_auth():
+                return
+            self._pallet_material_set()
         elif self.path == PALLET_HEIGHTS_PATH:
             if not self._require_auth():
                 return
@@ -4186,6 +4311,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # própria (/api/pallet-heights), o cliente não manda no snapshot,
             # então preserva o que já está em disco.
             data["palletHeights"] = _pallet_heights(current)
+            data["palletMaterials"] = current.get("palletMaterials") or {}  # idem (pincel do modo Marcação)
             # Campos do grafo do robô (2026-10-28/29): um site antigo ainda
             # aberto num tablet não os conhece e mandava o snapshot sem eles,
             # apagando o ajuste feito em outro aparelho (aconteceu 2026-10-29).
@@ -4252,6 +4378,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "pendingRoute": state.get("pendingRoute"),
             "routeQueue": state.get("routeQueue") or [],
             "occupied": cal.get("occupied") or [],
+            "palletMaterials": cal.get("palletMaterials") or {},
+            "reservedPositions": _reserved_positions(state),
             "emergency": bool(state.get("emergency")),
             "cancelPending": bool(state.get("cancelPending")),
             "cancelPendingMessage": CANCEL_PENDING_MESSAGE if state.get("cancelPending") else None,
@@ -4851,8 +4979,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except (json.JSONDecodeError, KeyError) as err:
             self._relay(400, "application/json", json.dumps({"error": str(err)}, ensure_ascii=False).encode("utf-8"))
             return
+        if self._reject_reserved([name]) is None:
+            return
         set_occupied_state(name, is_occupied)
         self._relay(200, "application/json", b'{"ok":true}')
+
+    # Marcação manual em posição reservada pela fila (ver _reserved_positions):
+    # recusa só as reservadas — as livres do mesmo arrasto passam. Tudo
+    # reservado -> responde 409 e devolve None (quem chamou para aqui).
+    # Senão devolve (liberados, bloqueados).
+    def _reject_reserved(self, names):
+        allowed, blocked = _split_reserved(names)
+        if blocked and not allowed:
+            msg = ("Posição reservada por uma tarefa da fila (%s). Cancele ou remova a tarefa "
+                   "antes de mudar a marcação." % ", ".join(blocked))
+            self._relay(409, "application/json", json.dumps({"error": msg, "blocked": blocked}, ensure_ascii=False).encode("utf-8"))
+            return None
+        return allowed, blocked
 
     def _occupied_set_many(self):
         try:
@@ -4864,8 +5007,32 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except (json.JSONDecodeError, KeyError, ValueError) as err:
             self._relay(400, "application/json", json.dumps({"error": str(err)}, ensure_ascii=False).encode("utf-8"))
             return
-        set_occupied_many(names, is_occupied)
-        self._relay(200, "application/json", b'{"ok":true}')
+        split = self._reject_reserved(names)
+        if split is None:
+            return
+        allowed, blocked = split
+        set_occupied_many(allowed, is_occupied)
+        self._relay(200, "application/json", json.dumps({"ok": True, "blocked": blocked}).encode("utf-8"))
+
+    def _pallet_material_set(self):
+        try:
+            payload = self._read_json_body()
+            names = payload["names"]
+            material = payload.get("material")
+            if not isinstance(names, list):
+                raise ValueError("names precisa ser uma lista")
+            if material is not None and material not in PALLET_MATERIALS:
+                raise ValueError("material precisa ser wood, blue ou null")
+        except (json.JSONDecodeError, KeyError, ValueError) as err:
+            self._relay(400, "application/json", json.dumps({"error": str(err)}, ensure_ascii=False).encode("utf-8"))
+            return
+        split = self._reject_reserved(names)
+        if split is None:
+            return
+        allowed, blocked = split
+        if allowed:
+            set_pallet_material_many(allowed, material)
+        self._relay(200, "application/json", json.dumps({"ok": True, "blocked": blocked}).encode("utf-8"))
 
     def _proxy(self, method):
         target = ROBOT_HOST + self.path

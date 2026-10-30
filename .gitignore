@@ -45,3 +45,5 @@ session_secret.key
 # Claude Code — settings.json (allowlist do projeto) É pra commitar; o
 # .local.json é por-máquina (permissões que cada dev aceitou na sua)
 .claude/settings.local.json
+
+backups/

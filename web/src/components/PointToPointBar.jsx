@@ -1,13 +1,11 @@
-import woodTexture from '../assets/pallet-wood.png';
-import blueTexture from '../assets/pallet-blue.png';
 import { displayCellName } from '../hooks/useCalibration';
 
 // Caso 4 (diferenciação de pallets, ver CONTEXT.md): o pallet azul (metálico)
 // fica levemente elevado do chão em 4 pezinhos — o robô precisa de uma
 // altura no ponto de PICKUP pra alinhar o garfo corretamente; o de madeira
-// fica rente ao chão (altura 0, o comportamento que já existia antes dessa
-// feature). Nenhum vem selecionado (2026-10-29): o operador escolhe a cada
-// tarefa — ver MainApp, handleStageSelection.
+// fica rente ao chão. Desde 2026-10-30 não se escolhe o pallet aqui: a tarefa
+// usa o material marcado na origem (modo Marcação) — ver MainApp,
+// materialForPickup. Na lista de envio ainda dá pra trocar.
 // `editing`: null (montando uma tarefa nova), 'single' ou 'group' — tocou
 // numa barrinha de "Tarefas aguardando envio" (ver StagedTasksPanel) e está
 // alterando ela. Enviar vira Salvar, Limpar vira Cancelar edição, e o
@@ -16,7 +14,6 @@ import ManualInfoButton from './ManualInfoButton';
 
 export default function PointToPointBar({ onOpenManual,
   pickupNames, dropoffNames, lots, points, onClear, onSend, editing,
-  palletType, onPalletTypeChange,
   sequenceMode, onToggleSequenceMode, activeSlot, onActiveSlotChange,
 }) {
   const countsMatch = pickupNames.length === dropoffNames.length;
@@ -34,9 +31,14 @@ export default function PointToPointBar({ onOpenManual,
   // visores passivos, como sempre foram.
   function renderSlot(kind, label, names) {
     const isActive = sequenceMode && activeSlot === kind;
+    // Sequência: com 2+ origens escolhidas e o destino ainda vazio, o slot
+    // de destino pulsa laranja — "agora toque aqui pra escolher os destinos".
+    const calling = kind === 'dropoff' && sequenceMode && !editing
+      && activeSlot === 'pickup' && pickupNames.length >= 2 && dropoffNames.length === 0;
     const className = 'ptp-bar__slot'
       + (sequenceMode ? ' ptp-bar__slot--clickable' : '')
-      + (isActive ? ' is-active is-active--' + kind : '');
+      + (isActive ? ' is-active is-active--' + kind : '')
+      + (calling ? ' is-calling' : '');
     // Substituição puramente visual (ver useCalibration.js,
     // displayCellName) — `names` continua com os nomes TÉCNICOS por baixo
     // (são eles que vão pro onPointToPointClick/servidor), só o texto
@@ -64,9 +66,9 @@ export default function PointToPointBar({ onOpenManual,
         {editing === 'group' ? 'Editando sequência' : editing ? 'Editando tarefa' : 'Ponto a Ponto'}
         <ManualInfoButton page={18} onOpen={onOpenManual} />
       </h2>
-      <p className={'ptp-bar__hint' + (editing ? ' ptp-bar__hint--editing' : '')}>
+      <p className={'ptp-bar__hint' + (editing ? ' ptp-bar__hint--editing' : sequenceMode ? ' ptp-bar__hint--sequence' : '')}>
         {editing
-          ? 'Clique no mapa pra trocar origem/destino (clicar na origem atual limpa a rota), troque o pallet se quiser, e salve.'
+          ? 'Clique no mapa pra trocar origem/destino (clicar na origem atual limpa a rota) e salve.'
           : sequenceMode
             ? 'Selecione as origens em ordem, clique em DESTINO e selecione os destinos na mesma quantidade.'
             : 'Clique num ponto pra origem (coleta), depois noutro pra destino (entrega).'}
@@ -85,35 +87,13 @@ export default function PointToPointBar({ onOpenManual,
         </p>
       )}
 
-      <div className="ptp-bar__pallet">
-        <h3 className="ptp-bar__pallet-title">Escolha o modelo de pallet</h3>
-        <div className="ptp-bar__pallet-options">
-          <button
-            type="button"
-            className={'ptp-bar__pallet-option' + (palletType === 'wood' ? ' is-selected' : '')}
-            onClick={() => onPalletTypeChange('wood')}
-          >
-            <span className="ptp-bar__pallet-swatch" style={{ backgroundImage: `url(${woodTexture})` }} />
-            <span className="ptp-bar__pallet-label">Madeira</span>
-          </button>
-          <button
-            type="button"
-            className={'ptp-bar__pallet-option' + (palletType === 'blue' ? ' is-selected' : '')}
-            onClick={() => onPalletTypeChange('blue')}
-          >
-            <span className="ptp-bar__pallet-swatch" style={{ backgroundImage: `url(${blueTexture})` }} />
-            <span className="ptp-bar__pallet-label">Azul</span>
-          </button>
-        </div>
-      </div>
-
       <div className="ptp-bar__actions">
         <button type="button" className="ptp-bar__clear" onClick={onClear} disabled={!editing && !hasSelection}>
           {editing ? 'Cancelar edição' : 'Limpar seleção'}
         </button>
         <button
           type="button"
-          className="ptp-bar__send"
+          className={'ptp-bar__send' + (editing ? ' is-editing' : '')}
           onClick={onSend}
           disabled={!canSend}
         >

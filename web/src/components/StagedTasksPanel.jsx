@@ -386,6 +386,7 @@ export default function StagedTasksPanel({
           <p className="ptp-bar__hint staged-panel__hint">
             Toque numa tarefa pra ver e editar no mapa. Segure e arraste pra mudar a ordem.
           </p>
+          <p className="staged-panel__material-check">Confira se os materiais dos pallets correspondem à sua posição.</p>
           <ul className={'staged-list' + (drag ? ' is-dragging' : '') + (settling ? ' is-settling' : '')} ref={listRef}>
             {units.map((unit, i) => (
               <li
