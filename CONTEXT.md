@@ -5512,6 +5512,27 @@ cada arquivo; guarda 30 dias. Restaurar é manual (assistência técnica) — pa
   proposta (não feita) = instalar como app (`display: fullscreen` no manifest já existe) com o
   endereço tratado como seguro no Chrome do tablet, ou navegador de quiosque.
 
+## Sem rota ao vivo do robô (2026-10-30)
+- `robotRoute` (MainApp) = só a tarefa selecionada na Fila/Histórico, estática. O trajeto ao vivo
+  (sem seleção, tocar no robô, volta pra energia, devolução) saiu por enquanto — tocar no robô só
+  mostra onde ele está (+ banner de status/origem → destino). RobotOverlay ainda desenha
+  `live: true`; voltar = devolver a rota atual quando não há seleção.
+- "Pallet de cima": a caixinha voltou por algumas horas em 30/10 pros testes de pallet de dois
+  níveis e foi tirada de novo — continua DORMENTE (`const palletTop = false` no MainApp; o
+  caminho até o robô segue no servidor: palletTop -> camada 3 na altura `blueTop`). A versão com
+  a caixinha (Ponto a Ponto + seletor por tarefa + selo "2º" na lista/Fila) está no branch local
+  `experimento/destino-segundo-andar` (`dde6bdf`).
+
+## "Destino no segundo andar" — EXPERIMENTO GUARDADO, fora do projeto (2026-10-30)
+Testado pelo usuário e retirado ("seguiremos sem ela por enquanto"). A versão completa ficou no
+branch LOCAL `experimento/destino-segundo-andar` (commit `dde6bdf`, NÃO enviado ao GitHub) — só
+referência pra se um dia voltar. Ideia: caixinha que solta o pallet EM CIMA do que está no
+destino, com `PALLET_LAYER {blueTop, layer 3}` no UNLOAD (até hoje o UNLOAD vai sem params);
+destino precisa estar ocupado; "Pallet de cima" não esvaziava a origem; devolução de pallet de
+cima ia pro 2º andar; nomes `...D<h>`. Não confirmado se o robô usa PALLET_LAYER numa entrega.
+O commit do branch também tem a remoção da rota ao vivo e o "Pallet de cima" — estes DOIS
+seguem no `main`.
+
 **Pendente antes de dar o projeto por fechado**: remarcar TODO o armazém com material (a ocupação
 foi zerada em testes em 30/10 — sem material nenhuma tarefa sai); validar em campo uma coleta
 azul e uma de madeira com a altura vinda da marcação; reinício real do robô com a vigia;

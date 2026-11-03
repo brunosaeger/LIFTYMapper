@@ -1520,34 +1520,17 @@ export default function MainApp({ user, onLogout }) {
   // prioridades acima) — senão vazaria um número errado pro Ponto a Ponto
   // ou Histórico, que nunca usam isso.
   const mapSeqOverride = !pickupNames.length && selectedQueueRoute ? queueSeqOverride : null;
-  // Caminho desenhado no mapa (ver RobotOverlay): a tarefa clicada na Fila ou
-  // no Histórico; sem clique, sempre a atual. A atual já disparada é "ao
-  // vivo" (sai do robô e encolhe enquanto ele anda) e, com o pallet já no
-  // garfo, só mostra o que falta até a entrega.
+  // Caminho desenhado no mapa (ver RobotOverlay): SÓ a tarefa clicada na Fila
+  // ou no Histórico — traçado estático da tarefa inteira (origem → destino).
+  // O trajeto AO VIVO do robô (sem seleção, ou tocando no robô) foi tirado
+  // por enquanto (pedido do usuário, 2026-10-30): tocar no robô só mostra
+  // onde ele está. RobotOverlay ainda sabe desenhar `live: true` — pra
+  // voltar, era devolver a rota atual quando não há seleção.
   const robotRoute = useMemo(() => {
-    const sel = selectedQueueRoute || selectedHistoryRoute;
-    // Devolução do pallet decidida, UNLOAD ainda sendo criado: já mostra o
-    // caminho até ela (tem prioridade sobre a volta pra energia, que o
-    // servidor cancela nesse meio-tempo). Depois vira a rota atual normal.
-    if (!sel && pendingUnloadDropoff && !currentRoute?.taskName) {
-      return { id: 'unload|' + pendingUnloadDropoff, pickup: null, dropoff: pendingUnloadDropoff, live: true };
-    }
-    // Voltando sozinho pra energia (AUTO_SYSTEM, fora da nossa fila): não há
-    // rota atual disparada -- desenha o caminho ao vivo até o ponto da
-    // energia. Vale também com uma rota reservada esperando ele carregar.
-    if (!sel && robotReturningToCharge && !currentRoute?.taskName) {
-      return { id: 'energy', pickup: null, dropoff: 'energy', live: true };
-    }
-    const r = sel || currentRoute;
+    const r = selectedQueueRoute || selectedHistoryRoute;
     if (!r || !r.dropoff) return null;
-    // Rota clicada na Fila/Histórico — inclusive a EM ANDAMENTO — é sempre o
-    // traçado estático da tarefa inteira (origem → destino); o trajeto ao
-    // vivo é o padrão sem seleção, e é o que tocar no robô mostra (ver
-    // handleRobotSelect, pedido do usuário 2026-10-29).
-    const live = !!currentRoute?.taskName && !sel;
-    const pickupDone = live && (!!robotCarrying || !!r.unloadOnly);
-    return { id: String(r.id ?? r.taskName ?? r.dropoff), pickup: pickupDone ? null : (r.pickup || null), dropoff: r.dropoff, live };
-  }, [selectedQueueRoute, selectedHistoryRoute, currentRoute, robotCarrying, robotReturningToCharge, pendingUnloadDropoff]);
+    return { id: String(r.id ?? r.taskName ?? r.dropoff), pickup: r.pickup || null, dropoff: r.dropoff, live: false };
+  }, [selectedQueueRoute, selectedHistoryRoute]);
   // Origem → destino do banner "VISUALIZANDO: ROBÔ" — a tarefa atual, ou só
   // o destino da devolução do pallet. Voltando pra energia não tem tarefa.
   const robotTask = currentRoute
