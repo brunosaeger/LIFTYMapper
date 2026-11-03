@@ -1,0 +1,32 @@
+LIFTY Mapper - pacote de instalacao na VM
+==========================================
+
+Conteudo desta pasta:
+  LIFTY-SERVICE.exe     o programa (site dos tablets + servidor + conversa com o robo)
+  nssm.exe              transforma o programa em Servico do Windows
+  testar-rede.ps1       testa VM -> robo (portas 80, 8091, 22) e tablet -> VM (8000). Nao altera nada.
+  instalar.ps1          instala (1a vez) ou atualiza o programa
+  MIGRACAO_VM_FINAL.md  guia completo (pedidos pra infra, validacao, restauracao de backup)
+
+Os DADOS (logins, historico, mapa calibrado, closes, grafo, chave do robo)
+NAO vem neste pacote: saem da maquina antiga com o exportar-dados.ps1
+(pasta LIFTY-dados-AAAA-MM-DD_HHMM).
+
+Todos os comandos: PowerShell COMO ADMINISTRADOR, dentro desta pasta.
+
+1) Testar a rede (robo ligado):
+     powershell -ExecutionPolicy Bypass -File .\testar-rede.ps1
+
+2) Instalar com os dados (NAO inicia ainda):
+     powershell -ExecutionPolicy Bypass -File .\instalar.ps1 -Dados C:\caminho\LIFTY-dados-AAAA-MM-DD_HHMM
+
+3) Desligar o server.py da maquina antiga. Entao iniciar:
+     powershell -ExecutionPolicy Bypass -File .\instalar.ps1 -Iniciar
+
+4) Tablets: http://<IP da VM>:8000
+
+Atualizar o programa depois (robo ocioso): extrair o pacote novo e rodar
+     powershell -ExecutionPolicy Bypass -File .\instalar.ps1
+(troca so o .exe; os dados ficam como estao)
+
+Pasta do servico: C:\LIFTY   (dados, backups\ e logs\lifty.log)

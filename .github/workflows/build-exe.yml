@@ -64,3 +64,33 @@ jobs:
           name: LIFTY-SERVICE-windows
           path: dist/LIFTY-SERVICE.exe
           if-no-files-found: error
+
+      # Pacote pronto pra VM (ver packaging/vm/LEIA-ME.txt): .exe + nssm +
+      # scripts de teste/instalação + guia. Os DADOS não vão aqui (nunca no
+      # GitHub) -- saem da máquina antiga pelo exportar-dados.ps1.
+      # nssm 2.24-101 (pré-release recomendada pelo próprio site pra Windows
+      # 10+/Server 2016+); cai pra 2.24 se não baixar.
+      - name: Monta o pacote da VM
+        shell: pwsh
+        run: |
+          $p = 'pacote/LIFTY-VM'
+          New-Item -ItemType Directory -Force $p | Out-Null
+          Copy-Item dist/LIFTY-SERVICE.exe, packaging/vm/instalar.ps1, packaging/vm/testar-rede.ps1, packaging/vm/LEIA-ME.txt, MIGRACAO_VM_FINAL.md $p
+          $urls = 'https://nssm.cc/ci/nssm-2.24-101-g897c7ad.zip', 'https://nssm.cc/release/nssm-2.24.zip'
+          $ok = $false
+          foreach ($u in $urls) {
+            foreach ($i in 1..3) {
+              try { Invoke-WebRequest $u -OutFile nssm.zip -TimeoutSec 60; $ok = $true; break } catch { Write-Warning "$u (tentativa $i): $_"; Start-Sleep 10 }
+            }
+            if ($ok) { break }
+          }
+          if (-not $ok) { throw 'nssm.cc fora do ar -- rode o workflow de novo mais tarde.' }
+          Expand-Archive nssm.zip nssm
+          Copy-Item (Get-ChildItem nssm -Recurse -Filter nssm.exe | Where-Object { $_.FullName -match 'win64' } | Select-Object -First 1).FullName $p
+
+      - name: Publica o pacote da VM
+        uses: actions/upload-artifact@v4
+        with:
+          name: LIFTY-VM
+          path: pacote/
+          if-no-files-found: error

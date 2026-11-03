@@ -18,6 +18,22 @@ o **cliente OpenSSH** do próprio Windows (seção 7).
 
 ---
 
+## Caminho rápido (2026-11-03): pacote LIFTY-VM + 3 scripts
+
+As seções 2, 3, 7 e 8 abaixo viraram scripts. Continuam valendo como
+referência do que os scripts fazem e pra fazer à mão se algo falhar.
+
+| Onde | Script | Faz |
+|---|---|---|
+| máquina antiga, **server.py parado** | `packaging\vm\exportar-dados.ps1` | junta logins, sessões, histórico, mapa (pontos, lotes, closes, grafo, ocupação), IP do robô e a chave SSH numa pasta `LIFTY-dados-...` com `hashes.txt` e `RESUMO.txt` |
+| VM | `testar-rede.ps1` | testa portas 80/8091/22 do robô, ssh, firewall; `-OuvirTablet` testa tablet → VM |
+| VM, admin | `instalar.ps1 -Dados <pasta>` | `C:\LIFTY`, copia e **confere os hashes**, protege a chave, liga o OpenSSH, firewall 8000, registra o serviço (não inicia) |
+| VM, admin | `instalar.ps1 -Iniciar` | inicia e mostra o log e o resumo pra conferir |
+| VM, admin | `instalar.ps1` (sem nada) | atualização: troca só o `.exe` |
+
+O pacote vem pronto do Actions: artefato **`LIFTY-VM`** (`.exe` + `nssm.exe` +
+scripts + `LEIA-ME.txt` + este guia).
+
 ## 0. O que mudou desde o guia de 15/10
 
 | Mudança | Impacto na VM |
@@ -211,6 +227,8 @@ Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0
 # 3) chave SSH: só SYSTEM (o serviço) e Administradores leem.
 #    O ssh do Windows RECUSA chave com permissão aberta demais.
 #    (SIDs em vez de nomes: funciona com Windows em português ou inglês)
+#    Dono = grupo Administradores (dono = outra conta também é recusado).
+icacls C:\LIFTY\lifty_robot /setowner "*S-1-5-32-544"
 icacls C:\LIFTY\lifty_robot /inheritance:r /grant:r "*S-1-5-18:R" "*S-1-5-32-544:F"
 
 # 4) firewall
@@ -257,7 +275,8 @@ C:\LIFTY\nssm.exe start LIFTY-SERVICE
   - [ ] lotes e pontos no mesmo lugar e com os mesmos nomes;
   - [ ] Editar closes → "Ajustar grafo do robô": grafo com a mesma deformação
         (contador de pinos igual) e a rota com a mesma opacidade;
-  - [ ] mesmas posições ocupadas (X) no mapa.
+  - [ ] mesmas posições ocupadas no mapa, cada uma com o mesmo material
+        (madeira/azul).
 - [ ] Se um `users.json` novo foi criado: trocar a senha do `admin`.
 - [ ] Guardar cópia dos arquivos de dados depois do 1º dia de uso real.
 - [ ] Só então: desligar de vez a máquina antiga (idealmente mantê-la um tempo

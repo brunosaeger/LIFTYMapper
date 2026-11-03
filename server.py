@@ -1245,10 +1245,16 @@ ROUTE_PLANNING_CORRIDOR_CACHE_SECONDS = 600
 # Outros pontos onde o mesmo planejamento lento foi visto em campo (pedido do
 # usuário, 2026-10-28). Aqui não é uma faixa de corredor: o robô fica parado
 # no eixo de docking do ponto (entre o lote e o H dele) -- a zona é esse
-# segmento, com folga.
-ROUTE_PLANNING_SLOW_POINTS = ("EXE", "EXE2", "EXM", "EXN", "EXO", "EXP", "EXQ")
+# segmento, com folga. EXF/EXF2/EXF3 entraram em 2026-11-03 (mesmo pedido).
+ROUTE_PLANNING_SLOW_POINTS = ("EXE", "EXE2", "EXM", "EXN", "EXO", "EXP", "EXQ", "EXF", "EXF2", "EXF3")
 ROUTE_PLANNING_POINT_RADIUS_METERS = 0.6  # o robô para no H com precisão de cm; os lotes EX vizinhos ficam a ~1,2 m
-_route_planning_cache = {"routeId": None, "started": None, "inCorridor": False, "inCorridorRouteId": None}
+# Volta à energia (pedido do usuário, 2026-11-03): cancelada uma tarefa com a
+# fila vazia, a AUTO_SYSTEM nativa leva o robô pra carregar -- e planeja tão
+# devagar quanto uma rota nossa saindo da mesma zona. Mesmo aviso menta, sem
+# o vermelho (não há rota nossa pra cancelar): passou do limite, volta a ser
+# só "voltando à energia".
+_route_planning_cache = {"routeId": None, "started": None, "inCorridor": False, "inCorridorRouteId": None,
+                         "chargeInCorridor": False}
 _corridor_endpoints_cache = {"at": None, "a": None, "b": None, "slow": []}
 
 
@@ -1321,23 +1327,28 @@ def _refresh_route_planning_wait():
     """Thread de fundo (junto de _refresh_robot_status): só pergunta a pose
     ao robô quando a rota atual já foi disparada, ainda não está RUNNING e o
     robô está parado — o resto do tempo não gasta chamada nenhuma."""
-    inside, route_id = False, None
+    inside, route_id, charge_inside = False, None, False
     try:
         with QUEUE_LOCK:
             state = _read_queue_state()
         cur = state.get("currentRoute") or {}
         c = _route_planning_cache
+        stopped = (_robot_status_cache.get("stationarySince") is not None
+                   and not _robot_status_cache.get("charging"))
         if (cur.get("taskName") and not state.get("cancelPending")
                 and _route_fired_at.get("t") is not None
                 and c.get("routeId") == cur.get("id") and c.get("started") is False
-                and _robot_status_cache.get("stationarySince") is not None
-                and not _robot_status_cache.get("charging")):
+                and stopped):
             inside = _in_planning_corridor(robot_pose())
             route_id = cur.get("id")
+        elif (not cur.get("taskName") and not state.get("cancelPending")
+                and _robot_status_cache.get("returningToCharge") and stopped):
+            charge_inside = _in_planning_corridor(robot_pose())
     except Exception:
-        inside, route_id = False, None  # robô/rede indisponível: sem aviso (cai no comportamento antigo)
+        inside, route_id, charge_inside = False, None, False  # robô/rede indisponível: sem aviso (cai no comportamento antigo)
     _route_planning_cache["inCorridor"] = inside
     _route_planning_cache["inCorridorRouteId"] = route_id
+    _route_planning_cache["chargeInCorridor"] = charge_inside
 
 
 def _route_planning_elapsed(state):
@@ -1354,9 +1365,22 @@ def _route_planning_elapsed(state):
     return time.monotonic() - fired
 
 
+def _charge_planning_elapsed(state):
+    """Segundos parado esperando o planejamento da volta à energia, ou None."""
+    cur = state.get("currentRoute") or {}
+    since = _robot_status_cache.get("stationarySince")
+    if (cur.get("taskName") or state.get("cancelPending") or since is None
+            or not _route_planning_cache.get("chargeInCorridor")
+            or not _robot_status_cache.get("returningToCharge")):
+        return None
+    return time.monotonic() - since
+
+
 def _route_planning_message(state):
     """Aviso menta (None se não vale ou se já passou do limite -> vira o vermelho)."""
     elapsed = _route_planning_elapsed(state)
+    if elapsed is None:
+        elapsed = _charge_planning_elapsed(state)
     if elapsed is None or elapsed >= ROUTE_PLANNING_LATE_SECONDS:
         return None
     return ROUTE_PLANNING_MESSAGE
