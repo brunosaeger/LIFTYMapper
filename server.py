@@ -1757,7 +1757,10 @@ def _bridge_ssh_start(host, restart=False):
            "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=%s" % BRIDGE_SSH_KNOWN_HOSTS,
            "%s@%s" % (BRIDGE_SSH_USER, host), remote]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+        # encoding explícito: sem ele o Windows decodifica em cp1252 (ver
+        # CONTEXT.md, "Bug de Windows corrigido 2026-10-15").
+        out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                             timeout=30, stdin=subprocess.DEVNULL,
                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except Exception as err:
         _bridge_note("SSH falhou (%s)" % err)
