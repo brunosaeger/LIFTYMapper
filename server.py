@@ -1167,10 +1167,6 @@ _robot_status_cache = {"charging": None, "battery": None, "returningToCharge": F
 # sensores de verdade, ver "Obstáculo pelos sensores do robô".
 STALL_VX_EPSILON_MPS = 0.02
 STALL_VTH_EPSILON_DEG_S = 1.0
-# Sensor de trás (garfo, sem carga) vendo o pallet na faixa de encaixe -- ver
-# _refresh_obstacle. Espaçamento entre pallets pequeno demais.
-ROBOT_STALLED_AT_ORIGIN_MESSAGE = ("Sensor do garfo detectou o pallet como objeto! Verifique se o espaçamento "
-                                   "de pallets está adequado e retorne o robô manualmente para a energia.")
 
 
 # `battery` em `/reeman/base_encode` (documentado, nunca lido até agora —
@@ -1253,8 +1249,10 @@ ROUTE_PLANNING_POINT_RADIUS_METERS = 0.6  # o robô para no H com precisão de c
 # devagar quanto uma rota nossa saindo da mesma zona. Mesmo aviso menta, sem
 # o vermelho (não há rota nossa pra cancelar): passou do limite, volta a ser
 # só "voltando à energia".
+# Só ANTES de o robô andar (chargeMoved): parado na zona no meio da volta é
+# alguém na frente, não planejador (visto em campo 2026-11-05).
 _route_planning_cache = {"routeId": None, "started": None, "inCorridor": False, "inCorridorRouteId": None,
-                         "chargeInCorridor": False}
+                         "chargeInCorridor": False, "chargeMoved": False}
 _corridor_endpoints_cache = {"at": None, "a": None, "b": None, "slow": []}
 
 
@@ -1333,6 +1331,10 @@ def _refresh_route_planning_wait():
             state = _read_queue_state()
         cur = state.get("currentRoute") or {}
         c = _route_planning_cache
+        if not _robot_status_cache.get("returningToCharge"):
+            c["chargeMoved"] = False
+        elif _robot_status_cache.get("stationarySince") is None:
+            c["chargeMoved"] = True
         stopped = (_robot_status_cache.get("stationarySince") is not None
                    and not _robot_status_cache.get("charging"))
         if (cur.get("taskName") and not state.get("cancelPending")
@@ -1342,7 +1344,7 @@ def _refresh_route_planning_wait():
             inside = _in_planning_corridor(robot_pose())
             route_id = cur.get("id")
         elif (not cur.get("taskName") and not state.get("cancelPending")
-                and _robot_status_cache.get("returningToCharge") and stopped):
+                and _robot_status_cache.get("returningToCharge") and stopped and not c["chargeMoved"]):
             charge_inside = _in_planning_corridor(robot_pose())
     except Exception:
         inside, route_id, charge_inside = False, None, False  # robô/rede indisponível: sem aviso (cai no comportamento antigo)
@@ -1370,7 +1372,7 @@ def _charge_planning_elapsed(state):
     cur = state.get("currentRoute") or {}
     since = _robot_status_cache.get("stationarySince")
     if (cur.get("taskName") or state.get("cancelPending") or since is None
-            or not _route_planning_cache.get("chargeInCorridor")
+            or not _route_planning_cache.get("chargeInCorridor") or _route_planning_cache.get("chargeMoved")
             or not _robot_status_cache.get("returningToCharge")):
         return None
     return time.monotonic() - since
@@ -1399,9 +1401,11 @@ def _route_planning_message(state):
 #   - fora do lote: parado >= OBSTACLE_STOPPED_SECONDS com front/back abaixo
 #     do limite -> "obstáculo à frente/atrás" com a distância;
 #   - na faixa de encaixe (eixo do docking da coleta/entrega, entre o H e o
-#     pallet): o sensor de trás vê o pallet normalmente, então só depois de
-#     OBSTACLE_DOCKING_STOPPED_SECONDS parado -- e aí, com o de trás, é o
-#     "sensor do garfo viu o pallet" de verdade (antes era chute por posição);
+#     pallet): frente e laterais ficam de fora (pallet/lote perto é normal
+#     ali); o sensor do garfo segue a mesma regra de todo lugar -- 3 s
+#     parado abaixo do limite do próprio robô (pedido do usuário,
+#     2026-11-04: o garfo parou o robô num pallet mal posicionado e o tablet
+#     não mostrou nada -- antes o garfo ali exigia 10 s parado);
 #   - esperando o planejador do dispatch (corredor P3-P10): nunca -- o robô
 #     está parado no H de propósito, com os garfos de frente pro lote.
 # Ajustes pelo dia inteiro de coleta (todas as paradas >= 1,5 s com sensor
@@ -1411,7 +1415,9 @@ def _route_planning_message(state):
 #   - leitura 0-2 = sensor mascarado pelo app (aparece parado nos H, nos
 #     lotes), não objeto colado -> ignorada;
 #   - com pallet no garfo o sensor de trás enxerga a própria carga (6-47 cm
-#     nos H depois da coleta) -> ignorado enquanto carrega;
+#     nos H depois da coleta) -> carregando, só conta com a distância de
+#     desvio do próprio robô em mãos (ele não para pela própria carga, então
+#     abaixo dela é bloqueio de verdade); com o limite fixo, ignorado;
 #   - paradas normais em nós com parede perto duram 1,8-1,9 s; bloqueio de
 #     verdade, 20-40 s -> pede 3 s parado.
 OBSTACLE_PATH = "/obstacle"
@@ -1428,16 +1434,22 @@ OBSTACLE_BACK_TRIGGER_CM = 60
 OBSTACLE_SIDE_TRIGGER_CM = 55
 OBSTACLE_MASKED_MAX_CM = 2
 OBSTACLE_STOPPED_SECONDS = 3.0
-OBSTACLE_DOCKING_STOPPED_SECONDS = 10
 OBSTACLE_DOCKING_LATERAL_METERS = 0.5
 OBSTACLE_DOCKING_AHEAD_METERS = 0.8  # quanto além do H (saindo do lote) ainda conta -- o robô gira/espera até ~0,5 m dele
 OBSTACLE_READING_MAX_AGE_SECONDS = 2.0
+# Volta à energia (AUTO_SYSTEM nativa, sem rota nossa) também vigia (pedido do
+# usuário, 2026-11-05: parado por alguém na frente perto da energia, nenhum
+# aviso). Perto do carregador fica de fora: o encaixe nele é colado de propósito.
+OBSTACLE_CHARGE_ROUTE_ID = "voltando-energia"
+OBSTACLE_CHARGER_POINT = "energy"
+OBSTACLE_CHARGER_RADIUS_METERS = 1.2
 OBSTACLE_POINTS_CACHE_SECONDS = 600
 # Instrução comum (pedido do usuário, 2026-10-29). Esquerda/direita já
 # incluem os sensores frente-esquerda/frente-direita (ver _refresh_obstacle).
 OBSTACLE_ACTION = " Remova o obstáculo ou utilize o modo manual para levá-lo à energia."
 OBSTACLE_FRONT_MESSAGE = "OBSTÁCULO À FRENTE do robô (%d cm)!" + OBSTACLE_ACTION
-OBSTACLE_BACK_MESSAGE = "OBSTÁCULO ATRÁS, no lado dos garfos (%d cm)!" + OBSTACLE_ACTION
+OBSTACLE_BACK_MESSAGE = ("SENSOR DO GARFO detectou um obstáculo (%d cm)! Verifique se há pallet mal posicionado "
+                         "ou espaçamento inadequado entre pallets." + OBSTACLE_ACTION)
 OBSTACLE_LEFT_MESSAGE = "OBSTÁCULO NA LATERAL ESQUERDA do robô (%d cm)!" + OBSTACLE_ACTION
 OBSTACLE_RIGHT_MESSAGE = "OBSTÁCULO NA LATERAL DIREITA do robô (%d cm)!" + OBSTACLE_ACTION
 _obstacle_watch = {"message": None, "routeId": None, "stoppedSince": None, "points": None, "pointsAt": -1e9}
@@ -1492,11 +1504,14 @@ def _refresh_obstacle():
     with QUEUE_LOCK:
         state = _read_queue_state()
     current = state.get("currentRoute") or {}
-    if (not current.get("taskName") or state.get("emergency") or _robot_status_cache.get("charging")
-            or _route_planning_elapsed(state) is not None):
+    returning = (not current.get("taskName") and not state.get("cancelPending")
+                 and bool(_robot_status_cache.get("returningToCharge")))
+    if ((not current.get("taskName") and not returning) or state.get("emergency") or _robot_status_cache.get("charging")
+            or _route_planning_elapsed(state) is not None or _charge_planning_elapsed(state) is not None):
         _obstacle_watch["stoppedSince"] = None
         _set_obstacle_message(None, None)
         return
+    route_id = OBSTACLE_CHARGE_ROUTE_ID if returning else current.get("id")
     speed = _slam_call("GET", "/reeman/speed")
     if abs(float(speed.get("vx") or 0)) >= STALL_VX_EPSILON_MPS or abs(float(speed.get("vth") or 0)) >= STALL_VTH_EPSILON_DEG_S:
         _obstacle_watch["stoppedSince"] = None
@@ -1532,7 +1547,7 @@ def _refresh_obstacle():
     if front < limit("front", OBSTACLE_FRONT_TRIGGER_CM):
         near.append((front, "front", OBSTACLE_FRONT_MESSAGE))
     back = reading("back")
-    if back < limit("back", OBSTACLE_BACK_TRIGGER_CM) and not carrying:
+    if back < limit("back", OBSTACLE_BACK_TRIGGER_CM) and (not carrying or avoid.get("back") is not None):
         near.append((back, "back", OBSTACLE_BACK_MESSAGE))
     left, right = reading("left", "f_left"), reading("right", "f_right")
     if left < limit("left", OBSTACLE_SIDE_TRIGGER_CM):
@@ -1542,17 +1557,21 @@ def _refresh_obstacle():
     if not near:
         _set_obstacle_message(None, None)
         return
-    cm, side, template = min(near)
-    if _in_docking_zone(robot_pose(), state, current):
-        # Na faixa de encaixe é normal ter pallet/lote perto de todo lado: só
-        # o garfo (trás, sem carga) parado por muito tempo é aviso -- o caso
-        # do espaçamento entre pallets.
-        if any(s == "back" for _, s, _ in near) and stopped_for >= OBSTACLE_DOCKING_STOPPED_SECONDS:
-            _set_obstacle_message(ROBOT_STALLED_AT_ORIGIN_MESSAGE, current.get("id"))
-        else:
+    pose = robot_pose()
+    if returning:
+        charger = _obstacle_points().get(OBSTACLE_CHARGER_POINT)
+        if charger and math.hypot(pose["x"] - charger["x"], pose["y"] - charger["y"]) <= OBSTACLE_CHARGER_RADIUS_METERS:
             _set_obstacle_message(None, None)
-        return
-    _set_obstacle_message(template % cm, current.get("id"))
+            return
+    elif _in_docking_zone(pose, state, current):
+        # Na faixa de encaixe é normal ter pallet/lote perto da frente e dos
+        # lados -- só o garfo conta ali.
+        near = [n for n in near if n[1] == "back"]
+        if not near:
+            _set_obstacle_message(None, None)
+            return
+    cm, side, template = min(near)
+    _set_obstacle_message(template % cm, route_id)
 
 
 def _start_obstacle_thread():
@@ -1826,7 +1845,7 @@ def _robot_stalled_message(state):
     if planning is not None:
         return ROUTE_PLANNING_LATE_MESSAGE if planning >= ROUTE_PLANNING_LATE_SECONDS else None
     current = state.get("currentRoute") or {}
-    if _obstacle_watch["message"] and _obstacle_watch["routeId"] == current.get("id"):
+    if _obstacle_watch["message"] and _obstacle_watch["routeId"] == (current.get("id") or OBSTACLE_CHARGE_ROUTE_ID):
         return _obstacle_watch["message"]
     return None
 
