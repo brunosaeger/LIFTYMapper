@@ -18,6 +18,7 @@ calibration.json
 route_log.json
 queue_state.json
 dock_shadow.jsonl
+operation_hours.json
 # Vigia do bridge: chave SSH do robô (se copiada pra pasta do servidor) e
 # known_hosts gerado na 1ª conexão -- nunca no repositório
 lifty_robot

@@ -12,6 +12,11 @@ on:
     tags:
       - 'v*'
 
+# contents: write -- so pra criar a Release quando o disparo e uma tag v*
+# (ver "Release" no fim e packaging/vm/atualizar.ps1).
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -75,7 +80,10 @@ jobs:
         run: |
           $p = 'pacote/LIFTY-VM'
           New-Item -ItemType Directory -Force $p | Out-Null
-          Copy-Item dist/LIFTY-SERVICE.exe, packaging/vm/instalar.ps1, packaging/vm/testar-rede.ps1, packaging/vm/LEIA-ME.txt, MIGRACAO_VM_FINAL.md $p
+          Copy-Item dist/LIFTY-SERVICE.exe, packaging/vm/instalar.ps1, packaging/vm/atualizar.ps1, packaging/vm/testar-rede.ps1, packaging/vm/LEIA-ME.txt, MIGRACAO_VM_FINAL.md $p
+          # versao que o atualizar.ps1 mostra (tag, ou "manual" + data) e o commit
+          $v = if ('${{ github.ref_type }}' -eq 'tag') { '${{ github.ref_name }}' } else { 'manual-' + (Get-Date -Format 'yyyy-MM-dd_HHmm') }
+          Set-Content "$p/VERSAO.txt" -Value @($v, '${{ github.sha }}') -Encoding ASCII
           $urls = 'https://nssm.cc/ci/nssm-2.24-101-g897c7ad.zip', 'https://nssm.cc/release/nssm-2.24.zip'
           $ok = $false
           foreach ($u in $urls) {
@@ -94,3 +102,15 @@ jobs:
           name: LIFTY-VM
           path: pacote/
           if-no-files-found: error
+
+      # Release (so com tag v*): o mesmo pacote num link fixo e publico,
+      # .../releases/latest/download/LIFTY-VM.zip -- e dele que a VM baixa
+      # com o atualizar.ps1, sem login no GitHub.
+      - name: Release (LIFTY-VM.zip)
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Compress-Archive -Path pacote/LIFTY-VM -DestinationPath LIFTY-VM.zip
+          gh release create '${{ github.ref_name }}' LIFTY-VM.zip --title 'LIFTY ${{ github.ref_name }}' --notes 'Na VM (admin): powershell -ExecutionPolicy Bypass -File C:\LIFTY\atualizar.ps1'

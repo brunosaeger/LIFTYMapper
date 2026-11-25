@@ -1340,6 +1340,9 @@ export default function FloorPlanCanvas({
   // toque errado.
   const [hoveredName, setHoveredName] = useState(null);
 
+  // DESDE 2026-11-13 o arrasto está DESLIGADO (só clique, ver
+  // registerPaintTouch): o caminho abaixo nunca passa de 1 quadrado. A
+  // maquinaria ficou como estava pra não mexer no resto do gesto.
   // Marcação por arrasto (modo "mark"): em vez de precisar tocar quadrado a
   // quadrado, o operador pressiona e desliza o dedo/mouse por cima de
   // vários — cada um tocado durante o arrasto entra num CAMINHO ordenado
@@ -1401,6 +1404,14 @@ export default function FloorPlanCanvas({
     }
     const path = paintPathRef.current;
     if (path[path.length - 1] === name) return; // já é o topo do caminho, nada muda
+    // Só CLIQUE (pedido do usuário, 2026-11-13: sem pincel de arrastar): o
+    // gesto marca apenas o quadrado onde começou. Se o dedo/mouse sair pra
+    // outro quadrado, o gesto é anulado e nada é marcado ao soltar.
+    if (path.length > 0 || paintTargetRef.current !== null) {
+      paintPathRef.current = [];
+      setPaintPreview(new Set());
+      return;
+    }
     if (paintTargetRef.current === null) {
       // Pincel: true = aplica o material, false = esvazia (borracha, ou
       // começou numa posição que já tem esse material). Sem pincel:

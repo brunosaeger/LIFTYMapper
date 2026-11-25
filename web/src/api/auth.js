@@ -86,6 +86,20 @@ export async function updateUser(username, changes) {
   });
 }
 
+// Horário de operação (ver server.py, "Horário de operação"): switch manual
+// + faixa início/fim (relógio da VM). changes só com o que mudou.
+export async function fetchOperationHours() {
+  return jsonRequest('/api/operation-hours');
+}
+
+export async function saveOperationHours(changes) {
+  return jsonRequest('/api/operation-hours', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(changes),
+  });
+}
+
 export async function deleteUser(username) {
   return jsonRequest('/api/users/' + encodeURIComponent(username), { method: 'DELETE' });
 }

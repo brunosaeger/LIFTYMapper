@@ -423,13 +423,13 @@ export default function QueuePanel({ currentRoute, waitingRoutes, lots, points, 
     <div className="queue-panel">
       <section className="queue-panel__section">
         <div className="queue-panel__title-row">
-          <h2 className="points-panel__title">Rota em andamento<ManualInfoButton page={28} onOpen={onOpenManual} /></h2>
+          <h2 className="points-panel__title">Rota em andamento<ManualInfoButton page={27} onOpen={onOpenManual} /></h2>
           {onClearAll && (
             <button
               type="button"
               className="queue-panel__clear"
-              aria-label="Limpar toda a fila (modo desenvolvedor)"
-              title="Limpar toda a fila (modo desenvolvedor)"
+              aria-label="Limpar toda a fila"
+              title="Limpar toda a fila (imprevisto — pede confirmação)"
               onClick={onClearAll}
             >
               <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

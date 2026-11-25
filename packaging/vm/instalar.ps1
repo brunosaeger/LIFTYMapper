@@ -44,6 +44,9 @@ if ($existe -and (Get-Service $Servico).Status -ne 'Stopped') {
 }
 Copy-Item (Join-Path $aqui 'LIFTY-SERVICE.exe') $Pasta -Force
 Copy-Item (Join-Path $aqui 'nssm.exe') $Pasta -Force
+foreach ($extra in 'atualizar.ps1', 'VERSAO.txt') {  # atualizacao com 1 comando (ver atualizar.ps1)
+    if (Test-Path (Join-Path $aqui $extra)) { Copy-Item (Join-Path $aqui $extra) $Pasta -Force }
+}
 Write-Host "LIFTY-SERVICE.exe e nssm.exe copiados."
 
 if ($Dados) {

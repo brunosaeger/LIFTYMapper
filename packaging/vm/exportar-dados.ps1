@@ -30,7 +30,7 @@ if (Test-Path $queue) {
 }
 
 $obrigatorios = 'calibration.json', 'users.json'
-$recomendados = 'session_secret.key', 'route_log.json', 'robot_host.txt', 'dock_shadow.jsonl'
+$recomendados = 'session_secret.key', 'route_log.json', 'robot_host.txt', 'dock_shadow.jsonl', 'operation_hours.json'
 foreach ($f in $obrigatorios) { if (-not (Test-Path (Join-Path $Origem $f))) { Fail "$f nao encontrado em $Origem" } }
 
 $chave = @((Join-Path $Origem 'lifty_robot'), (Join-Path $HOME '.ssh\lifty_robot')) | Where-Object { Test-Path $_ } | Select-Object -First 1

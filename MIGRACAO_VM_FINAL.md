@@ -30,6 +30,7 @@ referência do que os scripts fazem e pra fazer à mão se algo falhar.
 | VM, admin | `instalar.ps1 -Dados <pasta>` | `C:\LIFTY`, copia e **confere os hashes**, protege a chave, liga o OpenSSH, firewall 8000, registra o serviço (não inicia) |
 | VM, admin | `instalar.ps1 -Iniciar` | inicia e mostra o log e o resumo pra conferir |
 | VM, admin | `instalar.ps1` (sem nada) | atualização: troca só o `.exe` |
+| VM, admin | `C:\LIFTY\atualizar.ps1` | **atualização com 1 comando** (2026-11-13): baixa a última Release do GitHub e roda o `instalar.ps1` — ver seção 10 |
 
 O pacote vem pronto do Actions: artefato **`LIFTY-VM`** (`.exe` + `nssm.exe` +
 scripts + `LEIA-ME.txt` + este guia).
@@ -284,12 +285,66 @@ C:\LIFTY\nssm.exe start LIFTY-SERVICE
 
 ## 10. Atualizar o programa depois
 
+### Com um comando (2026-11-13) — o jeito normal
+
+**Publicar a versão (no PC de desenvolvimento):** commit + `git push`, depois
+criar e empurrar uma tag `v*`:
+
+```powershell
+git tag v1.1
+git push origin v1.1
+```
+
+A tag dispara o "Build LIFTY.exe", que publica uma **Release** com o
+`LIFTY-VM.zip` (o mesmo pacote do artefato `LIFTY-VM`, com um `VERSAO.txt`
+dentro: tag + commit). O link é fixo e público, sem login:
+`https://github.com/brunosaeger/LIFTYMapper/releases/latest/download/LIFTY-VM.zip`.
+Rodar o workflow na mão (sem tag) continua gerando só os artefatos, sem Release.
+
+**Instalar na VM (PowerShell como administrador, robô ocioso):**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\LIFTY\atualizar.ps1
+```
+
+O `atualizar.ps1` para no primeiro problema, sem trocar nada:
+
+1. confere no `C:\LIFTY\queue_state.json` que não há rota rodando, pendente ou na
+   fila (se houver, recusa; `-Forcar` passa por cima, não recomendado);
+2. baixa o `LIFTY-VM.zip` da última Release e extrai num temporário;
+3. guarda o `.exe` atual (e o `VERSAO.txt`) em `C:\LIFTY\backups\programa-anterior`;
+4. roda o `instalar.ps1` do pacote novo sem `-Dados` (troca só o programa, os
+   dados ficam) e religa o serviço;
+5. mostra a versão nova e a que estava antes.
+
+Opções:
+
+| Opção | Para quê |
+|---|---|
+| `-Voltar` | volta pro programa guardado no passo 3 e religa |
+| `-Zip C:\caminho\LIFTY-VM.zip` | VM sem acesso ao github.com: usa um zip baixado em outro PC |
+| `-Forcar` | atualiza mesmo com rota na fila |
+
+**Primeira vez** (o `atualizar.ps1` ainda não existe em `C:\LIFTY`): uma linha
+que baixa o script e já atualiza. Depois disso o próprio `instalar.ps1` mantém o
+`C:\LIFTY\atualizar.ps1` em dia.
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol='Tls12'; irm https://raw.githubusercontent.com/brunosaeger/LIFTYMapper/main/packaging/vm/atualizar.ps1 -OutFile C:\LIFTY\atualizar.ps1; powershell -ExecutionPolicy Bypass -File C:\LIFTY\atualizar.ps1
+```
+
+### À mão (se o script não servir)
+
 1. Commit + `git push` → Actions → baixar `LIFTY-SERVICE-windows` (seções 1-2).
 2. Com o robô ocioso: `nssm stop LIFTY-SERVICE`, trocar o `.exe` (mantendo os
    arquivos de dados e a chave), `nssm start LIFTY-SERVICE`.
-3. Se a atualização mexeu em `robot-bridge/`: copiar o bridge novo pro robô
-   (`scp` pro `~/lifty_turn_check_bridge.py`, com backup do anterior) e derrubar
-   o processo antigo — a vigia sobe o novo sozinha.
+
+### Em qualquer dos dois casos
+
+- Se a atualização mexeu em `robot-bridge/`: copiar o bridge novo pro robô
+  (`scp` pro `~/lifty_turn_check_bridge.py`, com backup do anterior) e derrubar
+  o processo antigo — a vigia sobe o novo sozinha. O `atualizar.ps1` não mexe no
+  robô, só na VM.
 
 ## 11. Backups automáticos e como restaurar
 

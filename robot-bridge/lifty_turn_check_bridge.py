@@ -34,7 +34,11 @@ independente dos topicos ROS que ja existem no robo, nada mais:
 - /mobile_base/commands/fork_info + /avoid_distance -- GET /obstacle devolve as distancias
   dos sensores de obstaculo (cm, 255 = livre) que o app usa pra parar o
   robo (validado em campo 2026-10-28: parou com front=71 / back=31 e voltou
-  a andar no instante em que o valor voltou a 255). SO LEITURA. Excecao
+  a andar no instante em que o valor voltou a 255). Tambem devolve
+  "blocked" (ultimo "D0 05 55" do /mobile_base/debug/raw_data_stream, o
+  "estou bloqueado" do proprio robo -- ver _on_raw_stream) e "camera"
+  (tentativas seguidas sem reconhecer o pallet -- ver _on_get_pallet_pose).
+  SO LEITURA. Excecao
   combinada com o usuario a regra "so tipos padrao": o tipo e da REEMAN
   (driver_msgs/ForkliftDistance), entao assina como AnyMsg e monta a classe
   na hora a partir da definicao que o proprio publicador manda no cabecalho
@@ -124,6 +128,29 @@ OBSTACLE_FIELDS = ("front", "back", "left", "right", "f_left", "f_right")
 # muda, entao guarda a ultima.
 AVOID_TOPIC = "/avoid_distance"
 _obstacle = {"values": None, "t": None, "avoid": None}
+# "Estou BLOQUEADO" do proprio robo (2026-11-13). No trafego bruto da placa
+# (std_msgs/String, ~60 Hz) aparece "D0 05 55 aa bb cc dd" a cada ~2 s
+# SOMENTE enquanto o robo esta parado por obstaculo -- sumiu no instante em
+# que o caminho ficou livre (teste ao vivo: pessoa na frente -> "36 FF FF FF",
+# 54 cm na frente; saiu -> so 51/52). E o mesmo registro que o app grava no
+# forklift_log ("36FF384D", em lotes de 60 s), so que ao vivo. Os 4 bytes sao
+# distancias em cm (frente, garfo, esquerda, direita; 255 = livre). SO LEITURA.
+RAW_STREAM_TOPIC = "/mobile_base/debug/raw_data_stream"
+BLOCKED_PREFIX = "D0 05 55 "
+_blocked = {"t": None, "dist": None}
+
+
+def _on_raw_stream(msg):
+    data = msg.data
+    i = data.find(BLOCKED_PREFIX)
+    if i < 0:
+        return
+    try:
+        dist = [int(b, 16) for b in data[i + len(BLOCKED_PREFIX):].split()[:4]]
+    except ValueError:
+        return
+    if len(dist) == 4:
+        _blocked["t"], _blocked["dist"] = time.time(), dist
 _dynamic_classes = {}
 
 
@@ -178,6 +205,10 @@ ODOM_MAX_GAP_SECONDS = 0.5  # buraco maior que isso na odometria nao e integrado
 _dock_lock = threading.Lock()
 _odom = {"cum": 0.0, "stamp": None, "vx": None}
 _dock = {"boot": int(time.time()), "next_id": 1, "current": None, "done": []}
+# Camera nao reconhecendo o pallet (2026-11-13; ver _on_get_pallet_pose).
+# /robot_api/get_pallet_pose e std_msgs/Bool publicado pelo app. SO LEITURA.
+GET_PALLET_POSE_TOPIC = "/robot_api/get_pallet_pose"
+_cam = {"active": False, "seen": False, "failStreak": 0, "lastFailT": None, "lastOkT": None}
 _decode_failed = set()
 
 
@@ -213,6 +244,31 @@ def _finish_stale_dock(now):
     _dock["current"] = None
 
 
+def _on_get_pallet_pose(msg):
+    """App liga (True) / desliga (False) a busca do pallet pela camera
+    ("send: get_pallet_pose[on/off]" no forklift_log). Desligou sem nenhuma
+    deteccao = uma tentativa sem reconhecer o pallet (o app registra
+    "相机超时未识别到卡板" apos 10 s e tenta de novo; em 10/11 desistiu
+    depois de 4)."""
+    now = time.time()
+    with _dock_lock:
+        if msg.data:
+            _cam.update(active=True, seen=False)
+        elif _cam["active"]:
+            _cam["active"] = False
+            if not _cam["seen"]:
+                _cam["failStreak"] += 1
+                _cam["lastFailT"] = now
+
+
+def _camera_payload():
+    now = time.time()
+    with _dock_lock:
+        return {"active": _cam["active"], "failStreak": _cam["failStreak"],
+                "lastFailAgo": None if _cam["lastFailT"] is None else round(now - _cam["lastFailT"], 1),
+                "lastOkAgo": None if _cam["lastOkT"] is None else round(now - _cam["lastOkT"], 1)}
+
+
 def _on_pallet_camera(raw):
     msg = _decode_once(raw, PALLET_CAMERA_TOPIC)
     if msg is None:
@@ -223,6 +279,7 @@ def _on_pallet_camera(raw):
         _finish_stale_dock(now)
         if not (x or y or angle):
             return
+        _cam.update(seen=True, failStreak=0, lastOkT=now)  # reconheceu o pallet
         odom = _odom["cum"]
         cur = _dock["current"]
         if cur is None:
@@ -278,7 +335,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if _obstacle["values"] is None:
                 self._json(503, {"error": "ainda sem leitura de %s" % OBSTACLE_TOPIC})
             else:
-                self._json(200, dict(_obstacle["values"], age=round(time.time() - _obstacle["t"], 2), avoid=_obstacle["avoid"]))
+                blocked = None
+                if _blocked["t"] is not None:
+                    blocked = {"ago": round(time.time() - _blocked["t"], 2), "dist": _blocked["dist"]}
+                self._json(200, dict(_obstacle["values"], age=round(time.time() - _obstacle["t"], 2), avoid=_obstacle["avoid"],
+                                     blocked=blocked, camera=_camera_payload()))
         elif parsed.path == "/dock-shadow":
             self._json(200, _dock_shadow_payload())
         else:
@@ -371,9 +432,11 @@ if __name__ == "__main__":
     fork_pub = rospy.Publisher(FORK_NAV_HEIGHT_TOPIC, String, queue_size=1)
     rospy.Subscriber(OBSTACLE_TOPIC, rospy.AnyMsg, _on_fork_info, queue_size=1)
     rospy.Subscriber(AVOID_TOPIC, rospy.AnyMsg, _on_avoid_distance, queue_size=1)
+    rospy.Subscriber(RAW_STREAM_TOPIC, String, _on_raw_stream, queue_size=100)
     # fila maior: perder mensagem aqui = buraco na integracao / janela perdida
     rospy.Subscriber(ODOM_TOPIC, rospy.AnyMsg, _on_odom, queue_size=50)
     rospy.Subscriber(PALLET_CAMERA_TOPIC, rospy.AnyMsg, _on_pallet_camera, queue_size=20)
+    rospy.Subscriber(GET_PALLET_POSE_TOPIC, Bool, _on_get_pallet_pose, queue_size=10)
     rospy.sleep(0.5)  # da tempo dos publishers se registrarem no master antes do 1o uso
 
     # Threading: o /check-turn pode esperar ate 5 s pela resposta do robo e nao

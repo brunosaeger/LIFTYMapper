@@ -25,8 +25,10 @@ Todos os comandos: PowerShell COMO ADMINISTRADOR, dentro desta pasta.
 
 4) Tablets: http://<IP da VM>:8000
 
-Atualizar o programa depois (robo ocioso): extrair o pacote novo e rodar
-     powershell -ExecutionPolicy Bypass -File .\instalar.ps1
-(troca so o .exe; os dados ficam como estao)
+Atualizar o programa depois -- UM comando (admin; baixa a ultima Release do
+GitHub, confere se o robo esta ocioso, guarda o programa atual e troca):
+     powershell -ExecutionPolicy Bypass -File C:\LIFTY\atualizar.ps1
+(troca so o .exe; os dados ficam como estao. Voltar pro anterior: mesmo
+comando com -Voltar. VM sem internet: -Zip C:\caminho\LIFTY-VM.zip)
 
 Pasta do servico: C:\LIFTY   (dados, backups\ e logs\lifty.log)

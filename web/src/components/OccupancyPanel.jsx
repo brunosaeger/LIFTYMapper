@@ -5,7 +5,7 @@ import blueTexture from '../assets/pallet-blue.png';
 import ManualInfoButton from './ManualInfoButton';
 
 // Modo Marcação = pincel de material (2026-10-30; antes era o X sem
-// material). Escolhido o material, tocar/arrastar nos quadrados marca o
+// material; desde 2026-11-13 só toque, sem arrastar). Escolhido o material, tocar nos quadrados marca o
 // pallet daquele material (fundo vivo + textura) e já ocupa a posição;
 // começar num quadrado que já tem esse material o esvazia. "Remover
 // marcação" (ou nenhum material escolhido) esvazia o que tocar. O Ponto a Ponto
@@ -25,7 +25,7 @@ export default function OccupancyPanel({
     <div className="points-panel">
       <h2 className="points-panel__title">
         Ocupação ({occupied.length})
-        <ManualInfoButton page={26} onOpen={onOpenManual} />
+        <ManualInfoButton page={25} onOpen={onOpenManual} />
       </h2>
       <div className="ptp-bar__pallet brush-panel">
         <h3 className="ptp-bar__pallet-title">Material do pallet</h3>
@@ -57,12 +57,12 @@ export default function OccupancyPanel({
         </button>
         <p className="ptp-bar__hint brush-panel__note">
           {brushMaterial === 'wood' || brushMaterial === 'blue'
-            ? 'Toque ou arraste nos quadrados pra marcar. Começar num quadrado que já tem esse material o esvazia.'
-            : 'Toque ou arraste nos quadrados pra remover a marcação (posição vazia).'}
+            ? 'Toque num quadrado pra marcar. Tocar num quadrado que já tem esse material o esvazia.'
+            : 'Toque num quadrado pra remover a marcação (posição vazia).'}
         </p>
         {unknown > 0 && (
           <p className="ptp-bar__hint brush-panel__warn">
-            {unknown} posição(ões) com X são marcações antigas, sem material — pinte por cima com o material certo.
+            {unknown} posição(ões) com X são marcações antigas, sem material — toque nelas com o material certo.
             Tarefas com origem nelas não podem ser enviadas.
           </p>
         )}

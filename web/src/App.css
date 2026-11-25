@@ -1587,6 +1587,106 @@
   gap: 10px;
 }
 
+/* --- Recebimento de tarefas / horário de operação (2026-11-24) --------- */
+.users-panel__ophours {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--panel-line);
+  border-radius: 8px;
+  background: var(--panel-base);
+}
+
+.users-panel__ophours-switch {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.users-panel__ophours-switch input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.users-panel__ophours-track {
+  flex: none;
+  position: relative;
+  width: 36px;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--panel-line);
+  transition: background 0.15s;
+}
+
+.users-panel__ophours-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.15s;
+}
+
+.users-panel__ophours-switch input:checked + .users-panel__ophours-track {
+  background: var(--state-error);
+}
+
+.users-panel__ophours-switch input:checked + .users-panel__ophours-track::after {
+  transform: translateX(16px);
+}
+
+.users-panel__ophours-switch input:disabled + .users-panel__ophours-track {
+  opacity: 0.7;
+}
+
+.users-panel__ophours-switch input:focus-visible + .users-panel__ophours-track {
+  outline: 2px solid var(--text-primary);
+  outline-offset: 2px;
+}
+
+.users-panel__ophours-note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.users-panel__ophours-range {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.users-panel__ophours-time {
+  flex: 1 1 120px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.users-panel__ophours-time-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.users-panel__ophours-time-row .points-panel__input {
+  width: 100%;
+  padding-right: 24px;
+}
+
 .users-panel__row {
   display: flex;
   flex-direction: column;

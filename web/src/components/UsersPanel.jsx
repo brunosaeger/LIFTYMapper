@@ -1,6 +1,6 @@
 import ManualInfoButton from './ManualInfoButton';
 import { useEffect, useState } from 'react';
-import { fetchUsers, createUser, updateUser, deleteUser, fetchKanbans } from '../api/auth';
+import { fetchUsers, createUser, updateUser, deleteUser, fetchKanbans, fetchOperationHours, saveOperationHours } from '../api/auth';
 
 // Painel "Usuários" — só visível pra quem logou como admin (ver App.jsx,
 // gate por user.isAdmin, independente do modo desenvolvedor de edição de
@@ -145,6 +145,7 @@ export default function UsersPanel({ onOpenManual, currentUsername, showToast, o
           )}
         </div>
       </div>
+      <OperationHoursSection showToast={showToast} />
       {status === 'loading' && <p className="points-panel__empty">Carregando…</p>}
       {status === 'error' && <p className="points-panel__empty">Erro ao carregar usuários.</p>}
       {status === 'idle' && visibleUsers.length === 0 && (
@@ -171,6 +172,89 @@ export default function UsersPanel({ onOpenManual, currentUsername, showToast, o
       )}
       <NewUserForm onCreate={handleCreate} kanbans={kanbans} onFocusKanban={onFocusKanban} onOpenManual={onOpenManual} />
     </div>
+  );
+}
+
+// Recebimento de tarefas do robô (pedido do usuário, 2026-11-24 — ver
+// server.py, "Horário de operação"): switch manual + faixa de OPERAÇÃO (relógio
+// da VM). Fora da faixa o switch aparece ligado sozinho e travado; dentro dela
+// volta ao valor manual. Sondado a cada 15 s pra virar sozinho na hora certa.
+function OperationHoursSection({ showToast }) {
+  const [op, setOp] = useState(null);
+
+  function load() {
+    fetchOperationHours().then(setOp).catch(() => {});
+  }
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 15000);
+    return () => clearInterval(t);
+  }, []);
+
+  async function save(changes) {
+    try {
+      setOp(await saveOperationHours(changes));
+    } catch (err) {
+      showToast('Erro: ' + err.message, 'error');
+      load();
+    }
+  }
+
+  if (!op) return null;
+  const hint = op.bySchedule
+    ? 'Fora do horário de operação — volta a receber tarefas ' + (op.start ? 'às ' + op.start : 'à meia-noite') + '.'
+    : op.blocked
+      ? 'Desligado manualmente — o robô recusa tarefas novas.'
+      : 'O robô está recebendo tarefas.';
+
+  return (
+    <section className="users-panel__ophours">
+      <label className="users-panel__ophours-switch">
+        <input
+          type="checkbox"
+          role="switch"
+          checked={op.blocked}
+          disabled={op.bySchedule}
+          onChange={(e) => save({ manual: e.target.checked })}
+        />
+        <span className="users-panel__ophours-track" aria-hidden="true" />
+        <span>Recusar tarefas do robô</span>
+      </label>
+      <p className={op.blocked ? 'users-panel__kanbans-hint' : 'users-panel__ophours-note'}>{hint}</p>
+      <div className="users-panel__ophours-range">
+        <TimeField label="Opera a partir das" value={op.start} onSave={(v) => save({ start: v })} />
+        <TimeField label="Até as" value={op.end} onSave={(v) => save({ end: v })} />
+      </div>
+      <p className="users-panel__ophours-note">Horário da VM: {op.serverTime}. Tarefas já na fila não são afetadas.</p>
+    </section>
+  );
+}
+
+// Salva quando o horário fica completo (ou é apagado) — não a cada dígito.
+function TimeField({ label, value, onSave }) {
+  const [draft, setDraft] = useState(value || '');
+  useEffect(() => { setDraft(value || ''); }, [value]);
+
+  function commit(v) {
+    if ((v || null) !== (value || null)) onSave(v || null);
+  }
+
+  return (
+    <label className="users-panel__ophours-time">
+      <span>{label}</span>
+      <span className="users-panel__ophours-time-row">
+        <input
+          type="time"
+          className="points-panel__input"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => commit(draft)}
+        />
+        {value && (
+          <button type="button" className="users-panel__search-clear" onClick={() => { setDraft(''); commit(''); }} title="Apagar horário" aria-label="Apagar horário">✕</button>
+        )}
+      </span>
+    </label>
   );
 }
 

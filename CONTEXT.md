@@ -5537,3 +5537,110 @@ seguem no `main`.
 foi zerada em testes em 30/10 — sem material nenhuma tarefa sai); validar em campo uma coleta
 azul e uma de madeira com a altura vinda da marcação; reinício real do robô com a vigia;
 atualizar os manuais (páginas do "i" ainda falam de X e de escolher pallet no Ponto a Ponto).
+
+## Lixeira "limpar fila" fora do modo desenvolvedor (2026-11-24)
+
+A lixeira de "Rota em andamento" (Fila) aparece pra Admin e Mestre mesmo fora do modo
+desenvolvedor (e pra quem estiver no modo desenvolvedor, como antes). Sempre pede confirmação.
+Uso: imprevisto — limpa tudo no site e cancela no robô, sem giro seguro e sem devolução de pallet;
+depois um operador instruído leva o robô pra carga no modo manual. Servidor
+(`_queue_clear_all`) passou de "só admin" pra "admin ou mestre". Operador comum não vê.
+
+## Checkbox "Lotes em sequência" retirado (2026-11-24)
+
+Só o checkbox saiu da tela do Ponto a Ponto (`PointToPointBar.jsx`); `sequenceMode` e o resto da
+lógica continuam no código (começa false, então não dá mais pra montar sequência nova).
+
+## Horário de operação / recusar tarefas (2026-11-24)
+
+Painel Usuários (admin), seção no topo: switch "Recusar tarefas do robô" + a faixa de OPERAÇÃO
+("Opera a partir das" / "Até as"). Relógio da VM. Guardado em `operation_hours.json` (`manual`,
+`start`, `end`; gitignored, entra no exportar-dados). Bloqueado = manual OU FORA da faixa; fora
+dela o switch aparece ligado e travado, e volta ao manual quando a faixa começa. Faixa pode virar a
+meia-noite; só início = opera até 00:00; só fim = opera desde 00:00; início = fim é recusado.
+Gate em `POST /api/queue/enqueue-batch` (409, `operationBlocked: true`) — só tarefa NOVA; o que já
+está em andamento/na fila segue. Admin também é barrado. Mensagem (toast sem prefixo): a borda da
+faixa mais próxima de agora em círculo decide — perto do fim "Tarefa recusada - Não é permitido
+operação após as <fim>."; perto do início "...antes das <início>."; só manual: "...desligado pelo
+administrador.". `GET/POST /api/operation-hours` (POST só admin).
+
+## Modo teste (2026-11-16)
+
+`python server.py --teste` (ou `LIFTY_MODO_TESTE=1`): servidor que NUNCA fala com o robô, pra
+testar mudanças num PC na rede da fábrica com a VM operando. ROBOT_HOST fixo em
+`http://127.0.0.1:9/` (set_robot_host ignora qualquer outro), sem varredura/redescoberta, sem vigia
+do bridge e sem SSH. Verificado: 12 s rodando, 0 conexões externas, painel em localhost:8000. Usa os
+dados da pasta local (calibration/users/queue_state — cópia antiga, só deste PC).
+
+## Aviso "câmera não reconhece o pallet" (2026-11-13, AINDA NÃO VALIDADO EM CAMPO)
+
+Na coleta o app publica `/robot_api/get_pallet_pose` (std_msgs/Bool) true, espera 10 s e, sem
+detecção, loga "相机超时未识别到卡板", publica false e tenta de novo (EXM 10/11: 4 vezes e desistiu,
+parado na frente do pallet). O bridge assina esse Bool (só leitura) + as detecções que já lia
+(`/lx_camera_pallet_node/forklift_pallet_pose`, ≠ 0): liga→desliga sem detecção = 1 falha;
+`GET /obstacle` ganhou `camera: {failStreak, lastFailAgo, lastOkAgo, active}`. server.py
+(`_refresh_camera_watch`, na thread da vigia de obstáculo): rota com coleta pendente + falha ≤ 30 s
+→ aviso vermelho com o apelido da posição e o nº de tentativas; some ao reconhecer, ao coletar, ao
+começar outra rota, ou 5 min depois da rota sair da fila. Causa comum: frente do pallet azul
+descascada/escura.
+
+## Marcação: só clique + restrita ao kanban do usuário (2026-11-13, AINDA NÃO VALIDADO EM CAMPO)
+
+- Pincel de arrastar desligado (`registerPaintTouch` em FloorPlanCanvas.jsx): o gesto marca só o
+  quadrado onde começou; sair pra outro quadrado anula o gesto.
+- Usuário restrito (comum, com kanban atribuído) só marca/desmarca células de lote dos kanbans
+  dele (+ FREE_KANBAN_IDS), mesma regra da origem (`_user_can_mark` → `_user_can_pick_up_from`).
+  Pontos avulsos (quadrados laranja, saídas EX*) ficam livres pra todos. Gate no servidor nos 3
+  endpoints de marcação (`_reject_outside_kanban`: 403 com `denied`); o app mostra alerta de erro +
+  pulso vermelho no quadrado (`notifyOutsideKanban`). Admin/Mestre e conta sem kanban: sem restrição.
+- O manual REV-01, pág. 26, ainda fala em "toque e arraste".
+
+## Aviso de obstáculo sem exceção de lugar (2026-11-13, AINDA NÃO VALIDADO EM CAMPO)
+
+Regra do usuário: **parou e foi por obstrução → avisa**, sem adivinhar por geometria. Em
+`_refresh_obstacle` saíram a faixa de encaixe (`_in_docking_zone`, que ignorava frente e laterais até
+0,8 m além do H) e o raio de 1,2 m do carregador. Motivo: em 12/11 o robô parou 29 s (EXE2, 08:28) e
+34 s (EXE, 15:48) na correção de alinhamento da câmera ("偏差大，前进 + 曲线 + 直线": anda até ~0,5 m
+PARA FRENTE além do H) com a frente bloqueada (desvio 60 cm), e o tablet não mostrou nada. Critério
+que fica: parado ≥ 5 s + leitura abaixo da distância de desvio do próprio robô (+3 cm). Só não avisa
+quando o motivo da parada é conhecido (esperando planejador, carregando, emergência) ou a leitura é
+0-2 (sensor mascarado pelo app). Se aparecer aviso falso em algum lugar, corrigir com dado do robô
+(ex.: o desvio que ele usa ali), não com distância/posição.
+
+**`isNavigating` NÃO serve pra filtrar** (testado 2026-11-13 no forklift_log de 03/11 a 13/11): o
+app grava uma linha hex de 4 bytes (`36FF384D` = distâncias em cm dos sensores) a cada ~2 s enquanto
+está BLOQUEADO -- é o registro exato da parada por obstáculo. 120 de 822 dessas linhas saíram com
+`isNavigating=false`, incluindo os bloqueios da EXE/EXE2 de 12/11 (manobra
+TAKE_PALLET_GET_CAMERA_PALLET_POSE) e PUTING_PALLET: as manobras de encaixe do app não contam como
+navegação. Esse log é gravado em lotes de ~60 s, então não serve de gatilho ao vivo -- só de
+conferência depois.
+
+**Fonte ao vivo achada (2026-11-13, teste com o usuário parado na frente do robô):** no
+`/mobile_base/debug/raw_data_stream` (std_msgs/String, ~60 Hz) aparece `D0 05 55 aa bb cc dd` a cada
+~2 s SÓ enquanto bloqueado (`36 FF FF FF` = 54 cm na frente, batendo com fork_info front=54); com o
+caminho livre, só os pacotes 51/52. O bridge expõe isso em `/obstacle` como `blocked` (`ago`, `dist`) e
+o server.py, com bridge novo, avisa SÓ por esse sinal (+ parado ≥ 5 s); com bridge antigo, cai na
+regra dos sensores. O sinal diz QUANDO; o LADO do aviso sai dos campos nomeados do fork_info
+(left/right validados em campo 28/10) -- os 4 bytes do sinal só de reserva, então a ordem deles não
+importa. Corrigido junto: os cantos f_left/f_right contam como FRENTE (como validado em 28/10 e
+reconfirmado 13/11: pessoa na frente -> front=54 e f_left=54, robô reportou "frente 54"); o código
+os juntava às laterais desde 28/10 (canto bloqueado aparecia como "LATERAL").
+
+## Navegação travada: "Erro inesperado. O robô precisa ser reiniciado." (2026-11-13, AINDA NÃO VALIDADO EM CAMPO)
+
+Incidente 13/11, 08:14 (hora daqui): o lidar do braço direito do garfo (192.168.10.162) caiu e
+reconectou 246 vezes em 4 min (`激光雷达断线` no roslog, nunca tinha passado de 2-3 quedas por
+sessão). Menos de 1 s depois da última queda, logo após levantar o pallet na EXA
+(`TAKE_PALLET_RAISE_THE_ARM_COMPLETE_RETURNING_TO_DOCKING_POINT`), a navegação parou de passar a
+posição pro app do robô: o app publicou "Navigation does not issue current coordinates: 4" a cada
+segundo por 2 h, parado com o pallet no garfo. O lidar voltou sozinho, a navegação não; só
+reiniciando o robô. `/reeman/pose` seguia respondendo normal durante o travamento.
+
+`_refresh_nav_freeze_watch()` (toda volta da fila, via `_queue_tick`): o dispatch grava esse aviso
+UMA vez em `/error/records` (id 4420 no dia, não repete enquanto dura). Registro com id acima de
+tudo que existia quando o servidor subiu e com `NAV_FREEZE_ERROR_TEXT` na descrição liga
+`robotStalledMessage = NAV_FREEZE_MESSAGE` (vermelho, prioridade sobre os outros avisos). Apaga
+quando o robô anda `NAV_FREEZE_CLEAR_DISTANCE_M` (0,5 m) desde o aviso ou fica sem responder por
+`NAV_FREEZE_CLEAR_OFFLINE_SECONDS` (20 s, reiniciando). Só avisa, não comanda nada no robô.
+Simulado com o robô substituído (registro velho não dispara, soluço de rede não apaga, reinício e
+movimento apagam); falta ver acontecer de verdade.

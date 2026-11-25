@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 
-// Manual do usuário (PDF original: "MANUAL USUARIO LIFTY MAPPER.pdf"),
+// Manual do usuário (PDF original: "MANUAL  USUARIO LIFTY MAPPER -REV-01.pdf",
+// 2026-11-13; Ponto a Ponto p.19, Marcação p.25, Fila p.27),
 // pré-renderizado em JPEG (public/manual/p-NN.jpg, 1 por página) em vez de
 // embutir o PDF: o Chrome do Android não tem leitor de PDF embutido (baixa o
 // arquivo e ignora #page=N), e assim funciona igual em qualquer tablet, sem

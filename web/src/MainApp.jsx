@@ -326,7 +326,27 @@ export default function MainApp({ user, onLogout }) {
   // Resposta do servidor com posições recusadas (corrida: entrou na fila
   // entre o toque e a gravação).
   function reportBlocked(result) {
-    if (result && result.blocked && result.blocked.length) notifyReserved(result.blocked[0]);
+    if (result && result.denied && result.denied.length) notifyOutsideKanban(result.denied[0]);
+    else if (result && result.blocked && result.blocked.length) notifyReserved(result.blocked[0]);
+  }
+
+  // Usuário restrito tentando marcar fora do(s) kanban(s) dele (pedido do
+  // usuário, 2026-11-13; o servidor decide, ver _user_can_mark): alerta de
+  // erro + pulso vermelho no quadrado tocado. Pontos laranja não entram.
+  function notifyOutsideKanban(name) {
+    showToast('Você só pode marcar pallets no(s) seu(s) kanban(s). '
+      + displayCellName(name, lots, points) + ' fica fora deles.', 'error');
+    triggerInvalidPulse(name);
+  }
+
+  // Erro de rede/servidor numa marcação: fora do kanban ganha o aviso
+  // próprio; o resto, a mensagem genérica.
+  function reportMarkError(prefix) {
+    return (err) => {
+      const denied = err && err.data && err.data.denied;
+      if (denied && denied.length) notifyOutsideKanban(denied[0]);
+      else showToast(prefix + err.message, 'error');
+    };
   }
 
   function triggerInvalidPulse(name, { silent = false } = {}) {
@@ -1407,7 +1427,9 @@ export default function MainApp({ user, onLogout }) {
       // corrigir em vez de ter que remontar tudo do zero.
       setStagedUnits([]);
     } catch (e) {
-      showToast('Erro ao iniciar tarefas: ' + e.message, 'error');
+      // Horário de operação / switch do admin: a mensagem do servidor já é o
+      // aviso completo ("Tarefa recusada - ..."), sem prefixo.
+      showToast(e.data?.operationBlocked ? e.message : 'Erro ao iniciar tarefas: ' + e.message, 'error');
     } finally {
       setStarting(false);
     }
@@ -1438,9 +1460,17 @@ export default function MainApp({ user, onLogout }) {
     }
   }
 
-  // Modo desenvolvedor: lixeira da Fila — limpa tudo e cancela no robô, sem o tratamento robusto.
+  // Lixeira da Fila — limpa tudo e cancela no robô, sem o tratamento robusto
+  // (sem giro seguro, sem devolver pallet). Pra imprevisto: depois um operador
+  // instruído leva o robô pra carga no modo manual. Admin e Mestre veem fora
+  // do modo desenvolvedor (pedido do usuário, 2026-11-24); sempre confirma.
   async function handleClearQueue() {
-    if (!window.confirm('Limpar TODA a fila e cancelar no robô? Sem giro seguro nem devolução de pallet.')) return;
+    if (!window.confirm(
+      'LIMPAR TODA A FILA?\n\n'
+      + 'Todas as tarefas (em andamento e na fila) serão apagadas do site e canceladas no robô, '
+      + 'SEM giro seguro e SEM devolução de pallet.\n\n'
+      + 'Use só em imprevisto. Depois, um operador instruído deve levar o robô à base de carga no modo manual.',
+    )) return;
     try {
       const result = await clearQueue();
       if (result && result.warning) showToast(result.warning, 'error');
@@ -1658,13 +1688,13 @@ export default function MainApp({ user, onLogout }) {
           occupiedNames={occupied}
           queueMarks={queueMarks}
           onMarkOccupied={(names, isOccupied) => setOccupiedMany(names, isOccupied).then(reportBlocked)
-            .catch((err) => showToast('Erro ao marcar: ' + err.message, 'error'))}
+            .catch(reportMarkError('Erro ao marcar: '))}
           palletMaterials={palletMaterials}
           reservedPositions={reservedPositions}
           onReservedTouch={notifyReserved}
           brushMaterial={mode === 'mark' ? (brushMaterial || 'erase') : null}
           onMarkMaterial={(names, material) => setPalletMaterial(names, material).then(reportBlocked)
-            .catch((err) => showToast('Erro ao marcar o material: ' + err.message, 'error'))}
+            .catch(reportMarkError('Erro ao marcar o material: '))}
           markModeActive={mode === 'mark'}
           onToggleMarkMode={handleToggleMarkMode}
           ptpModeActive={mode === 'ptp'}
@@ -1794,7 +1824,7 @@ export default function MainApp({ user, onLogout }) {
               selectedRouteId={selectedQueueRouteId}
               onSelectRoute={handleSelectQueueRoute}
               onCancelCurrent={handleCancelCurrent}
-              onClearAll={devMode ? handleClearQueue : null}
+              onClearAll={devMode || user.isAdmin || user.isMaster ? handleClearQueue : null}
               onOpenManual={setManualPage}
               onRemoveQueued={handleRemoveQueued}
               onReorder={handleReorderQueueRoute}
@@ -1813,7 +1843,7 @@ export default function MainApp({ user, onLogout }) {
               points={points}
               onToggle={(name) => (reservedPositions[name]
                 ? notifyReserved(name)
-                : toggleOccupied(name).catch((err) => showToast('Erro ao desmarcar: ' + err.message, 'error')))}
+                : toggleOccupied(name).catch(reportMarkError('Erro ao desmarcar: ')))}
               brushMaterial={brushMaterial}
               palletMaterials={palletMaterials}
               onBrushMaterialChange={setBrushMaterial}

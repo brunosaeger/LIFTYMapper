@@ -9,7 +9,9 @@ async function jsonRequest(path, options) {
   try { data = await res.json(); } catch { /* resposta vazia ou não-JSON */ }
   if (!res.ok) {
     const msg = (data && data.error) || ('Falha HTTP ' + res.status);
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.data = data; // ex.: { denied: [...] } da marcação fora do kanban
+    throw err;
   }
   return data;
 }

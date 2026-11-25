@@ -48,6 +48,8 @@ import http.cookies
 import http.server
 import json
 import math
+import os
+import re
 import secrets
 import shutil
 import socket
@@ -103,6 +105,18 @@ ROBOT_HOST = "http://192.168.5.195/" #http://192.168.43.74 ou http://172.16.1.24
 LISTEN_PORT = 8000
 # ---------------------------------------------------------------------------
 
+# MODO TESTE (pedido do usuário, 2026-11-16): roda o servidor num PC pra
+# testar mudanças SEM nunca falar com o robô, mesmo conectado na rede da
+# fábrica com a VM operando (dois servidores no mesmo robô = conflito). Liga
+# com `python server.py --teste` ou a variável LIFTY_MODO_TESTE=1. Faz:
+# ROBOT_HOST fixo num endereço local sem nada escutando (toda chamada ao
+# robô/SLAM/bridge falha na hora), sem varredura da rede, sem redescoberta,
+# sem vigia do bridge e sem SSH. Usa os arquivos de dados da pasta local.
+TEST_MODE = "--teste" in sys.argv or os.environ.get("LIFTY_MODO_TESTE", "").strip() in ("1", "true", "sim")
+TEST_ROBOT_HOST = "http://127.0.0.1:9/"  # porta "discard": nada escuta, conexão recusada na hora
+if TEST_MODE:
+    ROBOT_HOST = TEST_ROBOT_HOST
+
 
 def set_robot_host(host):
     """Troca o IP/host do robô em tempo de execução (a GUI do .exe chama
@@ -110,6 +124,9 @@ def set_robot_host(host):
     `http://192.168.1.5` ou `http://192.168.1.5/` — normaliza pra forma com
     esquema e barra final, que é o que _robot_call/_proxy esperam."""
     global ROBOT_HOST
+    if TEST_MODE:
+        ROBOT_HOST = TEST_ROBOT_HOST  # modo teste: nunca aponta pro robô de verdade
+        return
     host = (host or "").strip()
     if not host:
         return
@@ -179,6 +196,8 @@ def discover_robot_host():
     varre a sub-rede /24 inteira se isso falhar. Sempre devolve algo utilizável
     em ROBOT_HOST: se não achar nada, mantém o que já estava (não apaga o
     valor anterior)."""
+    if TEST_MODE:
+        return None  # modo teste: não procura o robô
     candidates_first = []
     if ROBOT_HOST_CACHE_FILE.exists():
         cached = ROBOT_HOST_CACHE_FILE.read_text(encoding="utf-8").strip()
@@ -231,7 +250,7 @@ def _note_possible_ip_change(err):
     é sinal de IP errado). Dispara uma redescoberta em segundo plano, com
     cooldown pra não martelar a rede inteira a cada chamada se o robô
     estiver genuinamente desligado/fora da rede."""
-    if isinstance(err, urllib.error.HTTPError):
+    if TEST_MODE or isinstance(err, urllib.error.HTTPError):
         return
     global _last_discovery_attempt
     now = time.monotonic()
@@ -407,6 +426,85 @@ OCCUPIED_SET_PATH = "/api/occupied/set"
 OCCUPIED_SET_MANY_PATH = "/api/occupied/set-many"
 PALLET_MATERIAL_PATH = "/api/occupied/material"
 PALLET_HEIGHTS_PATH = "/api/pallet-heights"
+
+# --- Horário de operação (pedido do usuário, 2026-11-24) --------------------
+# Painel Usuários (admin): um switch manual "recusar tarefas" + a faixa de
+# OPERAÇÃO (início/fim, HH:MM, relógio DESTA máquina — a VM). FORA da faixa
+# o switch fica ligado sozinho; dentro dela volta ao valor manual. Bloqueado =
+# manual OU fora da faixa. Só barra tarefa NOVA (POST enqueue-batch); o que
+# já estava em andamento/na fila segue normalmente.
+# Faixa: só início → opera do início até 00:00; só fim → de 00:00 até o fim;
+# os dois → [início, fim), podendo virar a meia-noite (ex.: 22:00–06:00).
+OPERATION_HOURS_PATH = "/api/operation-hours"
+OPERATION_HOURS_FILE = _app_dir() / "operation_hours.json"
+OPERATION_HOURS_LOCK = threading.Lock()
+_HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+
+def _hhmm_minutes(value):
+    m = _HHMM_RE.match(value or "")
+    return int(m.group(1)) * 60 + int(m.group(2)) if m else None
+
+
+def _read_operation_hours():
+    cfg = {"manual": False, "start": None, "end": None}
+    try:
+        data = json.loads(OPERATION_HOURS_FILE.read_text(encoding="utf-8"))
+        cfg["manual"] = bool(data.get("manual"))
+        for k in ("start", "end"):
+            if _hhmm_minutes(data.get(k)) is not None:
+                cfg[k] = data[k]
+    except (OSError, ValueError, AttributeError):
+        pass
+    return cfg
+
+
+def _operation_window(cfg):
+    """(início, fim) em minutos do dia, ou None sem faixa. fim=1440 = 24:00."""
+    s, e = _hhmm_minutes(cfg.get("start")), _hhmm_minutes(cfg.get("end"))
+    if s is None and e is None:
+        return None
+    s = 0 if s is None else s
+    e = 1440 if e is None else e
+    return None if s == e else (s, e)
+
+
+def _in_operation_window(window, minute):
+    s, e = window
+    return s <= minute < e if s < e else (minute >= s or minute < e)
+
+
+def _fmt_minutes(m):
+    m %= 1440
+    return "%02d:%02d" % (m // 60, m % 60)
+
+
+def _operation_status(now=None):
+    """Estado efetivo do recebimento de tarefas + a mensagem de recusa."""
+    now = now or datetime.now()
+    with OPERATION_HOURS_LOCK:
+        cfg = _read_operation_hours()
+    window = _operation_window(cfg)
+    minute = now.hour * 60 + now.minute
+    by_schedule = bool(window) and not _in_operation_window(window, minute)
+    message = None
+    if by_schedule:
+        # Limite mostrado = a borda da faixa mais próxima de agora, contando
+        # em círculo (23:50 está a 20 min de 00:10). Logo depois do fim:
+        # "após as <fim>"; chegando perto do início: "antes das <início>".
+        s, e = window
+        dist = lambda a: min(abs(minute - a) % 1440, 1440 - abs(minute - a) % 1440)
+        if dist(e % 1440) <= dist(s):
+            message = "Tarefa recusada - Não é permitido operação após as %s." % _fmt_minutes(e)
+        else:
+            message = "Tarefa recusada - Não é permitido operação antes das %s." % _fmt_minutes(s)
+    elif cfg["manual"]:
+        message = "Tarefa recusada - O recebimento de tarefas do robô está desligado pelo administrador."
+    return {
+        "manual": cfg["manual"], "start": cfg["start"], "end": cfg["end"],
+        "bySchedule": by_schedule, "blocked": bool(message), "message": message,
+        "serverTime": now.strftime("%H:%M"),
+    }
 
 # --- cliente do dispatch service do robô (porta de src/api/lifty.js) ------
 # Antes, essas chamadas viviam no navegador (lifty.js) e passavam pelo
@@ -1398,16 +1496,16 @@ def _route_planning_message(state):
 # em GET /obstacle; uma thread própria consulta a cada ~1 s SÓ com rota
 # disparada, e o aviso sai em ~2-3 s em vez dos 40 s do alerta de "parado"
 # (que continua de reserva se o bridge cair).
-#   - fora do lote: parado >= OBSTACLE_STOPPED_SECONDS com front/back abaixo
-#     do limite -> "obstáculo à frente/atrás" com a distância;
-#   - na faixa de encaixe (eixo do docking da coleta/entrega, entre o H e o
-#     pallet): frente e laterais ficam de fora (pallet/lote perto é normal
-#     ali); o sensor do garfo segue a mesma regra de todo lugar -- 3 s
-#     parado abaixo do limite do próprio robô (pedido do usuário,
-#     2026-11-04: o garfo parou o robô num pallet mal posicionado e o tablet
-#     não mostrou nada -- antes o garfo ali exigia 10 s parado);
-#   - esperando o planejador do dispatch (corredor P3-P10): nunca -- o robô
-#     está parado no H de propósito, com os garfos de frente pro lote.
+#   - REGRA (pedido do usuário, 2026-11-13): parou por obstrução -> avisa,
+#     em QUALQUER lugar. Com o bridge novo, "parou por obstrução" é o sinal
+#     do próprio robô ("D0 05 55", ver OBSTACLE_BLOCKED_*); com o bridge
+#     antigo, um sensor abaixo da distância de desvio do próprio robô.
+#     Nada de exceção por geometria (faixa de encaixe, raio do carregador):
+#     a exceção da faixa de encaixe escondeu bloqueios reais da frente na
+#     EXE/EXE2 em 2026-11-12 (o robô avança até ~0,5 m além do H pra
+#     corrigir o alinhamento da câmera e parou ali 29-34 s sem aviso);
+#   - esperando o planejador do dispatch (corredor P3-P10) ou carregando:
+#     nunca -- aí o motivo da parada é conhecido e não é obstrução.
 # Ajustes pelo dia inteiro de coleta (todas as paradas >= 1,5 s com sensor
 # perto, 2026-10-28):
 #   - laterais também param o robô (bloqueios de propósito: parou com 45-58
@@ -1419,7 +1517,8 @@ def _route_planning_message(state):
 #     desvio do próprio robô em mãos (ele não para pela própria carga, então
 #     abaixo dela é bloqueio de verdade); com o limite fixo, ignorado;
 #   - paradas normais em nós com parede perto duram 1,8-1,9 s; bloqueio de
-#     verdade, 20-40 s -> pede 3 s parado.
+#     verdade, 20-40 s -> pedia 3 s parado; 5 s desde 2026-11-13 (garfo
+#     subindo/descendo no lote, ver OBSTACLE_STOPPED_SECONDS).
 OBSTACLE_PATH = "/obstacle"
 OBSTACLE_WATCH_INTERVAL_SECONDS = 1.0
 # Limites: o robô para quando um sensor fica abaixo da distância de desvio
@@ -1433,26 +1532,40 @@ OBSTACLE_FRONT_TRIGGER_CM = 85
 OBSTACLE_BACK_TRIGGER_CM = 60
 OBSTACLE_SIDE_TRIGGER_CM = 55
 OBSTACLE_MASKED_MAX_CM = 2
-OBSTACLE_STOPPED_SECONDS = 3.0
-OBSTACLE_DOCKING_LATERAL_METERS = 0.5
-OBSTACLE_DOCKING_AHEAD_METERS = 0.8  # quanto além do H (saindo do lote) ainda conta -- o robô gira/espera até ~0,5 m dele
+OBSTACLE_STOPPED_SECONDS = 5.0  # pedido do usuário, 2026-11-13: garfo subindo/descendo no lote leva ~2,4 s (com vizinhas ocupadas a lateral pode ficar abaixo do desvio)
 OBSTACLE_READING_MAX_AGE_SECONDS = 2.0
 # Volta à energia (AUTO_SYSTEM nativa, sem rota nossa) também vigia (pedido do
 # usuário, 2026-11-05: parado por alguém na frente perto da energia, nenhum
-# aviso). Perto do carregador fica de fora: o encaixe nele é colado de propósito.
+# aviso).
 OBSTACLE_CHARGE_ROUTE_ID = "voltando-energia"
-OBSTACLE_CHARGER_POINT = "energy"
-OBSTACLE_CHARGER_RADIUS_METERS = 1.2
-OBSTACLE_POINTS_CACHE_SECONDS = 600
-# Instrução comum (pedido do usuário, 2026-10-29). Esquerda/direita já
-# incluem os sensores frente-esquerda/frente-direita (ver _refresh_obstacle).
+# Instrução comum (pedido do usuário, 2026-10-29). Os cantos frente-esquerda/
+# frente-direita entram na FRENTE (ver _refresh_obstacle).
 OBSTACLE_ACTION = " Remova o obstáculo ou utilize o modo manual para levá-lo à energia."
 OBSTACLE_FRONT_MESSAGE = "OBSTÁCULO À FRENTE do robô (%d cm)!" + OBSTACLE_ACTION
 OBSTACLE_BACK_MESSAGE = ("SENSOR DO GARFO detectou um obstáculo (%d cm)! Verifique se há pallet mal posicionado "
                          "ou espaçamento inadequado entre pallets." + OBSTACLE_ACTION)
 OBSTACLE_LEFT_MESSAGE = "OBSTÁCULO NA LATERAL ESQUERDA do robô (%d cm)!" + OBSTACLE_ACTION
 OBSTACLE_RIGHT_MESSAGE = "OBSTÁCULO NA LATERAL DIREITA do robô (%d cm)!" + OBSTACLE_ACTION
+OBSTACLE_GENERIC_MESSAGE = "O robô parou por OBSTÁCULO!" + OBSTACLE_ACTION
+OBSTACLE_SIDE_MESSAGES = {"front": OBSTACLE_FRONT_MESSAGE, "back": OBSTACLE_BACK_MESSAGE,
+                          "left": OBSTACLE_LEFT_MESSAGE, "right": OBSTACLE_RIGHT_MESSAGE}
+# Sinal "bloqueado" do próprio robô (bridge, "D0 05 55 aa bb cc dd"; ver
+# lifty_turn_check_bridge.py). Chega a cada ~2 s enquanto dura; sem ele por
+# mais que isso = liberou. O LADO do aviso vem dos campos nomeados do
+# fork_info (validados em campo); os bytes do sinal (frente confirmada ao
+# vivo; garfo, esquerda, direita pela ordem da mensagem ForkliftDistance) só
+# entram se nenhum campo nomeado estiver abaixo do desvio naquele instante.
+OBSTACLE_BLOCKED_FRESH_SECONDS = 3.5
+OBSTACLE_BLOCKED_ORDER = ("front", "back", "left", "right")
 _obstacle_watch = {"message": None, "routeId": None, "stoppedSince": None, "points": None, "pointsAt": -1e9}
+OBSTACLE_POINTS_CACHE_SECONDS = 600  # pontos do mapa em cache (usado pela sombra do encaixe)
+
+
+def _obstacle_points():
+    if time.monotonic() - _obstacle_watch["pointsAt"] >= OBSTACLE_POINTS_CACHE_SECONDS or not _obstacle_watch["points"]:
+        _obstacle_watch["points"] = robot_point_positions() or {}
+        _obstacle_watch["pointsAt"] = time.monotonic()
+    return _obstacle_watch["points"]
 _obstacle_thread = {"t": None}
 
 
@@ -1468,29 +1581,6 @@ def robot_obstacle_distances():
     if data.get("age") is None or data["age"] > OBSTACLE_READING_MAX_AGE_SECONDS:
         return None
     return data
-
-
-def _obstacle_points():
-    if time.monotonic() - _obstacle_watch["pointsAt"] >= OBSTACLE_POINTS_CACHE_SECONDS or not _obstacle_watch["points"]:
-        _obstacle_watch["points"] = robot_point_positions() or {}
-        _obstacle_watch["pointsAt"] = time.monotonic()
-    return _obstacle_watch["points"]
-
-
-def _in_docking_zone(pose, state, current):
-    """Robô sobre o eixo do docking da coleta (ainda não feita) ou da entrega
-    da rota atual, entre o pallet e um pouco além do H."""
-    points = _obstacle_points()
-    names = [current.get("dropoff")]
-    if current.get("pickup") and not state.get("pickupCleared"):
-        names.append(current["pickup"])
-    for name in filter(None, names):
-        pallet, docking = points.get(name), points.get("H" + name)
-        if pallet and docking:
-            s, lateral, _diff = _docking_axis_geometry(pose, docking, pallet)
-            if lateral <= OBSTACLE_DOCKING_LATERAL_METERS and s <= OBSTACLE_DOCKING_AHEAD_METERS:
-                return True
-    return False
 
 
 def _set_obstacle_message(message, route_id):
@@ -1532,6 +1622,34 @@ def _refresh_obstacle():
         vals = [v for v in vals if v > OBSTACLE_MASKED_MAX_CM]
         return min(vals) if vals else 255
 
+    # Por lado, pelos campos NOMEADOS do robô (ForkliftDistance; validados em
+    # campo 28/10 nas 4 direções). Os cantos f_left/f_right contam como FRENTE
+    # (validado 28/10 e de novo 13/11: pessoa na frente -> front=54 e
+    # f_left=54, e o robô reportou "frente 54").
+    readings = {"front": reading("front", "f_left", "f_right"), "back": reading("back"),
+                "left": reading("left"), "right": reading("right")}
+
+    if "blocked" in d:
+        # Bridge novo: o próprio robô diz se está bloqueado ("D0 05 55", a
+        # cada ~2 s só enquanto está parado por obstáculo) -- sem adivinhar
+        # nada por distância/posição. O sinal diz QUANDO; o lado sai dos
+        # campos nomeados (os 4 bytes do sinal só de reserva).
+        blocked = d["blocked"]
+        if not blocked or blocked["ago"] > OBSTACLE_BLOCKED_FRESH_SECONDS:
+            _set_obstacle_message(None, None)
+            return
+        avoid = d.get("avoid") or {}
+        named = [(cm, side) for side, cm in readings.items()
+                 if cm < 255 and avoid.get(side) and cm < avoid[side] + OBSTACLE_AVOID_MARGIN_CM]
+        packet = [(cm, side) for side, cm in zip(OBSTACLE_BLOCKED_ORDER, blocked.get("dist") or [])
+                  if OBSTACLE_MASKED_MAX_CM < cm < 255]
+        if named or packet:
+            cm, side = min(named or packet)
+            _set_obstacle_message(OBSTACLE_SIDE_MESSAGES[side] % cm, route_id)
+        else:
+            _set_obstacle_message(OBSTACLE_GENERIC_MESSAGE, route_id)
+        return
+
     # Limite de cada lado = a distância de desvio que o PRÓPRIO robô está
     # usando no trecho (bridge, /avoid_distance; 0 = lado desligado). Sem ela
     # (bridge recém-ligado: o tópico só publica quando muda), os fixos.
@@ -1543,13 +1661,13 @@ def _refresh_obstacle():
 
     carrying = _robot_carrying(state) is not None
     near = []  # (cm, lado, mensagem) abaixo do limite de cada lado
-    front = reading("front")
+    front = readings["front"]
     if front < limit("front", OBSTACLE_FRONT_TRIGGER_CM):
         near.append((front, "front", OBSTACLE_FRONT_MESSAGE))
-    back = reading("back")
+    back = readings["back"]
     if back < limit("back", OBSTACLE_BACK_TRIGGER_CM) and (not carrying or avoid.get("back") is not None):
         near.append((back, "back", OBSTACLE_BACK_MESSAGE))
-    left, right = reading("left", "f_left"), reading("right", "f_right")
+    left, right = readings["left"], readings["right"]
     if left < limit("left", OBSTACLE_SIDE_TRIGGER_CM):
         near.append((left, "left", OBSTACLE_LEFT_MESSAGE))
     if right < limit("right", OBSTACLE_SIDE_TRIGGER_CM):
@@ -1557,21 +1675,77 @@ def _refresh_obstacle():
     if not near:
         _set_obstacle_message(None, None)
         return
-    pose = robot_pose()
-    if returning:
-        charger = _obstacle_points().get(OBSTACLE_CHARGER_POINT)
-        if charger and math.hypot(pose["x"] - charger["x"], pose["y"] - charger["y"]) <= OBSTACLE_CHARGER_RADIUS_METERS:
-            _set_obstacle_message(None, None)
-            return
-    elif _in_docking_zone(pose, state, current):
-        # Na faixa de encaixe é normal ter pallet/lote perto da frente e dos
-        # lados -- só o garfo conta ali.
-        near = [n for n in near if n[1] == "back"]
-        if not near:
-            _set_obstacle_message(None, None)
-            return
     cm, side, template = min(near)
     _set_obstacle_message(template % cm, route_id)
+
+
+# --- Câmera não reconhece o pallet (pedido do usuário, 2026-11-13) ----------
+# Na coleta o app liga a busca da câmera, espera 10 s e, sem achar o pallet,
+# registra "相机超时未识别到卡板" e tenta de novo (em 10/11, EXM: 4 vezes e
+# desistiu, parado na frente do pallet). Causa comum: frente do pallet azul
+# descascada/escura. O bridge conta as tentativas seguidas sem reconhecer
+# (campo "camera" do GET /obstacle). Aviso vermelho a partir da 1ª, preso à
+# rota; continua um tempo depois que a rota sai da fila (o operador precisa
+# ver mesmo se a tarefa for cancelada/falhar), até outra rota começar.
+CAMERA_FAIL_FRESH_SECONDS = 30  # tentativas são de ~10 s: falha mais velha que isso não é desta coleta
+CAMERA_ALERT_HOLD_SECONDS = 300
+CAMERA_FAIL_MESSAGE = ("A CÂMERA NÃO ESTÁ RECONHECENDO O PALLET em %s (%d tentativa(s) sem reconhecer)! "
+                       "Verifique se o pallet está bem posicionado e se a frente dele não está descascada ou "
+                       "escura, o que atrapalha a câmera.")
+_camera_watch = {"message": None, "routeId": None, "until": 0.0}
+
+
+def _display_cell_name(name):
+    """Apelido que o operador vê (mesma regra de displayCellName em
+    useCalibration.js); sem apelido, o nome técnico."""
+    try:
+        with CALIBRATION_LOCK:
+            cal = _read_calibration()
+        for lot in cal["top"]["lots"]:
+            for i in range(lot.get("count", 0)):
+                if _lot_cell_name(lot["prefix"], i) == name:
+                    return "%s %d" % (lot["displayName"], i + 1) if lot.get("displayName") else name
+        for point in cal["top"]["points"]:
+            if point.get("name") == name:
+                return point.get("displayName") or name
+    except Exception:
+        pass
+    return name
+
+
+def _set_camera_message(message, route_id=None):
+    if message != _camera_watch["message"]:
+        print("Câmera: %s" % (message or "liberado"))
+    _camera_watch["message"] = message
+    _camera_watch["routeId"] = route_id if message else None
+    _camera_watch["until"] = time.monotonic() + CAMERA_ALERT_HOLD_SECONDS if message else 0.0
+
+
+def _refresh_camera_watch():
+    with QUEUE_LOCK:
+        state = _read_queue_state()
+    current = state.get("currentRoute") or {}
+    route_id = current.get("id")
+    if _camera_watch["message"]:
+        if route_id and route_id != _camera_watch["routeId"]:
+            _set_camera_message(None)  # outra rota começou
+        elif not route_id and time.monotonic() > _camera_watch["until"]:
+            _set_camera_message(None)
+        elif route_id and state.get("pickupCleared"):
+            _set_camera_message(None)  # coletou: a câmera acabou reconhecendo
+    if not (route_id and current.get("pickup") and not state.get("pickupCleared")):
+        return
+    d = robot_obstacle_distances()
+    cam = (d or {}).get("camera")
+    if not cam:
+        return  # bridge antigo ou fora do ar
+    fail_ago, ok_ago = cam.get("lastFailAgo"), cam.get("lastOkAgo")
+    if ok_ago is not None and (fail_ago is None or ok_ago < fail_ago):
+        if _camera_watch["routeId"] == route_id:
+            _set_camera_message(None)  # reconheceu depois da falha
+        return
+    if cam.get("failStreak", 0) >= 1 and fail_ago is not None and fail_ago <= CAMERA_FAIL_FRESH_SECONDS:
+        _set_camera_message(CAMERA_FAIL_MESSAGE % (_display_cell_name(current["pickup"]), cam["failStreak"]), route_id)
 
 
 def _start_obstacle_thread():
@@ -1585,6 +1759,10 @@ def _start_obstacle_thread():
             except Exception:  # robô/rede indisponível agora -- sem aviso, tenta no próximo segundo
                 _obstacle_watch["stoppedSince"] = None
                 _set_obstacle_message(None, None)
+            try:
+                _refresh_camera_watch()
+            except Exception as err:  # nunca derruba a vigia de obstáculo; mantém o aviso como está
+                print("Câmera: erro (%s)" % err)
             if DOCK_SHADOW_ENABLED:
                 try:
                     _refresh_dock_shadow()
@@ -1763,6 +1941,8 @@ def _bridge_alive(host):
 def _bridge_ssh_start(host, restart=False):
     """Roda BRIDGE_START_SCRIPT no robô. Devolve a última linha da saída
     ('iniciado', 'ja-rodando', 'sem-arquivo') ou None se o SSH falhou."""
+    if TEST_MODE:
+        return None
     import shutil
     import subprocess
     ssh = shutil.which("ssh")
@@ -1792,6 +1972,8 @@ def _bridge_ssh_start(host, restart=False):
 
 
 def _refresh_bridge_watch():
+    if TEST_MODE:
+        return  # modo teste: nunca entra no robô por SSH
     host = urllib.parse.urlparse(ROBOT_HOST).hostname
     if _bridge_alive(host):
         _bridge_watch["deadSince"] = None
@@ -1834,11 +2016,84 @@ def _start_bridge_watchdog_thread():
     threading.Thread(target=_loop, daemon=True).start()
 
 
+# --- Navegação parou de mandar a posição pro app (incidente 2026-11-13) ----
+# Depois de uma rajada de quedas do lidar do braço direito, a navegação parou
+# de passar a posição pro app do robô logo depois do pickup; o app ficou
+# preso esperando ("Navigation does not issue current coordinates: 4", a cada
+# segundo, por 2 h) e só voltou reiniciando o robô. O dispatch grava esse
+# aviso UMA vez em /error/records (não repete enquanto dura), então: um
+# registro NOVO (id acima de tudo que já existia quando o servidor subiu)
+# liga o aviso vermelho, e ele só apaga quando o robô sai do lugar ou fica
+# fora do ar por um tempo (sendo reiniciado). Só avisa; não mexe no robô.
+NAV_FREEZE_ERROR_TEXT = "does not issue current coordinates"
+NAV_FREEZE_MESSAGE = "Erro inesperado. O robô precisa ser reiniciado."
+NAV_FREEZE_CLEAR_DISTANCE_M = 0.5  # andou isso desde o aviso = destravou
+NAV_FREEZE_CLEAR_OFFLINE_SECONDS = 20  # sem responder isso seguido = reiniciando (um soluço de rede não apaga)
+_nav_freeze = {"baselineId": None, "active": False, "pose": None, "offlineSince": None}
+
+
+def _record_id(record):
+    try:
+        return int(record.get("id"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _refresh_nav_freeze_watch():
+    try:
+        records = robot_fetch_recent_error_records(size=10)
+    except Exception:
+        records = None
+    if records is not None:
+        ids = [i for i in (_record_id(r) for r in records) if i is not None]
+        baseline = _nav_freeze["baselineId"]
+        if baseline is None:
+            # 1ª leitura: o que já existe é passado, nunca vira aviso
+            _nav_freeze["baselineId"] = max(ids) if ids else 0
+        else:
+            hit = next((r for r in records
+                        if (_record_id(r) or 0) > baseline
+                        and NAV_FREEZE_ERROR_TEXT in (r.get("description") or "")), None)
+            if ids:
+                _nav_freeze["baselineId"] = max(baseline, max(ids))
+            if hit and not _nav_freeze["active"]:
+                try:
+                    pose = robot_pose()
+                except Exception:
+                    pose = None
+                _nav_freeze.update(active=True, pose=pose, offlineSince=None)
+                print("Navegação travada detectada (erro id=%s: %s) -- aviso vermelho ligado." % (
+                    hit.get("id"), hit.get("description")))
+    if not _nav_freeze["active"]:
+        return
+    try:
+        if records is None:  # o robô já não respondeu agora -- não espera outro timeout
+            raise OSError("robô sem resposta")
+        pose = robot_pose()
+    except Exception:
+        now = time.monotonic()
+        if _nav_freeze["offlineSince"] is None:
+            _nav_freeze["offlineSince"] = now
+        elif now - _nav_freeze["offlineSince"] >= NAV_FREEZE_CLEAR_OFFLINE_SECONDS:
+            _nav_freeze.update(active=False, pose=None, offlineSince=None)
+            print("Navegação travada: robô fora do ar (reiniciando) -- aviso apagado.")
+        return
+    _nav_freeze["offlineSince"] = None
+    start = _nav_freeze["pose"]
+    if start is None:
+        _nav_freeze["pose"] = pose
+    elif math.hypot(pose["x"] - start["x"], pose["y"] - start["y"]) >= NAV_FREEZE_CLEAR_DISTANCE_M:
+        _nav_freeze.update(active=False, pose=None)
+        print("Navegação travada: robô voltou a andar -- aviso apagado.")
+
+
 # Aviso vermelho do tablet (robotStalledMessage): planejamento da rota
 # passando do limite, ou obstáculo/garfo visto pelos sensores do robô (ver
 # "Obstáculo pelos sensores do robô"). Desde 2026-10-29 não existe mais o
 # "ROBÔ PARADO!" por tempo parado, que não olhava sensor nenhum.
 def _robot_stalled_message(state):
+    if _nav_freeze["active"]:  # acima de tudo: nada mais anda até reiniciar
+        return NAV_FREEZE_MESSAGE
     # Esperando o planejador do dispatch no corredor P3–P10 (ver acima): o
     # robô está parado de propósito; só passa do limite vira vermelho.
     planning = _route_planning_elapsed(state)
@@ -1847,6 +2102,8 @@ def _robot_stalled_message(state):
     current = state.get("currentRoute") or {}
     if _obstacle_watch["message"] and _obstacle_watch["routeId"] == (current.get("id") or OBSTACLE_CHARGE_ROUTE_ID):
         return _obstacle_watch["message"]
+    if _camera_watch["message"]:  # preso à rota; sem rota, segura até CAMERA_ALERT_HOLD_SECONDS
+        return _camera_watch["message"]
     return None
 
 
@@ -2314,6 +2571,21 @@ def _user_can_pick_up_from(user, pickup_name, cal):
         return True
     closeup_id = _closeup_id_for_name(pickup_name, cal)
     return closeup_id in FREE_KANBAN_IDS or closeup_id in kanban_ids
+
+
+def _is_lot_cell(name, cal):
+    return any(_lot_cell_name(lot["prefix"], i) == name
+               for lot in cal["top"]["lots"] for i in range(lot.get("count", 0)))
+
+
+# Pode MARCAR/DESMARCAR pallet nesse ponto? (pedido do usuário, 2026-11-13)
+# Usuário restrito só marca nos kanbans dele -- mesma regra da origem
+# (_user_can_pick_up_from). Os pontos avulsos (quadrados laranja: saídas
+# EX*) ficam livres pra todos.
+def _user_can_mark(user, name, cal):
+    if not _is_lot_cell(name, cal):
+        return True
+    return _user_can_pick_up_from(user, name, cal)
 
 
 def _seed_file():
@@ -3270,6 +3542,7 @@ def _refresh_idle_queue_timeout():
 def _queue_tick():
     _refresh_daily_backup()  # só copia na 1ª volta de cada dia (ver "Backup automático")
     _refresh_robot_status()  # sempre, independente de emergência/rota em andamento
+    _refresh_nav_freeze_watch()  # idem -- "Erro inesperado. O robô precisa ser reiniciado."
     _refresh_route_planning_wait()  # só pergunta a pose com rota disparada, não-RUNNING e robô parado
 
     # Emergência tem precedência sobre tudo: a fila já foi esvaziada (ver
@@ -3666,6 +3939,8 @@ def start_server(robot_host=None, port=None):
     global _httpd
     if _httpd is not None:
         return  # já no ar
+    if TEST_MODE:
+        print("*** MODO TESTE ligado: este servidor NÃO fala com o robô ***")
     if robot_host:
         set_robot_host(robot_host)  # IP explícito (ex: digitado na GUI do .exe) — respeita, não varre por cima
     else:
@@ -3915,6 +4190,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not self._require_auth():
                 return
             self._get_kanbans()
+        elif self.path == OPERATION_HOURS_PATH:
+            if not self._require_auth():
+                return
+            self._relay(200, "application/json", json.dumps(_operation_status(), ensure_ascii=False).encode("utf-8"))
         else:
             super().do_GET()
 
@@ -3962,17 +4241,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
             self._set_limit_breaker(user)
         elif self.path == OCCUPIED_SET_PATH:
-            if not self._require_auth():
+            user = self._require_auth()
+            if not user:
                 return
-            self._occupied_set()
+            self._occupied_set(user)
         elif self.path == OCCUPIED_SET_MANY_PATH:
-            if not self._require_auth():
+            user = self._require_auth()
+            if not user:
                 return
-            self._occupied_set_many()
+            self._occupied_set_many(user)
         elif self.path == PALLET_MATERIAL_PATH:
-            if not self._require_auth():
+            user = self._require_auth()
+            if not user:
                 return
-            self._pallet_material_set()
+            self._pallet_material_set(user)
         elif self.path == PALLET_HEIGHTS_PATH:
             if not self._require_auth():
                 return
@@ -3995,6 +4277,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not self._require_admin():
                 return
             self._create_user()
+        elif self.path == OPERATION_HOURS_PATH:
+            if not self._require_admin():
+                return
+            self._set_operation_hours()
         else:
             self.send_error(404, "Not Found")
 
@@ -4175,6 +4461,34 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             user["fullscreen"] = fullscreen
             _write_users(users)
         self._relay(200, "application/json", b'{"ok":true}')
+
+    def _set_operation_hours(self):
+        """Admin: {manual?: bool, start?: "HH:MM"|null, end?: "HH:MM"|null}
+        — só muda o que vier no payload (ver "Horário de operação")."""
+        try:
+            payload = self._read_json_body()
+            if not isinstance(payload, dict):
+                raise ValueError("payload inválido")
+            for k in ("start", "end"):
+                v = payload.get(k)
+                if k in payload and v not in (None, "") and _hhmm_minutes(v) is None:
+                    raise ValueError("horário precisa ser HH:MM")
+        except (json.JSONDecodeError, ValueError) as err:
+            self._relay(400, "application/json", json.dumps({"error": str(err)}, ensure_ascii=False).encode("utf-8"))
+            return
+        with OPERATION_HOURS_LOCK:
+            cfg = _read_operation_hours()
+            if "manual" in payload:
+                cfg["manual"] = bool(payload["manual"])
+            for k in ("start", "end"):
+                if k in payload:
+                    cfg[k] = payload[k] or None
+            if cfg["start"] and cfg["start"] == cfg["end"]:
+                self._relay(400, "application/json", json.dumps({"error": "início e fim não podem ser o mesmo horário"}, ensure_ascii=False).encode("utf-8"))
+                return
+            OPERATION_HOURS_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        print("[horario] recebimento de tarefas: manual=%s faixa=%s-%s" % (cfg["manual"], cfg["start"], cfg["end"]))
+        self._relay(200, "application/json", json.dumps(_operation_status(), ensure_ascii=False).encode("utf-8"))
 
     # --- administração de usuários (admin only) -------------------------------
     def _get_users(self):
@@ -4471,6 +4785,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     raise ValueError("cada par precisa ter pickup e dropoff")
         except (json.JSONDecodeError, KeyError, ValueError) as err:
             self._relay(400, "application/json", json.dumps({"error": str(err)}, ensure_ascii=False).encode("utf-8"))
+            return
+
+        # Horário de operação / switch do admin (ver "Horário de operação").
+        op = _operation_status()
+        if op["blocked"]:
+            self._relay(409, "application/json", json.dumps(
+                {"error": op["message"], "operationBlocked": True}, ensure_ascii=False).encode("utf-8"))
             return
 
         with CALIBRATION_LOCK:
@@ -4796,8 +5117,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     # seguro, não alinha em docking, não devolve pallet ao ponto de origem.
     # Só admin. Parada de emergência e ocupação ficam como estão.
     def _queue_clear_all(self, requester):
-        if not requester.get("isAdmin"):
-            self._relay(403, "application/json", json.dumps({"error": "só admin"}, ensure_ascii=False).encode("utf-8"))
+        # Admin e Mestre (pedido do usuário, 2026-11-24): botão de imprevisto
+        # na Fila, fora do modo desenvolvedor, com confirmação no front.
+        if not (requester.get("isAdmin") or requester.get("isMaster")):
+            self._relay(403, "application/json", json.dumps({"error": "só admin ou mestre"}, ensure_ascii=False).encode("utf-8"))
             return
         with QUEUE_LOCK:
             state = _read_queue_state()
@@ -5017,13 +5340,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self._relay(200, "application/json", json.dumps(body, ensure_ascii=False).encode("utf-8"))
 
     # --- ocupação (Caso 1, modo "mark") -------------------------------------
-    def _occupied_set(self):
+    def _occupied_set(self, user):
         try:
             payload = self._read_json_body()
             name = payload["name"]
             is_occupied = bool(payload["occupied"])
         except (json.JSONDecodeError, KeyError) as err:
             self._relay(400, "application/json", json.dumps({"error": str(err)}, ensure_ascii=False).encode("utf-8"))
+            return
+        if self._reject_outside_kanban(user, [name]) is None:
             return
         if self._reject_reserved([name]) is None:
             return
@@ -5043,7 +5368,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return None
         return allowed, blocked
 
-    def _occupied_set_many(self):
+    # Marcação fora do(s) kanban(s) do usuário restrito (ver _user_can_mark):
+    # tudo fora -> 403 com `denied` e devolve None (quem chamou para aqui);
+    # senão devolve (liberados, recusados) -- os liberados seguem.
+    def _reject_outside_kanban(self, user, names):
+        with CALIBRATION_LOCK:
+            cal = _read_calibration()
+        allowed = [n for n in names if _user_can_mark(user, n, cal)]
+        denied = [n for n in names if n not in allowed]
+        if denied and not allowed:
+            msg = "Sua conta só pode marcar pallets no(s) seu(s) kanban(s) — %s fica fora deles." % ", ".join(denied)
+            self._relay(403, "application/json", json.dumps({"error": msg, "denied": denied}, ensure_ascii=False).encode("utf-8"))
+            return None
+        return allowed, denied
+
+    def _occupied_set_many(self, user):
         try:
             payload = self._read_json_body()
             names = payload["names"]
@@ -5053,14 +5392,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except (json.JSONDecodeError, KeyError, ValueError) as err:
             self._relay(400, "application/json", json.dumps({"error": str(err)}, ensure_ascii=False).encode("utf-8"))
             return
+        kanban = self._reject_outside_kanban(user, names)
+        if kanban is None:
+            return
+        names, denied = kanban
         split = self._reject_reserved(names)
         if split is None:
             return
         allowed, blocked = split
         set_occupied_many(allowed, is_occupied)
-        self._relay(200, "application/json", json.dumps({"ok": True, "blocked": blocked}).encode("utf-8"))
+        self._relay(200, "application/json", json.dumps({"ok": True, "blocked": blocked, "denied": denied}).encode("utf-8"))
 
-    def _pallet_material_set(self):
+    def _pallet_material_set(self, user):
         try:
             payload = self._read_json_body()
             names = payload["names"]
@@ -5072,13 +5415,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except (json.JSONDecodeError, KeyError, ValueError) as err:
             self._relay(400, "application/json", json.dumps({"error": str(err)}, ensure_ascii=False).encode("utf-8"))
             return
+        kanban = self._reject_outside_kanban(user, names)
+        if kanban is None:
+            return
+        names, denied = kanban
         split = self._reject_reserved(names)
         if split is None:
             return
         allowed, blocked = split
         if allowed:
             set_pallet_material_many(allowed, material)
-        self._relay(200, "application/json", json.dumps({"ok": True, "blocked": blocked}).encode("utf-8"))
+        self._relay(200, "application/json", json.dumps({"ok": True, "blocked": blocked, "denied": denied}).encode("utf-8"))
 
     def _proxy(self, method):
         target = ROBOT_HOST + self.path
@@ -5121,6 +5468,11 @@ if __name__ == "__main__":
     if not (Path(STATIC_DIR) / "index.html").exists():
         print(f"AVISO: {STATIC_DIR}/index.html não encontrado — rode 'npm run build' dentro de web/ antes.")
     start_server()
+    if TEST_MODE:
+        print("=" * 70)
+        print("MODO TESTE: este servidor NÃO fala com o robô (sem busca na rede, sem")
+        print("bridge, sem SSH). Tarefas não chegam ao robô; o robô aparece offline.")
+        print("=" * 70)
     print(f"Painel disponivel em      http://localhost:{LISTEN_PORT}")
     print(f"Proxy encaminhando {API_PREFIX} -> {ROBOT_HOST}{API_PREFIX}")
     print(f"Calibração persistida em  {CALIBRATION_FILE}")

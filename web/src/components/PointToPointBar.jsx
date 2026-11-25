@@ -64,7 +64,7 @@ export default function PointToPointBar({ onOpenManual,
     <div className="ptp-bar">
       <h2 className="points-panel__title">
         {editing === 'group' ? 'Editando sequência' : editing ? 'Editando tarefa' : 'Ponto a Ponto'}
-        <ManualInfoButton page={18} onOpen={onOpenManual} />
+        <ManualInfoButton page={19} onOpen={onOpenManual} />
       </h2>
       <p className={'ptp-bar__hint' + (editing ? ' ptp-bar__hint--editing' : sequenceMode ? ' ptp-bar__hint--sequence' : '')}>
         {editing
@@ -77,10 +77,8 @@ export default function PointToPointBar({ onOpenManual,
       {renderSlot('pickup', 'Origem (PICKUP)', pickupNames)}
       {renderSlot('dropoff', 'Destino (UNLOAD)', dropoffNames)}
 
-      <label className={'ptp-bar__sequence' + (editing ? ' is-disabled' : '')}>
-        <input type="checkbox" checked={sequenceMode} onChange={onToggleSequenceMode} disabled={!!editing} />
-        Lotes em sequência
-      </label>
+      {/* Checkbox "Lotes em sequência" retirado da tela (pedido do usuário,
+          2026-11-24) — só o checkbox; a lógica de sequência continua aqui. */}
       {sequenceMode && hasSelection && !countsMatch && (
         <p className="ptp-bar__sequence-warn">
           {pickupNames.length} origem(ns) / {dropoffNames.length} destino(s) — precisa bater pra enviar.
