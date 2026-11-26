@@ -19,6 +19,9 @@ import DevModeModal from './components/DevModeModal';
 import ManualViewer from './components/ManualViewer';
 import { useCalibration, lotCellName, displayCellName } from './hooks/useCalibration';
 import { useLiveState } from './hooks/useLiveState';
+import { useChat } from './hooks/useChat';
+import ChatPanel from './components/ChatPanel';
+import PalletRequestPanel from './components/PalletRequestPanel';
 import { useToast } from './hooks/useToast';
 import { saveTheme, saveFullscreen } from './api/auth';
 import { applyTheme } from './theme';
@@ -239,6 +242,20 @@ export default function MainApp({ user, onLogout }) {
   // a última vez que o painel foi aberto (zerada em handleToggleQueueMode).
   const [selectedQueueRouteId, setSelectedQueueRouteId] = useState(null);
   const [queueNotifCount, setQueueNotifCount] = useState(0);
+  // Chat (ver server.py, "Chat"): mensagens + não lidas pro ícone do mapa.
+  const chat = useChat(user.username, mode === 'chat');
+  // "Solicitação de pallets" (modo 'request', aberto pela mãozinha do chat —
+  // ver PalletRequestPanel e server.py): rascunho [{ name, material }] na
+  // ordem em que foi tocado, material escolhido, mensagem opcional.
+  // requestCallId muda a cada tentativa de sair do modo (pulsa o vermelho);
+  // requestZoomPicking = apertou a lupa "+" e está escolhendo o kanban a
+  // ampliar sem sair do modo.
+  const [requestDraft, setRequestDraft] = useState([]);
+  const [requestMaterial, setRequestMaterial] = useState(null);
+  const [requestText, setRequestText] = useState('');
+  const [requestCallId, setRequestCallId] = useState(0);
+  const [requestZoomPicking, setRequestZoomPicking] = useState(false);
+  const [requestSending, setRequestSending] = useState(false);
   // Painel Histórico: qual entrada foi clicada, pra destacar origem/destino
   // no mapa (ver mapPickupNames abaixo) — guarda o par direto (o painel já
   // tem a entrada inteira em mãos, sem precisar re-achar por id como no
@@ -505,7 +522,19 @@ export default function MainApp({ user, onLogout }) {
   // suficiente pra justificar recomeçar. Ver isPeekMode/resetSelection
   // abaixo.
   function isPeekMode(m) {
-    return m === 'interaction' || m === 'mark';
+    // Chat também: abrir o chat no meio de uma seleção de Ponto a Ponto não
+    // pode jogar ela fora.
+    return m === 'interaction' || m === 'mark' || m === 'chat' || m === 'request';
+  }
+
+  // Solicitação de pallets aberta: só sai por "Enviar" ou "Remover
+  // solicitação". Qualquer outra troca de menu é barrada aqui — aviso + o
+  // botão vermelho pulsa. Devolve true quando barrou.
+  function blockedByRequest() {
+    if (mode !== 'request') return false;
+    setRequestCallId((n) => n + 1);
+    showToast('Envie ou remova a solicitação de pallets antes de sair desse menu.', 'error');
+    return true;
   }
 
   function resetSelection({ keepRoute = false } = {}) {
@@ -535,6 +564,7 @@ export default function MainApp({ user, onLogout }) {
     // preservada de propósito — sair dele por QUALQUER caminho (aba do
     // Toolbar, aqui, ou os botões flutuantes abaixo) não pode jogar fora o
     // que só estava "em pausa".
+    if (next !== mode && blockedByRequest()) return;
     const keepRoute = isPeekMode(mode);
     setMode(next);
     resetSelection({ keepRoute });
@@ -556,7 +586,7 @@ export default function MainApp({ user, onLogout }) {
   // novo é no-op, o menu correspondente continua aberto. Pra sair de um
   // desses modos, clica em outro ícone (inclusive o de Ponto a Ponto).
   function handleToggleMarkMode() {
-    if (mode === 'mark') return;
+    if (mode === 'mark' || blockedByRequest()) return;
     setMode('mark');
     resetSelection({ keepRoute: true });
   }
@@ -564,7 +594,7 @@ export default function MainApp({ user, onLogout }) {
   // Ponto a Ponto: mesmo padrão do modo de marcação acima — só acessível
   // pelo botão flutuante (ícone de rota), não pelo Toolbar.
   function handleTogglePtpMode() {
-    if (mode === 'ptp') return;
+    if (mode === 'ptp' || blockedByRequest()) return;
     const keepRoute = isPeekMode(mode); // ver handleModeChange acima
     setMode('ptp');
     resetSelection({ keepRoute });
@@ -577,6 +607,12 @@ export default function MainApp({ user, onLogout }) {
   // keepRoute sempre true aqui (é o próprio toggle de Interação, outro
   // "peek mode").
   function handleToggleInteractionMode() {
+    // Na Solicitação de pallets a lupa "+" continua valendo, sem sair do
+    // menu: liga a escolha do kanban a ampliar (ver requestZoomPicking).
+    if (mode === 'request') {
+      setRequestZoomPicking((v) => !v);
+      return;
+    }
     if (mode === 'interaction') return;
     setMode('interaction');
     resetSelection({ keepRoute: true });
@@ -588,11 +624,90 @@ export default function MainApp({ user, onLogout }) {
   // gesto). Abrir o painel zera a notificação (bolinha vermelha com a
   // contagem de tasks solicitadas desde a última vez que foi aberto).
   function handleToggleQueueMode() {
-    if (mode === 'queue') return;
+    if (mode === 'queue' || blockedByRequest()) return;
     const keepRoute = isPeekMode(mode); // ver handleModeChange acima
     setMode('queue');
     resetSelection({ keepRoute });
     setQueueNotifCount(0);
+  }
+
+  // Chat: botão flutuante no canto superior esquerdo do mapa (onde ficava o
+  // antigo botão de emergência). "Peek mode" — preserva a seleção de ptp.
+  function handleToggleChatMode() {
+    if (mode === 'chat' || blockedByRequest()) return;
+    setMode('chat');
+    resetSelection({ keepRoute: true });
+  }
+
+  // --- Solicitação de pallets (ver PalletRequestPanel / server.py) ----------
+  function clearRequestDraft() {
+    setRequestDraft([]);
+    setRequestText('');
+    setRequestZoomPicking(false);
+    setRequestCallId(0);
+  }
+
+  function handleStartRequest() {
+    if (mode === 'request') return;
+    clearRequestDraft();
+    setMode('request');
+    resetSelection({ keepRoute: true });
+  }
+
+  // Volta pro chat (de onde a solicitação foi aberta).
+  function leaveRequestMode() {
+    clearRequestDraft();
+    setMode('chat');
+    resetSelection({ keepRoute: true });
+  }
+
+  function handleRequestCellClick(name) {
+    const label = displayCellName(name, lots, points);
+    const existing = requestDraft.find((p) => p.name === name);
+    if (existing && (!requestMaterial || existing.material === requestMaterial)) {
+      setRequestDraft(requestDraft.filter((p) => p.name !== name));
+      return;
+    }
+    if (!requestMaterial) {
+      showToast('Escolha o pallet (madeira ou azul) antes de marcar as posições.', 'info');
+      triggerInvalidPulse(name, { silent: true });
+      return;
+    }
+    if (existing) {
+      setRequestDraft(requestDraft.map((p) => (p.name === name ? { ...p, material: requestMaterial } : p)));
+      return;
+    }
+    if (occupied.includes(name)) {
+      showToast('Já tem pallet em ' + label + ' — solicite só posições vazias.', 'error');
+      triggerInvalidPulse(name);
+      return;
+    }
+    setRequestDraft([...requestDraft, { name, material: requestMaterial }]);
+  }
+
+  async function handleSendRequest() {
+    if (!requestDraft.length || requestSending) return;
+    setRequestSending(true);
+    try {
+      await chat.sendRequest(requestDraft, requestText.trim());
+      showToast('Solicitação de pallets enviada pro chat.', 'success');
+      leaveRequestMode();
+    } catch (err) {
+      const bad = (err.data && (err.data.denied || err.data.occupiedNames)) || [];
+      if (bad.length) triggerInvalidPulse(bad[0]);
+      showToast('Não deu pra enviar: ' + err.message, 'error');
+    } finally {
+      setRequestSending(false);
+    }
+  }
+
+  // Cartão da solicitação no chat: leva o mapa até o kanban das posições
+  // (a primeira que ainda espera pallet; atendida, a primeira de todas).
+  function handleViewRequest(msg) {
+    const positions = msg.positions || [];
+    const waiting = positions.find((p) => chat.palletRequests[p.name] && chat.palletRequests[p.name].msgId === msg.id);
+    const target = waiting || positions[0];
+    if (target) requestFocus(target.name);
   }
 
   // Clique numa rota do painel Fila: alterna a seleção (clicar na mesma
@@ -906,6 +1021,10 @@ export default function MainApp({ user, onLogout }) {
   // não sempre o Ponto a Ponto. Mesmo momento da troca (fim do zoom), então
   // o desempenho é o mesmo de antes. Pra reverter: setMode('ptp') de novo.
   function handleCloseUpZoomEnd(closeUp) {
+    if (closeUp && modeRef.current === 'request') {
+      setRequestZoomPicking(false); // ampliou: volta a marcar posições, sem sair do menu
+      return;
+    }
     if (!closeUp || modeRef.current !== 'interaction') return;
     setMode(lastWorkModeRef.current);
     resetSelection({ keepRoute: true });
@@ -920,6 +1039,7 @@ export default function MainApp({ user, onLogout }) {
   // keepRoute: mesma regra do botão ZOOM + (handleToggleInteractionMode).
   function handleResetViewClick() {
     setRobotViewing(false);
+    setRequestZoomPicking(false);
     if (mode === 'ptp' || mode === 'mark' || mode === 'queue') {
       setMode('interaction');
       resetSelection({ keepRoute: true });
@@ -1624,7 +1744,7 @@ export default function MainApp({ user, onLogout }) {
           active: { kind: historyFocusedEndpoint, index: 0 },
         } : null}
         onFocusEndpoint={handleFocusEndpoint}
-        wide={robotViewing || mode === 'ptp' || mode === 'queue' || mode === 'history'}
+        wide={robotViewing || mode === 'ptp' || mode === 'queue' || mode === 'history' || mode === 'chat' || mode === 'request'}
         flipped={viewFlipped}
         onToggleFlip={() => setViewFlipped((v) => !v)}
       />
@@ -1687,24 +1807,41 @@ export default function MainApp({ user, onLogout }) {
           view={view}
           occupiedNames={occupied}
           queueMarks={queueMarks}
-          onMarkOccupied={(names, isOccupied) => setOccupiedMany(names, isOccupied).then(reportBlocked)
-            .catch(reportMarkError('Erro ao marcar: '))}
+          // Marca amarela da Solicitação de pallets: some da tela no ato
+          // (chat.hideRequests) e o servidor confirma depois (chat.confirm,
+          // mesmo espírito do refresh() logo após cada ação do useLiveState)
+          // — sem isso só sairia no próximo poll do chat, até 4 s.
+          onMarkOccupied={(names, isOccupied) => {
+            if (isOccupied) chat.hideRequests(names);
+            return setOccupiedMany(names, isOccupied).then(reportBlocked)
+              .catch(reportMarkError('Erro ao marcar: ')).finally(chat.confirm);
+          }}
           palletMaterials={palletMaterials}
           reservedPositions={reservedPositions}
           onReservedTouch={notifyReserved}
           brushMaterial={mode === 'mark' ? (brushMaterial || 'erase') : null}
-          onMarkMaterial={(names, material) => setPalletMaterial(names, material).then(reportBlocked)
-            .catch(reportMarkError('Erro ao marcar o material: '))}
+          onMarkMaterial={(names, material) => {
+            chat.hideRequests(names); // material ou X: os dois tiram o amarelo
+            return setPalletMaterial(names, material).then(reportBlocked)
+              .catch(reportMarkError('Erro ao marcar o material: ')).finally(chat.confirm);
+          }}
           markModeActive={mode === 'mark'}
           onToggleMarkMode={handleToggleMarkMode}
           ptpModeActive={mode === 'ptp'}
           onTogglePtpMode={handleTogglePtpMode}
-          interactionModeActive={mode === 'interaction'}
+          interactionModeActive={mode === 'interaction' || (mode === 'request' && requestZoomPicking)}
+          closeUpPicking={mode === 'request' && requestZoomPicking}
+          requestDraft={mode === 'request' ? requestDraft : EMPTY_SELECTION}
+          palletRequests={chat.palletRequests}
+          onRequestCellClick={handleRequestCellClick}
           onToggleInteractionMode={handleToggleInteractionMode}
           queueModeActive={mode === 'queue'}
           onToggleQueueMode={handleToggleQueueMode}
           queueNotifCount={queueNotifCount}
           queuePulseId={queuePulseId}
+          chatModeActive={mode === 'chat'}
+          onToggleChatMode={handleToggleChatMode}
+          chatUnread={chat.unread}
           invalidPulseName={invalidPulse?.name ?? null}
           invalidPulseId={invalidPulse?.id ?? null}
           robotStatus={robotStatus}
@@ -1811,6 +1948,38 @@ export default function MainApp({ user, onLogout }) {
               onChangePallet={handleChangeStagedPallet}
               onStart={handleStartStaged}
               starting={starting}
+            />
+          </aside>
+        )}
+        {mode === 'chat' && (
+          <aside className="sidebar sidebar--wide sidebar--chat">
+            <ChatPanel
+              messages={chat.messages}
+              currentUsername={user.username}
+              onSend={chat.send}
+              showToast={showToast}
+              onStartRequest={handleStartRequest}
+              onViewRequest={handleViewRequest}
+              palletRequests={chat.palletRequests}
+              labelOf={(n) => displayCellName(n, lots, points)}
+            />
+          </aside>
+        )}
+        {mode === 'request' && (
+          <aside className="sidebar sidebar--wide">
+            <PalletRequestPanel
+              material={requestMaterial}
+              onMaterialChange={setRequestMaterial}
+              positions={requestDraft}
+              lots={lots}
+              points={points}
+              text={requestText}
+              onTextChange={setRequestText}
+              onSend={handleSendRequest}
+              onDiscard={leaveRequestMode}
+              sending={requestSending}
+              callId={requestCallId}
+              zoomPicking={requestZoomPicking}
             />
           </aside>
         )}

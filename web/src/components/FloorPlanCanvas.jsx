@@ -70,7 +70,7 @@ function ptpTargetScale(isHovered, isSelectedEndpoint) {
 // hover/toque, confirmar só ao soltar — ver commitOnRelease) — só a AÇÃO no
 // soltar muda (selecionar pickup/dropoff vs. marcar/desmarcar ocupado).
 function usesHoverGesture(mode) {
-  return mode === 'ptp' || mode === 'mark';
+  return mode === 'ptp' || mode === 'mark' || mode === 'request';
 }
 
 // pickupNames/dropoffNames (azul/âmbar) são desenhados no gesto ativo de
@@ -85,7 +85,7 @@ function usesHoverGesture(mode) {
 // neles, senão pareceria que a seleção sumiu mesmo continuando viva por
 // baixo.
 function highlightsRoute(mode) {
-  return mode === 'ptp' || mode === 'queue' || mode === 'history' || mode === 'interaction' || mode === 'mark';
+  return mode === 'ptp' || mode === 'queue' || mode === 'history' || mode === 'interaction' || mode === 'mark' || mode === 'chat' || mode === 'request';
 }
 
 function markerColors(mode, { isSelected, isPickup, isDropoff }) {
@@ -415,9 +415,12 @@ function SeqBadge({ seq, size, color, rotation = 0, scaleX = 1, scaleY = 1 }) {
 // Ponto a Ponto), o número continua aparecendo -- antes sumia. Sem o
 // quadrado laranja opaco, pra não esconder o destaque, e no esquema do X de
 // ocupação: número na cor viva do destaque, contorno numa versão escurecida.
-function QueueMark({ number, size, rotation = 0, scaleX = 1, scaleY = 1, selectedColor = null }) {
+// `yellow`: a posição tem Solicitação de pallets — mesmo desenho, em amarelo
+// em vez de laranja (pedido do usuário, 2026-11-26).
+function QueueMark({ number, size, rotation = 0, scaleX = 1, scaleY = 1, selectedColor = null, yellow = false }) {
   if (!number) return null;
   const fontSize = size * 0.78;
+  const base = yellow ? '#FFD21F' : COLORS.accentOrange;
   return (
     <>
       {!selectedColor && (
@@ -427,7 +430,7 @@ function QueueMark({ number, size, rotation = 0, scaleX = 1, scaleY = 1, selecte
           width={size}
           height={size}
           cornerRadius={3}
-          fill={hexToRgba(COLORS.accentOrange, 0.82)}
+          fill={hexToRgba(base, 0.82)}
           listening={false}
         />
       )}
@@ -437,8 +440,8 @@ function QueueMark({ number, size, rotation = 0, scaleX = 1, scaleY = 1, selecte
           fontFamily="Arial Black, Helvetica Neue, Arial, sans-serif"
           fontSize={fontSize}
           fontStyle="bold"
-          fill={selectedColor || lightenHex(COLORS.accentOrange, 0.55)}
-          stroke={selectedColor ? darkenHex(selectedColor, 0.55) : darkenHex(COLORS.accentOrange, 0.62)}
+          fill={selectedColor || lightenHex(base, 0.55)}
+          stroke={selectedColor ? darkenHex(selectedColor, 0.55) : darkenHex(base, 0.62)}
           strokeWidth={Math.max(1, fontSize * 0.18)}
           fillAfterStrokeEnabled
           align="center"
@@ -454,7 +457,7 @@ function QueueMark({ number, size, rotation = 0, scaleX = 1, scaleY = 1, selecte
   );
 }
 
-function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNumber, queueNumber, isHovered, isOccupied, isPreviewing, texture, showName, viewRotation = 0, invalidPulseActive, invalidPulseId, onSelect, onChange, onHoverEnter, onHoverLeave, onPressStart }) {
+function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNumber, queueNumber, queueYellow, isHovered, isOccupied, isPreviewing, texture, showName, viewRotation = 0, invalidPulseActive, invalidPulseId, onSelect, onChange, onHoverEnter, onHoverLeave, onPressStart }) {
   const groupRef = useRef(null);
   const trRef = useRef(null);
   const pulseRingRef = useRef(null);
@@ -517,7 +520,7 @@ function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNu
         {texture
           ? <MaterialMark size={size} texture={texture} outlineColor={stroke} opacity={isPreviewing ? 0.5 : 1} />
           : isOccupied && <XMark size={size} color={xColor} outlineColor={stroke} opacity={isPreviewing ? 0.5 : 1} />}
-        <QueueMark number={queueNumber} size={size} rotation={(point.rotation || 0) + viewRotation} selectedColor={isPickup || isDropoff ? xColor : null} />
+        <QueueMark number={queueNumber} size={size} rotation={(point.rotation || 0) + viewRotation} selectedColor={isPickup || isDropoff ? xColor : null} yellow={queueYellow} />
         <SeqBadge seq={seqNumber} size={size} color={stroke} rotation={(point.rotation || 0) + viewRotation} />
         {showName && (
         <Text
@@ -562,7 +565,7 @@ function PointMarker({ point, size, mode, isSelected, isPickup, isDropoff, seqNu
 // muda de fato. `themeKey` não é usado no corpo: existe só pra invalidar o
 // memo quando o tema claro/escuro troca (COLORS é mutado em lugar — os
 // COLORS.* lidos aqui dentro não aparecem em nenhuma prop).
-const LotCell = memo(function LotCell({ name, displayName, index, cellSize, fill, stroke, xColor, showName, isOccupied, isPreviewing, texture, vividFill, viewRotation = 0, seqNumber, queueNumber, lotRotation, lotScaleX, lotScaleY, gestureActive, isHovered, isSelectedEndpoint, invalidPulseActive, invalidPulseId, onHoverEnter, onHoverLeave, onPressStart, themeKey }) {
+const LotCell = memo(function LotCell({ name, displayName, index, cellSize, fill, stroke, xColor, showName, isOccupied, isPreviewing, texture, vividFill, viewRotation = 0, seqNumber, queueNumber, queueYellow, lotRotation, lotScaleX, lotScaleY, gestureActive, isHovered, isSelectedEndpoint, invalidPulseActive, invalidPulseId, onHoverEnter, onHoverLeave, onPressStart, themeKey }) {
   const cellRef = useRef(null);
   const pulseRingRef = useRef(null);
   usePtpScale(cellRef, gestureActive ? ptpTargetScale(isHovered, isSelectedEndpoint) : 1);
@@ -595,7 +598,7 @@ const LotCell = memo(function LotCell({ name, displayName, index, cellSize, fill
       {/* Destino de tarefa na fila (ver QueueMark). Se a célula também é
           origem/destino da rota em destaque, o destaque (cyan/âmbar) continua
           valendo e o número fica por cima na cor dele, sem o quadrado laranja. */}
-      <QueueMark number={queueNumber} size={cellSize} rotation={lotRotation + viewRotation} scaleX={lotScaleX} scaleY={lotScaleY} selectedColor={isSelectedEndpoint ? xColor : null} />
+      <QueueMark number={queueNumber} size={cellSize} rotation={lotRotation + viewRotation} scaleX={lotScaleX} scaleY={lotScaleY} selectedColor={isSelectedEndpoint ? xColor : null} yellow={queueYellow} />
       {/* Triângulo de "facing": só na célula 1 (índice 0, a sem numeração)
           de cada LOTE — pontos avulsos ("lotes coringa") são um componente
           totalmente separado (PointMarker) e nunca passam por aqui, então
@@ -644,7 +647,7 @@ const LotCell = memo(function LotCell({ name, displayName, index, cellSize, fill
 // única unidade arrastável/rotacionável/redimensionável. Em Ponto a Ponto,
 // cada célula tem sua própria animação de hover (ver LotCell) — a seleção em
 // si acontece ao soltar o mouse/dedo, tratada no Stage.
-function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames, seqOverride, queueMarks = EMPTY_MARKS, hoverName, occupiedNames, previewingNames, materials = EMPTY_MARKS, textures, viewRotation = 0, invalidPulseName, invalidPulseId, onSelectLot, onHoverEnter, onHoverLeave, onPressStart, onChange, isPreview }) {
+function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames, seqOverride, queueMarks = EMPTY_MARKS, requested = EMPTY_MARKS, hoverName, occupiedNames, previewingNames, materials = EMPTY_MARKS, textures, viewRotation = 0, invalidPulseName, invalidPulseId, onSelectLot, onHoverEnter, onHoverLeave, onPressStart, onChange, isPreview }) {
   const groupRef = useRef(null);
   const trRef = useRef(null);
   const editable = mode === 'edit' && !isPreview;
@@ -729,6 +732,7 @@ function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames,
               invalidPulseId={invalidPulseId}
               seqNumber={seqNumber}
               queueNumber={queueMarks[name] || null}
+              queueYellow={!!requested[name]}
               lotRotation={lot.rotation || 0}
               viewRotation={viewRotation}
               lotScaleX={lot.scaleX}
@@ -833,6 +837,101 @@ function CloseUpMarker({ closeUp, mode, isSelected, onSelect, onChange, onActiva
   );
 }
 
+// --- Solicitação de pallets (pedido do usuário, 2026-11-26) -----------------
+// Camada própria por cima dos lotes (só desenho, sem toque): cada posição
+// solicitada ganha um quadrado um pouco maior que a célula, com camada amarela
+// e a textura do material, as duas translúcidas pra não confundir com a
+// marcação de verdade.
+//   - rascunho (menu aberto): borda amarela grossa com um "chevron
+//     invisível" percorrendo o contorno — por onde ele passa a borda some,
+//     no formato de chevron (aguardando, temporário). Ver DraftRing. Todos
+//     os rascunhos andam juntos (mesmo relógio, não o início de cada um).
+//   - enviada (vale pra todo mundo, em qualquer menu): volta ao tamanho da
+//     célula e mantém o chevron girando (pedido do usuário). Escondida enquanto a posição está selecionada no Ponto a Ponto (o
+//     destaque normal vale) ou é destino de tarefa na fila (o número da fila
+//     fica amarelo em vez de laranja, ver QueueMark). Sai de vez quando a
+//     posição é marcada com material ou com o X do modo Marcação, ou quando
+//     o robô entrega ali (ver server.py, "Solicitação de pallets").
+// Camada separada = a animação só redesenha ela, não os ~218 quadrados.
+const REQUEST_YELLOW = '#FFD21F';
+const REQUEST_MARK_SCALE = 1.22; // lado do quadrado amarelo / lado da célula
+const REQUEST_LAP_SECONDS = 1.8; // uma volta do chevron
+
+// Posição/ângulo de quem anda no contorno de um quadrado de lado `side`,
+// `phase` 0..1 a partir do canto de cima à esquerda, sentido horário.
+function pointOnSquare(side, phase) {
+  const h = side / 2;
+  const s = phase * 4 * side;
+  const edge = Math.min(3, Math.floor(s / side));
+  const t = s - edge * side;
+  return [[-h + t, -h, 0], [h, -h + t, Math.PI / 2], [h - t, h, Math.PI], [-h, h - t, (3 * Math.PI) / 2]][edge];
+}
+
+function DraftRing({ side, strokeWidth }) {
+  const groupRef = useRef(null);
+  const cutRef = useRef(pointOnSquare(side, 0));
+  const h = side / 2;
+  useEffect(() => {
+    const group = groupRef.current;
+    if (!group) return undefined;
+    const anim = new Konva.Animation(() => {
+      // relógio comum (não frame.time, que começa do zero em cada um): todos
+      // os quadrados em rascunho ficam com o chevron no mesmo ponto.
+      cutRef.current = pointOnSquare(side, ((performance.now() / 1000) / REQUEST_LAP_SECONDS) % 1);
+    }, group.getLayer());
+    anim.start();
+    return () => anim.stop();
+  }, [side]);
+  // Recorte: tudo MENOS um chevron (">" apontando pro sentido da volta) em
+  // cima da borda — evenodd faz o chevron virar um buraco no recorte.
+  const clipFunc = useCallback((ctx) => {
+    const [cx, cy, ang] = cutRef.current;
+    const w = side * 0.3; // largura da faixa cortada
+    const k = side * 0.18; // quanto a ponta avança
+    const r = strokeWidth * 1.4; // meia altura: atravessa a borda toda
+    const pts = [[-w / 2 - k, -r], [w / 2 - k, -r], [w / 2, 0], [w / 2 - k, r], [-w / 2 - k, r], [-w / 2, 0]];
+    const cos = Math.cos(ang);
+    const sin = Math.sin(ang);
+    ctx.rect(-side, -side, side * 2, side * 2);
+    pts.forEach(([px, py], i) => {
+      const x = cx + px * cos - py * sin;
+      const y = cy + px * sin + py * cos;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.closePath();
+    return ['evenodd'];
+  }, [side, strokeWidth]);
+  return (
+    <Group ref={groupRef} clipFunc={clipFunc} listening={false}>
+      <Rect x={-h} y={-h} width={side} height={side} cornerRadius={3}
+        stroke={REQUEST_YELLOW} strokeWidth={strokeWidth} listening={false} perfectDrawEnabled={false} />
+    </Group>
+  );
+}
+
+// Rascunho: maior que a célula (REQUEST_MARK_SCALE). Enviada: volta ao
+// tamanho normal da célula e continua com o chevron girando — só perde o
+// chevron quando vira destino na fila (aí a camada nem desenha a marca e o
+// número da fila fica amarelo, ver requestMarks/QueueMark).
+function RequestMark({ size, texture, draft }) {
+  const side = draft ? size * REQUEST_MARK_SCALE : size;
+  const strokeWidth = Math.max(2.2, size * 0.2);
+  const tex = side * MATERIAL_INSET;
+  return (
+    <>
+      <Rect x={-side / 2} y={-side / 2} width={side} height={side} cornerRadius={3}
+        fill={hexToRgba(REQUEST_YELLOW, 0.5)} listening={false} perfectDrawEnabled={false} />
+      {texture && (
+        <Rect x={-tex / 2} y={-tex / 2} width={tex} height={tex} cornerRadius={2}
+          fillPatternImage={texture} fillPatternRepeat="no-repeat"
+          fillPatternScaleX={tex / MATERIAL_TEXTURE_PX} fillPatternScaleY={tex / MATERIAL_TEXTURE_PX}
+          opacity={0.5} listening={false} perfectDrawEnabled={false} />
+      )}
+      <DraftRing side={side} strokeWidth={strokeWidth} />
+    </>
+  );
+}
+
 export default function FloorPlanCanvas({
   points,
   lots,
@@ -896,6 +995,17 @@ export default function FloorPlanCanvas({
   queueModeActive,
   onToggleQueueMode,
   queueNotifCount,
+  chatModeActive,
+  onToggleChatMode,
+  chatUnread,
+  // Solicitação de pallets (ver RequestMark): rascunho [{name, material}] do
+  // menu aberto, marcas enviadas {nome: {material, msgId}} de todo mundo, o
+  // toque numa posição no modo 'request', e a lupa "+" escolhendo kanban
+  // sem sair do menu (closeUpPicking).
+  requestDraft = EMPTY_NAMES,
+  palletRequests = EMPTY_MARKS,
+  onRequestCellClick,
+  closeUpPicking = false,
   queuePulseId = 0,
   invalidPulseName,
   invalidPulseId,
@@ -1511,6 +1621,9 @@ export default function FloorPlanCanvas({
     if (mode === 'ptp') {
       onPointToPointClick(hoveredName);
       setHoveredName(null);
+    } else if (mode === 'request' && !closeUpPicking) {
+      onRequestCellClick?.(hoveredName);
+      setHoveredName(null);
     }
   }
 
@@ -1582,7 +1695,7 @@ export default function FloorPlanCanvas({
     // mousemove seguinte). Se o toque começa em espaço vazio (mesmo em
     // ptp/mark), continua sendo pan normal — só conflita se realmente
     // começar em cima de um marcador.
-    if (usesHoverGesture(mode) && startedOnMarker) {
+    if (usesHoverGesture(mode) && !closeUpPicking && startedOnMarker) {
       stage.stopDrag();
     }
 
@@ -1743,6 +1856,47 @@ export default function FloorPlanCanvas({
     ? new Set([...paintPreview].filter((n) => (paintTarget ? palletMaterials[n] !== brushMaterial : occupiedNames.includes(n))))
     : computeChangingPreview(occupiedNames, paintPreview, paintTarget);
 
+  // Marcas da Solicitação de pallets (ver RequestMark): rascunho por cima das
+  // enviadas; posição que já aparece ocupada aqui não ganha marca (o servidor
+  // tira a dele na próxima leitura). Cada uma com a mesma transformação que
+  // o Konva aplica na célula (lote: grupo girado/esticado + i * cellSize).
+  const requestMarks = useMemo(() => {
+    if (!image) return [];
+    const wanted = new Map();
+    for (const [name, r] of Object.entries(palletRequests)) wanted.set(name, { material: r.material, draft: false });
+    for (const p of requestDraft) wanted.set(p.name, { material: p.material, draft: true });
+    if (!wanted.size) return [];
+    // Enviada some (só aqui, o pedido continua valendo) enquanto a posição
+    // está no destaque do Ponto a Ponto/Fila ou é destino na fila — aí o
+    // número da fila é que fica amarelo (QueueMark).
+    const hidden = new Set([...occupiedNames, ...pickupNames, ...dropoffNames, ...Object.keys(queueMarks)]);
+    const occupiedSet = hidden;
+    const marks = [];
+    for (const lot of lots) {
+      const cellSize = lot.cellSize || DEFAULT_CELL_SIZE;
+      for (let i = 0; i < lot.count; i++) {
+        const name = lotCellName(lot.prefix, i);
+        const w = wanted.get(name);
+        if (!w || (occupiedSet.has(name) && !w.draft)) continue;
+        marks.push({
+          name, ...w, size: cellSize, cellX: i * cellSize,
+          x: lot.x * image.width, y: lot.y * image.height,
+          rotation: lot.rotation || 0, scaleX: lot.scaleX || 1, scaleY: lot.scaleY || 1,
+        });
+      }
+    }
+    for (const p of points) {
+      const w = wanted.get(p.name);
+      if (!w || (occupiedSet.has(p.name) && !w.draft)) continue;
+      marks.push({
+        name: p.name, ...w, size: POINT_MARKER_SIZE, cellX: 0,
+        x: p.x * image.width, y: p.y * image.height, rotation: p.rotation || 0, scaleX: 1, scaleY: 1,
+      });
+    }
+    marks.sort((a, b) => Number(a.draft) - Number(b.draft)); // rascunho desenhado por cima
+    return marks;
+  }, [image, palletRequests, requestDraft, occupiedNames, pickupNames, dropoffNames, queueMarks, lots, points]);
+
   return (
     <div
       ref={containerRef}
@@ -1831,6 +1985,28 @@ export default function FloorPlanCanvas({
           <span className="queue-toggle__badge" aria-hidden="true">{queueNotifCount}</span>
         )}
       </button>
+      {/* Chat (canto superior esquerdo, onde ficava o antigo botão de
+          emergência): balão de conversa com 3 pontinhos + bolinha com as
+          mensagens não lidas de outros usuários. */}
+      {onToggleChatMode && (
+        <button
+          type="button"
+          className={'view-toggle chat-toggle' + (chatModeActive ? ' is-active' : '')}
+          onClick={onToggleChatMode}
+          aria-label={chatUnread > 0 ? 'Abrir o chat (' + chatUnread + ' não lida(s))' : 'Abrir o chat'}
+          title="Chat"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.6 8.6 0 0 1-3.8-.9L3 21l1.9-5.2A8.4 8.4 0 0 1 3 11.5 8.5 8.5 0 0 1 12 3a8.5 8.5 0 0 1 9 8.5z" />
+            <line x1="8" y1="11.5" x2="8.01" y2="11.5" strokeWidth="3" />
+            <line x1="12" y1="11.5" x2="12.01" y2="11.5" strokeWidth="3" />
+            <line x1="16" y1="11.5" x2="16.01" y2="11.5" strokeWidth="3" />
+          </svg>
+          {chatUnread > 0 && (
+            <span className="queue-toggle__badge chat-toggle__badge" aria-hidden="true">{chatUnread > 99 ? '99+' : chatUnread}</span>
+          )}
+        </button>
+      )}
       {stageScale > 0 && image && (
         <Stage
           ref={stageRef}
@@ -1875,6 +2051,7 @@ export default function FloorPlanCanvas({
                 dropoffNames={dropoffNames}
                 seqOverride={seqOverride}
                 queueMarks={queueMarks}
+                requested={palletRequests}
                 hoverName={hoveredName}
                 occupiedNames={effectiveOccupied}
                 previewingNames={previewingNames}
@@ -1911,6 +2088,7 @@ export default function FloorPlanCanvas({
                     : null
                 }
                 queueNumber={queueMarks[p.name] || null}
+                queueYellow={!!palletRequests[p.name]}
                 isHovered={hoveredName === p.name}
                 isOccupied={effectiveOccupied.includes(p.name)}
                 isPreviewing={previewingNames.has(p.name)}
@@ -1964,11 +2142,11 @@ export default function FloorPlanCanvas({
                 'users': só a selecionada fica visível (contorno tracejado,
                 ver previewing), as outras ficam invisíveis e sem clique
                 igual sempre foram fora de 'closeup'/'interaction'. */}
-            {(mode === 'closeup' || mode === 'interaction' || mode === 'users') && closeUps.map((c) => (
+            {(mode === 'closeup' || mode === 'interaction' || mode === 'users' || closeUpPicking) && closeUps.map((c) => (
               <CloseUpMarker
                 key={c.id}
                 closeUp={{ ...c, x: c.x * image.width, y: c.y * image.height }}
-                mode={mode}
+                mode={closeUpPicking ? 'interaction' : mode}
                 isSelected={c.id === selectedCloseUpId}
                 onSelect={onSelectCloseUp}
                 onActivate={handleCloseUpClick}
@@ -1994,6 +2172,21 @@ export default function FloorPlanCanvas({
               />
             )}
           </Layer>
+          {requestMarks.length > 0 && (
+            <Layer listening={false}>
+              {requestMarks.map((m) => (
+                <Group key={m.name + (m.draft ? ':d' : ':s')} x={m.x} y={m.y} rotation={m.rotation} scaleX={m.scaleX} scaleY={m.scaleY}>
+                  <Group x={m.cellX}>
+                    <RequestMark
+                      size={m.size}
+                      texture={materialTextures[m.material] || null}
+                      draft={m.draft}
+                    />
+                  </Group>
+                </Group>
+              ))}
+            </Layer>
+          )}
           {/* Robô ao vivo: Layer própria (ver RobotOverlay.jsx) — só na vista
               de cima, a única com calibração completa. Grafo editável só em
               "Editar closes" sem a ferramenta de desenhar close ativa. */}

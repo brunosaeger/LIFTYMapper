@@ -5551,6 +5551,50 @@ depois um operador instruído leva o robô pra carga no modo manual. Servidor
 Só o checkbox saiu da tela do Ponto a Ponto (`PointToPointBar.jsx`); `sequenceMode` e o resto da
 lógica continuam no código (começa false, então não dá mais pra montar sequência nova).
 
+## Chat geral (2026-11-25; solicitações retiradas em 2026-11-26)
+
+Evolução do "Mural de mensagens". Botão redondo no canto superior esquerdo do mapa (onde ficava o
+antigo botão de emergência), balão com 3 pontinhos; bolinha vermelha com as não lidas de OUTROS
+usuários (por conta, vale em qualquer tablet). Modo `chat` = "peek mode" (preserva a seleção de
+ptp), sidebar larga (448 px) com a lista e a barrinha (Enter envia, Shift+Enter quebra linha).
+Servidor: `chat.json` (`messages` {id,user,text,at,ts}, `nextId`, `reads` {usuario: último id
+lido}); mensagem com mais de 12 h some na próxima leitura. `GET /api/chat`, `POST /api/chat/send`
+{text ≤ 500}, `POST /api/chat/read` {id}. Front sonda a cada 4 s (`hooks/useChat.js`).
+O sistema de solicitações antigo (movimentação / pallet vazio com aceitar/recusar) foi feito em
+25/11 e retirado; substituído pela "Solicitação de pallets" abaixo.
+
+## Solicitação de pallets (2026-11-26)
+
+Mãozinha do chat → modo `request` (menu "SOLICITAÇÃO DE PALLETS", `PalletRequestPanel.jsx`).
+Escolhe Madeira/Azul (obrigatório pra marcar) e toca nas posições VAZIAS (ocupada → aviso + pulso;
+tocar de novo tira; tocar com o outro material troca). Barrinha "LOTES SOLICITADOS", caixa de
+mensagem opcional, "Remover solicitação" (vermelho, descarta e volta pro chat) e "Enviar
+solicitação" (verde, play). Só sai do menu por esses dois: qualquer outro botão de modo/aba
+(`blockedByRequest` no MainApp) dá aviso e o vermelho pulsa. Lupa "−" funciona normal; lupa "+"
+liga `requestZoomPicking` (toca no kanban → amplia, sem sair do menu).
+Mapa: camada Konva própria, sem toque (`RequestMark` em FloorPlanCanvas): quadrado 1,22× a célula,
+amarelo + textura do material translúcidos. Rascunho = borda grossa com um "chevron invisível"
+percorrendo o contorno e apagando a borda por onde passa (`DraftRing`: clipFunc evenodd); todos
+sincronizados pelo relógio (`performance.now()`), não pelo início de cada um. Enviada = volta ao
+tamanho da célula e MANTÉM o chevron girando (sem seta); vale pra todos, em qualquer menu. Só perde
+o chevron quando vira destino na fila (número da fila amarelo).
+Marcação/X no modo Marcação tiram o amarelo NO ATO (`chat.hideRequests`, otimista) e relêem o chat
+quando o servidor responde (`chat.confirm`, zera o cache de assinatura — posição recusada volta).
+Antes saía só no poll seguinte do chat (até 4 s) — mesmo erro que o useLiveState já resolvia com
+refresh() logo após cada ação.
+Enviada fica escondida (só visual, o pedido continua) enquanto a posição está no destaque
+origem/destino (Ponto a Ponto, Fila, rota atual) ou é destino de tarefa na fila — aí o número da
+fila (`QueueMark`) fica AMARELO em vez de laranja. Tarefa cancelada → volta o amarelo.
+Servidor: `POST /api/chat/pallet-request` {positions:[{name,material}], text?} — tudo ou nada:
+403 `denied` (fora do kanban, mesma regra do `_user_can_mark`), 409 `occupiedNames` (já tem pallet).
+Vira mensagem do chat `kind: "palletRequest"` (cartão com o ícone pallet+caixa; tocar dá zoom no
+kanban da 1ª posição que ainda espera) e marca em `pallet_requests.json` {nome: {material, msgId,
+user, at}} (gitignored, entra no exportar-dados), devolvida em `GET /api/chat` como
+`palletRequests`. Só aviso visual: não trava tarefa, ninguém aceita/recusa. A marca sai DE VEZ
+quando a posição fica OCUPADA (robô entregou, ou Marcação madeira/azul — `_write_calibration` →
+`_prune_pallet_requests`) ou com o X do modo Marcação ("Remover marcação", material null em
+`set_pallet_material_many` → `_clear_pallet_requests`). Não expira com as 12 h do chat (o cartão sim).
+
 ## Horário de operação / recusar tarefas (2026-11-24)
 
 Painel Usuários (admin), seção no topo: switch "Recusar tarefas do robô" + a faixa de OPERAÇÃO

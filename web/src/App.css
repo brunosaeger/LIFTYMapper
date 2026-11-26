@@ -897,6 +897,333 @@
   border: 1px solid var(--panel-raised);
 }
 
+/* --- Chat (2026-11-24): botão no canto superior esquerdo do mapa ---------- */
+.chat-toggle {
+  top: 12px;
+  left: 12px;
+  right: auto;
+}
+
+.chat-toggle.is-active {
+  opacity: 1;
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+}
+
+/* Com não lidas o ícone fica aceso, pra ninguém deixar passar. */
+.chat-toggle:has(.chat-toggle__badge) {
+  opacity: 1;
+}
+
+.chat-toggle__badge {
+  left: auto;
+  right: -6px;
+}
+
+.sidebar--chat {
+  overflow: hidden;
+}
+
+.chat-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-panel .points-panel__title {
+  margin-bottom: 4px;
+}
+
+.chat-panel__note {
+  margin: 0 0 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.chat-panel__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  list-style: none;
+  margin: 0;
+  padding: 4px 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat-msg {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.chat-msg--mine {
+  align-items: flex-end;
+}
+
+.chat-msg__user {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent-cyan);
+  margin: 4px 0 0 4px;
+}
+
+.chat-msg__bubble {
+  max-width: 85%;
+  padding: 7px 10px 5px;
+  border-radius: 12px 12px 12px 4px;
+  background: var(--panel-base);
+  border: 1px solid var(--panel-line);
+  color: var(--text-primary);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chat-msg--mine .chat-msg__bubble {
+  border-radius: 12px 12px 4px 12px;
+  border-color: var(--accent-cyan-dim);
+}
+
+.chat-msg__text {
+  font-size: 14px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat-msg__time {
+  align-self: flex-end;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.chat-panel__bar {
+  flex: none;
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--panel-line);
+}
+
+.chat-panel__input {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  max-height: 96px;
+  background: var(--panel-base);
+  border: 1px solid var(--panel-line);
+  border-radius: 18px;
+  color: var(--text-primary);
+  padding: 9px 14px;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.3;
+}
+
+.chat-panel__icon-btn {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--panel-line);
+  background: var(--panel-base);
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-panel__icon-btn svg {
+  width: 20px;
+  height: 20px;
+}
+
+.chat-panel__icon-btn:disabled {
+  opacity: 0.4;
+}
+
+.chat-panel__send:not(:disabled) {
+  background: var(--accent-cyan);
+  border-color: var(--accent-cyan);
+  color: var(--panel-base);
+}
+
+/* --- Solicitação de pallets (2026-11-26) --------------------------------- */
+.chat-panel__request-btn {
+  color: #e0b100;
+  border-color: #b88a00;
+}
+
+/* Cartão no chat: tocar mostra as posições no mapa. */
+.chat-request {
+  max-width: 85%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 2px solid #ffd21f;
+  background: var(--panel-base);
+  color: var(--text-primary);
+  text-align: center;
+  font: inherit;
+}
+
+.chat-request:active {
+  transform: scale(0.98);
+}
+
+.chat-request.is-done {
+  border-color: var(--panel-line);
+  opacity: 0.75;
+}
+
+.chat-request__icon {
+  width: 56px;
+  height: 56px;
+  color: #e0b100;
+}
+
+.chat-request.is-done .chat-request__icon {
+  color: var(--text-muted);
+}
+
+.chat-request__title {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.chat-request__names {
+  font-size: 13px;
+  font-weight: 700;
+  word-break: break-word;
+}
+
+.chat-request__text {
+  margin-top: 4px;
+  font-size: 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-request__meta,
+.chat-request__status {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Menu lateral */
+.pallet-request {
+  overflow-x: hidden;
+}
+
+.pallet-request__slot-label {
+  color: #e0b100;
+}
+
+.pallet-request__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.pallet-request__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px 3px 4px;
+  border-radius: 999px;
+  border: 1.5px solid #ffd21f;
+  background: rgba(255, 210, 31, 0.14);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.pallet-request__chip-swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background-size: cover;
+  background-position: center;
+}
+
+.pallet-request__text {
+  width: 100%;
+  box-sizing: border-box;
+  resize: none;
+  border-radius: 8px;
+  border: 1px solid var(--panel-line);
+  background: var(--panel-base);
+  color: var(--text-primary);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 14px;
+}
+
+.pallet-request__text:focus {
+  outline: none;
+  border-color: #ffd21f;
+}
+
+.pallet-request__discard,
+.pallet-request__send {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 8px;
+  padding: 11px;
+  font-size: 14px;
+  font-weight: 800;
+  border: none;
+  color: #fff;
+}
+
+.pallet-request__discard {
+  background: #d93b4a;
+}
+
+.pallet-request__send {
+  background: #1f9d55;
+}
+
+.pallet-request__send svg {
+  width: 18px;
+  height: 18px;
+}
+
+.pallet-request__discard:disabled,
+.pallet-request__send:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Tentou sair do menu: o vermelho pulsa (halo em box-shadow — não empurra o
+   layout nem cria barra de rolagem). `key` muda a cada tentativa no JSX. */
+.pallet-request__discard.is-calling {
+  animation: request-discard-call 0.9s ease-out 3;
+}
+
+@keyframes request-discard-call {
+  0%   { transform: scale(1);    box-shadow: 0 0 0 0 rgba(244, 91, 105, 0.8); }
+  35%  { transform: scale(1.03); box-shadow: 0 0 0 10px rgba(244, 91, 105, 0.35), 0 0 30px 12px rgba(244, 91, 105, 0.5); }
+  100% { transform: scale(1);    box-shadow: 0 0 0 0 rgba(244, 91, 105, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pallet-request__discard.is-calling { animation: none; outline: 3px solid #f45b69; outline-offset: 3px; }
+}
+
 /* --- side panels (points/lots list / point-to-point) ----------------------- */
 .sidebar {
   flex: none;

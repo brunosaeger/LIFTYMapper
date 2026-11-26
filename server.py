@@ -479,6 +479,108 @@ def _fmt_minutes(m):
     return "%02d:%02d" % (m // 60, m % 60)
 
 
+# --- Chat (pedido do usuário, 2026-11-24 — evolução do "Mural de mensagens")
+# Mensagens gerais entre todos os usuários; cada uma some sozinha 12 h depois
+# de enviada. `reads[usuario]` = id da última mensagem que ele já viu, pro
+# contador de não lidas do ícone (vale em qualquer tablet, é por conta).
+# Mensagens de texto e, desde 2026-11-26, "Solicitação de pallets" (ver
+# abaixo, kind "palletRequest").
+CHAT_PATH = "/api/chat"
+CHAT_SEND_PATH = "/api/chat/send"
+CHAT_READ_PATH = "/api/chat/read"
+CHAT_FILE = _app_dir() / "chat.json"
+CHAT_LOCK = threading.Lock()
+CHAT_TTL_SECONDS = 12 * 60 * 60
+CHAT_MAX_TEXT = 500
+
+
+def _read_chat():
+    data = {"messages": [], "nextId": 1, "reads": {}}
+    try:
+        raw = json.loads(CHAT_FILE.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            data["messages"] = [m for m in raw.get("messages") or [] if isinstance(m, dict)]
+            data["nextId"] = int(raw.get("nextId") or 1)
+            data["reads"] = dict(raw.get("reads") or {})
+    except (OSError, ValueError, TypeError):
+        pass
+    cutoff = time.time() - CHAT_TTL_SECONDS
+    data["messages"] = [m for m in data["messages"] if float(m.get("ts") or 0) >= cutoff]
+    return data
+
+
+def _write_chat(data):
+    CHAT_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _chat_message_view(m):
+    out = {"id": m["id"], "user": m["user"], "text": m.get("text", ""), "at": m.get("at")}
+    if m.get("kind") == "palletRequest":
+        out["kind"] = "palletRequest"
+        out["positions"] = m.get("positions") or []
+    return out
+
+
+def _chat_view(username):
+    with CHAT_LOCK:
+        data = _read_chat()
+        with PALLET_REQUESTS_LOCK:
+            requests = _read_pallet_requests()
+    return {
+        "messages": [_chat_message_view(m) for m in data["messages"]],
+        "lastReadId": int(data["reads"].get(username) or 0),
+        "palletRequests": requests,
+    }
+
+
+# --- Solicitação de pallets (pedido do usuário, 2026-11-26) ----------------
+# A mãozinha do chat abre o menu "SOLICITAÇÃO DE PALLETS": o usuário marca as
+# posições VAZIAS onde precisa de pallet (madeira ou azul) e manda, com uma
+# mensagem opcional. Vira uma mensagem do chat (kind "palletRequest") e cada
+# posição fica marcada em amarelo no mapa de todo mundo (pallet_requests.json,
+# {nome: {material, msgId, user, at}}). É só um aviso visual: não trava
+# tarefa nenhuma, ninguém aceita/recusa. A marca some sozinha quando a posição
+# fica OCUPADA por qualquer caminho -- o robô entregou um pallet ali ou alguém
+# marcou madeira/azul no modo Marcação (ver _write_calibration ->
+# _prune_pallet_requests). Não expira com as 12 h do chat.
+CHAT_PALLET_REQUEST_PATH = "/api/chat/pallet-request"
+PALLET_REQUESTS_FILE = _app_dir() / "pallet_requests.json"
+PALLET_REQUESTS_LOCK = threading.Lock()
+PALLET_REQUEST_MAX_POSITIONS = 60
+
+
+def _read_pallet_requests():
+    try:
+        raw = json.loads(PALLET_REQUESTS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {n: r for n, r in raw.items() if isinstance(r, dict) and r.get("material") in PALLET_MATERIALS}
+
+
+def _write_pallet_requests(data):
+    PALLET_REQUESTS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _clear_pallet_requests(names):
+    names = set(names)
+    with PALLET_REQUESTS_LOCK:
+        requests = _read_pallet_requests()
+        keep = {n: r for n, r in requests.items() if n not in names}
+        if len(keep) != len(requests):
+            _write_pallet_requests(keep)
+
+
+def _prune_pallet_requests(occupied):
+    """Tira a marca amarela das posições que ficaram ocupadas."""
+    with PALLET_REQUESTS_LOCK:
+        requests = _read_pallet_requests()
+        keep = {n: r for n, r in requests.items() if n not in occupied}
+        if len(keep) != len(requests):
+            _write_pallet_requests(keep)
+
+
 def _operation_status(now=None):
     """Estado efetivo do recebimento de tarefas + a mensagem de recusa."""
     now = now or datetime.now()
@@ -2429,6 +2531,12 @@ def _read_calibration():
 def _write_calibration(data):
     _prune_pallet_materials(data)
     CALIBRATION_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Toda mudança de ocupação passa por aqui: posição que ficou ocupada perde
+    # a marca amarela de "Solicitação de pallets". Nunca derruba a gravação.
+    try:
+        _prune_pallet_requests(set(data.get("occupied") or []))
+    except OSError as err:
+        print("Aviso: não deu pra limpar pallet_requests.json:", err)
 
 
 # --- Material do pallet por posição (modo Marcação, 2026-10-30) ------------
@@ -2468,6 +2576,11 @@ def set_pallet_material_many(names, material):
         data["palletMaterials"] = materials
         data["occupied"] = sorted(occupied)
         _write_calibration(data)
+        # Material ocupa a posição (o _write_calibration já tirou o amarelo);
+        # o X do modo Marcação ("Remover marcação") também tira de vez a
+        # Solicitação de pallets, mesmo numa posição que já estava vazia.
+        if not material:
+            _clear_pallet_requests(names)
 
 
 # --- Kanbans (grupos de lotes delimitados por um Close Up) — restrição de
@@ -4194,6 +4307,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not self._require_auth():
                 return
             self._relay(200, "application/json", json.dumps(_operation_status(), ensure_ascii=False).encode("utf-8"))
+        elif self.path == CHAT_PATH:
+            user = self._require_auth()
+            if not user:
+                return
+            self._relay(200, "application/json", json.dumps(_chat_view(user["username"]), ensure_ascii=False).encode("utf-8"))
         else:
             super().do_GET()
 
@@ -4281,6 +4399,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not self._require_admin():
                 return
             self._set_operation_hours()
+        elif self.path == CHAT_SEND_PATH:
+            user = self._require_auth()
+            if not user:
+                return
+            self._chat_send(user)
+        elif self.path == CHAT_READ_PATH:
+            user = self._require_auth()
+            if not user:
+                return
+            self._chat_read(user)
+        elif self.path == CHAT_PALLET_REQUEST_PATH:
+            user = self._require_auth()
+            if not user:
+                return
+            self._chat_pallet_request(user)
         else:
             self.send_error(404, "Not Found")
 
@@ -4461,6 +4594,106 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             user["fullscreen"] = fullscreen
             _write_users(users)
         self._relay(200, "application/json", b'{"ok":true}')
+
+    def _chat_send(self, requester):
+        try:
+            payload = self._read_json_body()
+            text = str(payload["text"]).strip()
+        except (json.JSONDecodeError, KeyError, TypeError) as err:
+            self._relay(400, "application/json", json.dumps({"error": str(err)}, ensure_ascii=False).encode("utf-8"))
+            return
+        if not text:
+            self._relay(400, "application/json", json.dumps({"error": "mensagem vazia"}, ensure_ascii=False).encode("utf-8"))
+            return
+        text = text[:CHAT_MAX_TEXT]
+        now = datetime.now()
+        with CHAT_LOCK:
+            data = _read_chat()
+            msg = {"id": data["nextId"], "user": requester["username"], "text": text,
+                   "at": now.strftime("%Y-%m-%d %H:%M:%S"), "ts": time.time()}
+            data["nextId"] += 1
+            data["messages"].append(msg)
+            # quem escreveu já "leu" até a própria mensagem
+            data["reads"][requester["username"]] = msg["id"]
+            _write_chat(data)
+        self._relay(200, "application/json", json.dumps(_chat_view(requester["username"]), ensure_ascii=False).encode("utf-8"))
+
+    def _chat_read(self, requester):
+        try:
+            payload = self._read_json_body()
+            last_id = int(payload["id"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as err:
+            self._relay(400, "application/json", json.dumps({"error": str(err)}, ensure_ascii=False).encode("utf-8"))
+            return
+        with CHAT_LOCK:
+            data = _read_chat()
+            if last_id > int(data["reads"].get(requester["username"]) or 0):
+                data["reads"][requester["username"]] = min(last_id, data["nextId"] - 1)
+                _write_chat(data)
+        self._relay(200, "application/json", b'{"ok":true}')
+
+    def _chat_pallet_request(self, requester):
+        """{positions: [{name, material}], text?} -> mensagem do chat + marcas
+        amarelas (ver "Solicitação de pallets"). Tudo ou nada: se alguma
+        posição estiver fora do kanban do usuário ou já tiver pallet, nada é
+        gravado e a resposta diz quais (`denied` / `occupiedNames`)."""
+        try:
+            payload = self._read_json_body()
+            raw = payload["positions"]
+            if not isinstance(raw, list) or not raw:
+                raise ValueError("marque pelo menos uma posição")
+            positions, seen = [], set()
+            for p in raw:
+                name, material = str(p["name"]), p["material"]
+                if material not in PALLET_MATERIALS:
+                    raise ValueError("material precisa ser wood ou blue")
+                if name not in seen:
+                    seen.add(name)
+                    positions.append({"name": name, "material": material})
+            if len(positions) > PALLET_REQUEST_MAX_POSITIONS:
+                raise ValueError("no máximo %d posições por solicitação" % PALLET_REQUEST_MAX_POSITIONS)
+            text = str(payload.get("text") or "").strip()[:CHAT_MAX_TEXT]
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as err:
+            self._relay(400, "application/json", json.dumps({"error": str(err)}, ensure_ascii=False).encode("utf-8"))
+            return
+        names = [p["name"] for p in positions]
+        # Mesma trava da Marcação durante a checagem E a gravação: o robô não
+        # entrega um pallet no meio e deixa uma marca amarela em posição cheia.
+        with CALIBRATION_LOCK:
+            cal = _read_calibration()
+            known = {pt.get("name") for pt in cal["top"]["points"]}
+            unknown = [n for n in names if n not in known and not _is_lot_cell(n, cal)]
+            if unknown:
+                self._relay(400, "application/json", json.dumps({"error": "posição desconhecida: " + ", ".join(unknown)}, ensure_ascii=False).encode("utf-8"))
+                return
+            denied = [n for n in names if not _user_can_mark(requester, n, cal)]
+            if denied:
+                msg = "Sua conta só pode solicitar pallets no(s) seu(s) kanban(s) — %s fica fora deles." % ", ".join(denied)
+                self._relay(403, "application/json", json.dumps({"error": msg, "denied": denied}, ensure_ascii=False).encode("utf-8"))
+                return
+            occupied = set(cal.get("occupied") or [])
+            full = [n for n in names if n in occupied]
+            if full:
+                msg = "Já tem pallet em %s — desmarque essa posição da solicitação." % ", ".join(full)
+                self._relay(409, "application/json", json.dumps({"error": msg, "occupiedNames": full}, ensure_ascii=False).encode("utf-8"))
+                return
+            now = datetime.now()
+            at = now.strftime("%Y-%m-%d %H:%M:%S")
+            with CHAT_LOCK:
+                data = _read_chat()
+                msg = {"id": data["nextId"], "user": requester["username"], "text": text, "at": at,
+                       "ts": time.time(), "kind": "palletRequest", "positions": positions}
+                data["nextId"] += 1
+                data["messages"].append(msg)
+                data["reads"][requester["username"]] = msg["id"]
+                _write_chat(data)
+                with PALLET_REQUESTS_LOCK:
+                    requests = _read_pallet_requests()
+                    for p in positions:
+                        requests[p["name"]] = {"material": p["material"], "msgId": msg["id"],
+                                               "user": requester["username"], "at": at}
+                    _write_pallet_requests(requests)
+        self._relay(200, "application/json", json.dumps(_chat_view(requester["username"]), ensure_ascii=False).encode("utf-8"))
 
     def _set_operation_hours(self):
         """Admin: {manual?: bool, start?: "HH:MM"|null, end?: "HH:MM"|null}
