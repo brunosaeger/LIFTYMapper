@@ -1160,6 +1160,55 @@
   opacity: 0.75;
 }
 
+/* Checklist da solicitação: material, posição, bolinha vermelha → verde. */
+.chat-request__checklist {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 2px 0;
+}
+
+.chat-request__item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: left;
+}
+
+.chat-request__swatch {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background-size: cover;
+  background-position: center;
+}
+
+.chat-request__item-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-request__dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--state-error);
+}
+
+.chat-request__dot.is-done {
+  background: var(--state-success, #1f9d55);
+}
+
+.chat-request__dot.is-off {
+  background: var(--text-muted);
+}
+
 .chat-request.is-cancelled {
   border-color: var(--state-error);
   opacity: 0.6;

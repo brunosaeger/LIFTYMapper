@@ -96,7 +96,8 @@ dias; parar de verdade só com zero alarme falso e decisão à parte.
 
 ## Sons (`web/src/sounds.js`, `web/public/sounds/`)
 
-`notiftrue` 1x nos avisos amarelos; `warningtrue` em loop no vermelho;
+`notif.mp3` 1x quando chega mensagem de OUTRO usuário no chat (ver
+chat-solicitacoes.md); `notiftrue` 1x nos avisos amarelos; `warningtrue` em loop no vermelho;
 `chargeready` + brilho verde quando começa a carregar; `failedtrue`
 (0,6) em clique inválido; `opoveshchenie` + brilho azul no ícone da Fila
 quando uma tarefa da fila começa.

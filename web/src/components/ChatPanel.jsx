@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { PalletBoxIcon, RaisedHandIcon } from './RequestIcons';
+import woodTexture from '../assets/pallet-wood.png';
+import blueTexture from '../assets/pallet-blue.png';
+
+const TEXTURE = { wood: woodTexture, blue: blueTexture };
 
 // Painel do Chat (ver docs/context/chat-solicitacoes.md). Lista de mensagens
 // + barrinha de escrever embaixo, com a mãozinha (abre a "Solicitação de
@@ -220,14 +224,12 @@ function quoteText(msg, labelOf) {
 function PalletRequestCard({ msg, mine, palletRequests, labelOf, pressHandlers, onView, onCancel }) {
   const [busy, setBusy] = useState(false);
   const positions = msg.positions || [];
-  const waiting = msg.cancelled ? 0
-    : positions.filter((p) => palletRequests[p.name] && palletRequests[p.name].msgId === msg.id).length;
-  const counts = positions.reduce((acc, p) => ({ ...acc, [p.material]: (acc[p.material] || 0) + 1 }), {});
-  const summary = Object.keys(counts).map((k) => counts[k] + ' ' + (MATERIAL_LABEL[k] || k)).join(' · ');
-  const status = msg.cancelled ? 'Cancelada'
-    : waiting === 0 ? 'Atendida'
-    : waiting === positions.length ? 'Aguardando pallets'
-    : waiting + ' de ' + positions.length + ' aguardando';
+  // Entregue = a marca amarela desta solicitação saiu da posição (pallet
+  // chegou, ou alguém marcou/limpou na Marcação).
+  const isWaiting = (p) => !msg.cancelled && palletRequests[p.name] && palletRequests[p.name].msgId === msg.id;
+  const waiting = positions.filter(isWaiting).length;
+  // A contagem já está na checklist ("1/2 entregue(s)"): aqui só o fim.
+  const status = msg.cancelled ? 'Cancelada · ' : waiting === 0 ? 'Atendida · ' : '';
 
   async function cancel() {
     if (busy) return;
@@ -246,10 +248,24 @@ function PalletRequestCard({ msg, mine, palletRequests, labelOf, pressHandlers, 
       >
         <PalletBoxIcon className="chat-request__icon" />
         <span className="chat-request__title">Solicitação de pallets</span>
-        <span className="chat-request__names">{positions.map((p) => labelOf(p.name)).join(', ')}</span>
-        <span className="chat-request__meta">{summary}</span>
+        {!msg.cancelled && (
+          <span className="chat-request__meta">{positions.length - waiting}/{positions.length} entregue(s)</span>
+        )}
+        <span className="chat-request__checklist">
+          {positions.map((p) => {
+            // cancelada: o servidor já tirou as marcas, não dá pra saber o que chegou — cinza
+            const state = msg.cancelled ? 'is-off' : isWaiting(p) ? '' : 'is-done';
+            return (
+              <span key={p.name} className="chat-request__item">
+                <span className="chat-request__swatch" style={{ backgroundImage: `url(${TEXTURE[p.material]})` }} title={MATERIAL_LABEL[p.material]} />
+                <span className="chat-request__item-name">{labelOf(p.name)}</span>
+                <span className={'chat-request__dot ' + state} aria-label={state === 'is-done' ? 'entregue' : 'aguardando'} />
+              </span>
+            );
+          })}
+        </span>
         {msg.text && <span className="chat-request__text">{msg.text}</span>}
-        <span className="chat-request__status">{status}{' · '}{(msg.at || '').slice(11, 16)}</span>
+        <span className="chat-request__status">{status}{(msg.at || '').slice(11, 16)}</span>
       </button>
       {mine && !msg.cancelled && waiting > 0 && (
         <button

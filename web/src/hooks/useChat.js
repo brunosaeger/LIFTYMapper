@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { cancelPalletRequest, fetchChat, markChatRead, sendChatMessage, sendPalletRequest } from '../api/chat';
+import { playOnce, SOUND_CHAT_MESSAGE } from '../sounds';
 
 const POLL_MS = 4000; // mesmo ritmo do /api/live-state
 const NO_REQUESTS = {};
@@ -13,15 +14,26 @@ export function useChat(username, open) {
   const [lastReadId, setLastReadId] = useState(0);
   const [palletRequests, setPalletRequests] = useState(NO_REQUESTS);
   const sigRef = useRef(null);
+  // Maior id já visto — som de notificação só pra mensagem NOVA de outro
+  // usuário (null = ainda não carregou: o 1º carregamento não toca).
+  const seenIdRef = useRef(null);
 
   const apply = useCallback((data) => {
     const sig = JSON.stringify(data);
     if (sig === sigRef.current) return;
     sigRef.current = sig;
+    const list = data.messages || [];
+    const maxId = list.reduce((m, msg) => Math.max(m, msg.id), 0);
+    if (seenIdRef.current !== null && maxId < seenIdRef.current) {
+      seenIdRef.current = maxId; // chat limpo no servidor: os ids recomeçaram
+    } else if (seenIdRef.current !== null && list.some((msg) => msg.id > seenIdRef.current && msg.user !== username)) {
+      playOnce(SOUND_CHAT_MESSAGE);
+    }
+    seenIdRef.current = Math.max(seenIdRef.current ?? 0, maxId);
     setMessages(data.messages || []);
     setLastReadId(data.lastReadId || 0);
     setPalletRequests(data.palletRequests || NO_REQUESTS);
-  }, []);
+  }, [username]);
 
   const refresh = useCallback(() => fetchChat().then(apply).catch(() => {}), [apply]);
 

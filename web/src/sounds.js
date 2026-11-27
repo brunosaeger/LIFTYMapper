@@ -13,3 +13,5 @@ export const SOUND_FAILED_ROUTE = '/sounds/failedtrue.webm';
 export const SOUND_FAILED_ROUTE_VOLUME = 0.6;
 export const SOUND_CHARGE_READY = '/sounds/chargeready.webm';
 export const SOUND_ROBOT_NOTICE = '/sounds/opoveshchenie.mp3';
+// Chegou mensagem de OUTRO usuário no chat (inclui Solicitação de pallets).
+export const SOUND_CHAT_MESSAGE = '/sounds/notif.mp3';

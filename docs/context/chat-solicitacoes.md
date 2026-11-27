@@ -22,6 +22,11 @@ trava de menu).
   sozinho com o chat aberto, `unread` = mensagens de OUTROS depois da última
   lida. Ícone redondo no canto superior esquerdo do mapa (onde era o botão
   de emergência), bolinha vermelha. Modo `chat` = peek mode, sidebar larga.
+- **Som**: `web/public/sounds/notif.mp3` (`SOUND_CHAT_MESSAGE`) toca 1x
+  quando o poll traz mensagem nova de OUTRO usuário (inclui solicitação), em
+  qualquer menu, com o chat aberto ou não. `useChat` guarda o maior id visto
+  (`seenIdRef`): o 1º carregamento não toca, a própria mensagem não toca, e
+  chat limpo no servidor (ids recomeçam) só reajusta, sem tocar.
 - Balões: os de quem está logado ficam à direita, PREENCHIDOS com a cor da
   borda (`--accent-cyan-dim`, nos dois temas); os dos outros, à esquerda, só
   com borda.
@@ -66,9 +71,13 @@ feito e descartado em 25/11 — não recriar.)
   ordem). Vira mensagem `kind: "palletRequest"` e grava
   `pallet_requests.json` {nome: {material, msgId, user, at}} (gitignored,
   entra no exportar-dados).
-- Cartão no chat (ícone pallet+caixa): lotes, materiais, mensagem, status
-  "Aguardando pallets" / "N de M aguardando" / "Atendida" / "Cancelada".
-  Tocar = zoom no kanban da 1ª posição ainda pendente.
+- Cartão no chat (ícone pallet+caixa): "N/M entregue(s)" + **checklist** —
+  uma linha por posição com a textura do material, o apelido e uma bolinha
+  vermelha que fica verde quando a marca amarela daquela posição sai
+  (entregue, ou marcada/limpa na Marcação). Cancelada: bolinhas cinza (o
+  servidor tira as marcas no cancelamento, não dá mais pra saber o que
+  chegou). Embaixo: "Atendida"/"Cancelada" + hora. Tocar = zoom no kanban da
+  1ª posição ainda pendente.
 - **Cancelar**: botão largo vermelho com ✕ embaixo do cartão, **só pra quem
   enviou** e só enquanto há posição esperando. `POST
   /api/chat/pallet-request/cancel {id}` (403 pra outro usuário, 404 se não
