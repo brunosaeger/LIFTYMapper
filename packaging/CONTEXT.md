@@ -47,6 +47,24 @@ build` → Python 3.12 → `pyinstaller==6.11.1`:
   (`LIFTY-dados-AAAA-MM-DD_HHMM`). Lista `$recomendados`: todo arquivo de
   dado novo entra aqui.
 
+## Como publicar uma versão (o que o "um comando" da VM precisa)
+
+1. Commit + `git push origin main` + tag anotada `vX.Y` + `git push origin vX.Y`.
+   Sem tag `v*` não há Release e o `atualizar.ps1` baixa a anterior.
+2. O CI (~2 min) gera a Release com `LIFTY-VM.zip`. Conferir sem `gh`:
+   `https://api.github.com/repos/brunosaeger/LIFTYMapper/releases/latest`.
+3. Na VM (admin, robô parado):
+   `powershell -ExecutionPolicy Bypass -File C:\LIFTY\atualizar.ps1`.
+4. Se o bridge mudou desde a última atualização: atualizar no robô (ver
+   [../robot-bridge/CONTEXT.md](../robot-bridge/CONTEXT.md)) — o pacote da
+   VM não leva o bridge. Conferir o hash do blob commitado (`git show
+   <commit>:robot-bridge/lifty_turn_check_bridge.py | sha256sum`; a cópia do
+   Windows pode ter CRLF e dar outro hash).
+
+Última publicada: **v1.2** (2026-11-27, commit `c622f72`). A VM ainda roda o
+build de 2026-11-06 até alguém rodar o passo 3; o bridge do robô está sem as
+mudanças do v1.1 (`980d643`: sinal `blocked`, câmera) até o passo 4.
+
 ## Regras de deploy
 
 - Commit/push/tag/atualizar a VM **só quando o usuário pedir**.
