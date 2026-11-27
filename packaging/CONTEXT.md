@@ -84,8 +84,9 @@ da última execução.
    <commit>:robot-bridge/lifty_turn_check_bridge.py | sha256sum`; a cópia do
    Windows pode ter CRLF e dar outro hash).
 
-Última publicada: **v1.2** (2026-11-27, commit `c622f72`). A VM ainda roda o
-build de 2026-11-06 até alguém rodar o passo 3; o bridge do robô está sem as
+Última publicada: **v1.3** (2026-11-27, commit `e220a3c`, com o botão ⟳).
+A VM roda o build de 2026-11-06 até a infra instalar a v1.3 uma vez (o build
+antigo não tem `atualizar.ps1` nem o botão); o bridge do robô está sem as
 mudanças do v1.1 (`980d643`: sinal `blocked`, câmera) até o passo 4.
 
 ## Regras de deploy
