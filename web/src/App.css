@@ -320,6 +320,73 @@
   font-weight: 600;
 }
 
+/* --- Atualizar sistema (SystemUpdateModal, botão ⟳ do Toolbar) ---------- */
+.dev-modal.system-update {
+  width: 420px;
+}
+
+.dev-modal__cancel:disabled,
+.dev-modal__submit:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.system-update__facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.system-update__facts dt {
+  color: var(--text-muted);
+}
+
+.system-update__facts dd {
+  margin: 0;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.system-update__warn {
+  color: var(--warn-text, var(--accent-amber));
+}
+
+.system-update__actions {
+  flex-wrap: wrap;
+}
+
+.system-update__running {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--accent-cyan);
+}
+
+.system-update__confirm p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.system-update__log summary {
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.system-update__log pre {
+  max-height: 180px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--panel-base);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
 /* --- tela de login (ver LoginScreen.jsx) ----------------------------------
    Ao contrário do dev-modal (que fica SOBRE o app), esta ocupa a tela
    inteira — enquanto não há sessão, MainApp não chega a montar (ver

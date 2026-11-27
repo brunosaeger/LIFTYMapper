@@ -16,6 +16,7 @@ import UsersPanel from './components/UsersPanel';
 import FloorPlanCanvas from './components/FloorPlanCanvas';
 import Toast from './components/Toast';
 import DevModeModal from './components/DevModeModal';
+import SystemUpdateModal from './components/SystemUpdateModal';
 import ManualViewer from './components/ManualViewer';
 import { useCalibration, lotCellName, displayCellName } from './hooks/useCalibration';
 import { useLiveState } from './hooks/useLiveState';
@@ -392,6 +393,7 @@ export default function MainApp({ user, onLogout }) {
     } catch { /* sem storage: vale só até recarregar */ }
   }
   const [devModalOpen, setDevModalOpen] = useState(false);
+  const [systemUpdateOpen, setSystemUpdateOpen] = useState(false); // botão ⟳ (modo dev + admin)
   // Manual (ícone "i" ao lado do título de cada menu): { manual, page } a
   // abrir ('user' ou 'admin'), ou null = fechado. Ver ManualViewer.jsx.
   const [manualPage, setManualPage] = useState(null);
@@ -1791,6 +1793,7 @@ export default function MainApp({ user, onLogout }) {
         robotBattery={robotBattery}
         robotReturningToCharge={robotReturningToCharge}
         onRobotStatusClick={() => setRobotFocusRequest((n) => n + 1)}
+        onOpenSystemUpdate={() => setSystemUpdateOpen(true)}
       />
       <CloseUpStatusBanner
         name={activeCloseUpId ? closeUps.find((c) => c.id === activeCloseUpId)?.name : null}
@@ -2124,6 +2127,7 @@ export default function MainApp({ user, onLogout }) {
       <Toast toast={toast} />
       <ManualViewer target={manualPage} onClose={() => setManualPage(null)} />
       <DevModeModal open={devModalOpen} onSubmit={handleDevModalSubmit} onClose={handleDevModalClose} />
+      <SystemUpdateModal open={systemUpdateOpen && devMode && !!user.isAdmin} onClose={() => setSystemUpdateOpen(false)} />
     </div>
   );
 }

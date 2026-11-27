@@ -47,6 +47,29 @@ build` → Python 3.12 → `pyinstaller==6.11.1`:
   (`LIFTY-dados-AAAA-MM-DD_HHMM`). Lista `$recomendados`: todo arquivo de
   dado novo entra aqui.
 
+## Atualizar pelo site (botão ⟳, 2026-11-27)
+
+No Toolbar, ao lado do tema, **só no modo desenvolvedor e só pra admin**
+(o servidor também exige admin: 403 pros outros). Abre `SystemUpdateModal`:
+versão instalada (`VERSAO.txt`), última Release do GitHub (a VM precisa de
+internet), "Atualizar para vX" e "Voltar à anterior" (se houver backup), log
+da última execução.
+- `GET/POST /api/system/update {action: update|rollback}`. Recusa no modo
+  teste, fora do exe congelado/Windows, sem o `atualizar.ps1` ao lado, com
+  fila ocupada (inclui UNLOAD pendente) ou com outra atualização em curso.
+- O servidor **não se troca**: grava `atualizar-via-site.ps1` (wrapper que
+  joga toda a saída em `logs\atualizar.log`) e agenda/dispara a tarefa
+  `LIFTY-Atualizar` no Agendador como SYSTEM (`schtasks /Create … /RU SYSTEM
+  /RL HIGHEST /F` + `/Run`). Precisa ser FORA do serviço: o atualizar.ps1
+  para o serviço e o NSSM mata os filhos junto.
+- Enquanto isso, `enqueue-batch` recusa tarefa nova (10 min).
+- A tela espera o serviço cair e voltar e recarrega; se o log mostrar
+  "PAREI" (o script desistiu antes de trocar), avisa na hora.
+- **Só funciona a partir da versão que tem o botão** — a VM precisa ser
+  atualizada uma vez pela infra (instalar.ps1 do pacote) pra ganhar ele.
+- Testado: unidade com `schtasks` simulado (13 casos) e tela no modo teste.
+  A execução real como SYSTEM só dá pra validar na VM.
+
 ## Como publicar uma versão (o que o "um comando" da VM precisa)
 
 1. Commit + `git push origin main` + tag anotada `vX.Y` + `git push origin vX.Y`.

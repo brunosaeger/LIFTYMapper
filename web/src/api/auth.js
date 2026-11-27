@@ -100,6 +100,20 @@ export async function saveOperationHours(changes) {
   });
 }
 
+// Atualizar o sistema pelo site (botão ⟳, modo dev + admin; ver
+// packaging/CONTEXT.md). action: 'update' | 'rollback'.
+export async function fetchSystemUpdate() {
+  return jsonRequest('/api/system/update');
+}
+
+export async function startSystemUpdate(action) {
+  return jsonRequest('/api/system/update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action }),
+  });
+}
+
 export async function deleteUser(username) {
   return jsonRequest('/api/users/' + encodeURIComponent(username), { method: 'DELETE' });
 }

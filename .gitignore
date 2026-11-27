@@ -50,3 +50,4 @@ session_secret.key
 .claude/settings.local.json
 
 backups/
+atualizar-via-site.ps1

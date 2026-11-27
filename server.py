@@ -4089,6 +4089,104 @@ def _refresh_daily_backup():
         _backup_data("diario")
 
 
+# --- Atualizar o sistema pelo site (2026-11-27, ver packaging/CONTEXT.md) ---
+# Botão ⟳ no Toolbar (modo desenvolvedor + admin). O servidor NÃO se troca
+# sozinho: entrega o `atualizar.ps1` (o mesmo da linha de comando — confere a
+# fila, baixa a Release, guarda o programa atual, troca e religa) pro
+# Agendador de Tarefas do Windows, como SYSTEM. Precisa ser FORA do processo
+# do serviço: o atualizar.ps1 para o serviço, e o NSSM mata os processos
+# filhos junto — rodando como filho, o script morreria no meio da troca.
+# Só existe no .exe da VM (congelado, Windows, com o atualizar.ps1 ao lado);
+# em dev e no modo teste o botão só mostra o motivo.
+SYSTEM_UPDATE_PATH = "/api/system/update"
+SYSTEM_UPDATE_TASK = "LIFTY-Atualizar"
+SYSTEM_UPDATE_LOG = _app_dir() / "logs" / "atualizar.log"
+SYSTEM_UPDATE_WRAPPER = _app_dir() / "atualizar-via-site.ps1"
+SYSTEM_UPDATE_RELEASE_API = "https://api.github.com/repos/brunosaeger/LIFTYMapper/releases/latest"
+_system_update = {"startedAt": None, "action": None, "by": None}  # em memória: o processo morre na troca mesmo
+
+
+def _system_version():
+    """(versão, commit) do programa instalado — VERSAO.txt que o CI põe no pacote."""
+    try:
+        lines = (_app_dir() / "VERSAO.txt").read_text(encoding="utf-8", errors="replace").split()
+        return (lines[0] if lines else None), (lines[1][:7] if len(lines) > 1 else None)
+    except OSError:
+        return None, None
+
+
+def _system_update_blocker():
+    """Motivo pra NÃO dá pra atualizar por aqui (None = dá)."""
+    if TEST_MODE:
+        return "Modo teste: este servidor não se atualiza."
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return "Só o programa instalado na VM (LIFTY-SERVICE.exe) se atualiza por aqui."
+    if not (_app_dir() / "atualizar.ps1").exists():
+        return "Falta o atualizar.ps1 ao lado do programa — atualize uma vez pelo instalar.ps1."
+    return None
+
+
+def _queue_busy():
+    with QUEUE_LOCK:
+        state = _read_queue_state()
+    return bool(state.get("currentRoute") or state.get("pendingRoute") or state.get("routeQueue")
+                or state.get("pendingPostPickupUnload"))
+
+
+def _latest_release():
+    """Tag e data da última Release no GitHub (a VM precisa de internet)."""
+    try:
+        req = urllib.request.Request(SYSTEM_UPDATE_RELEASE_API, headers={"User-Agent": "LIFTY", "Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return {"tag": data.get("tag_name"), "publishedAt": data.get("published_at")}, None
+    except Exception as err:
+        return None, "Não consegui consultar o GitHub (%s). A VM tem internet?" % err
+
+
+def _system_update_status():
+    version, commit = _system_version()
+    latest, latest_error = _latest_release()
+    log_tail = ""
+    try:
+        log_tail = "\n".join(SYSTEM_UPDATE_LOG.read_text(encoding="utf-8", errors="replace").splitlines()[-15:])
+    except OSError:
+        pass
+    return {
+        "version": version, "commit": commit,
+        "latest": latest, "latestError": latest_error,
+        "blocker": _system_update_blocker(),
+        "queueBusy": _queue_busy(),
+        "hasPrevious": (_app_dir() / "backups" / "programa-anterior" / "LIFTY-SERVICE.exe").exists(),
+        "started": _system_update["startedAt"] is not None,
+        "lastLog": log_tail,
+    }
+
+
+def _start_system_update(action, username):
+    """Agenda o atualizar.ps1 (ou -Voltar) como SYSTEM e dispara já."""
+    # Wrapper fixo: grava TODA a saída do script no log (o /TR do schtasks tem
+    # limite de 261 caracteres, então o redirecionamento mora aqui).
+    SYSTEM_UPDATE_LOG.parent.mkdir(exist_ok=True)
+    SYSTEM_UPDATE_WRAPPER.write_text(
+        "# Gerado pelo LIFTY (botão Atualizar do site). Pode apagar.\r\n"
+        "& \"$PSScriptRoot\\atualizar.ps1\" @args *> \"$PSScriptRoot\\logs\\atualizar.log\"\r\n",
+        encoding="utf-8")
+    import subprocess  # só aqui (e na vigia do bridge) — mesmo padrão
+    cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -File "%s"%s' % (SYSTEM_UPDATE_WRAPPER, " -Voltar" if action == "rollback" else "")
+    opts = dict(capture_output=True, text=True, encoding="oem", errors="replace", timeout=30,
+                stdin=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    create = subprocess.run(["schtasks", "/Create", "/TN", SYSTEM_UPDATE_TASK, "/TR", cmd, "/SC", "ONCE",
+                             "/ST", "23:59", "/RU", "SYSTEM", "/RL", "HIGHEST", "/F"], **opts)
+    if create.returncode != 0:
+        raise RuntimeError("schtasks /Create: " + (create.stderr or create.stdout).strip())
+    run = subprocess.run(["schtasks", "/Run", "/TN", SYSTEM_UPDATE_TASK], **opts)
+    if run.returncode != 0:
+        raise RuntimeError("schtasks /Run: " + (run.stderr or run.stdout).strip())
+    _system_update.update(startedAt=time.time(), action=action, by=username)
+    print("ATUALIZAÇÃO DO SISTEMA (%s) iniciada por %s — o serviço vai reiniciar." % (action, username))
+
+
 def start_server(robot_host=None, port=None):
     global _httpd
     if _httpd is not None:
@@ -4348,6 +4446,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not self._require_auth():
                 return
             self._relay(200, "application/json", json.dumps(_operation_status(), ensure_ascii=False).encode("utf-8"))
+        elif self.path == SYSTEM_UPDATE_PATH:
+            if not self._require_admin():
+                return
+            self._relay(200, "application/json", json.dumps(_system_update_status(), ensure_ascii=False).encode("utf-8"))
         elif self.path == CHAT_PATH:
             user = self._require_auth()
             if not user:
@@ -4440,6 +4542,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not self._require_admin():
                 return
             self._set_operation_hours()
+        elif self.path == SYSTEM_UPDATE_PATH:
+            user = self._require_admin()
+            if not user:
+                return
+            self._system_update_start(user)
         elif self.path == CHAT_SEND_PATH:
             user = self._require_auth()
             if not user:
@@ -4668,6 +4775,31 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             data["reads"][requester["username"]] = msg["id"]
             _write_chat(data)
         self._relay(200, "application/json", json.dumps(_chat_view(requester["username"]), ensure_ascii=False).encode("utf-8"))
+
+    def _system_update_start(self, requester):
+        """{action: "update"|"rollback"} — ver "Atualizar o sistema pelo site"."""
+        def fail(code, msg):
+            self._relay(code, "application/json", json.dumps({"error": msg}, ensure_ascii=False).encode("utf-8"))
+        try:
+            action = self._read_json_body().get("action", "update")
+        except (json.JSONDecodeError, AttributeError) as err:
+            return fail(400, str(err))
+        if action not in ("update", "rollback"):
+            return fail(400, "action precisa ser update ou rollback")
+        blocker = _system_update_blocker()
+        if blocker:
+            return fail(400, blocker)
+        if _system_update["startedAt"] and time.time() - _system_update["startedAt"] < 600:
+            return fail(409, "Já tem uma atualização em andamento — o sistema reinicia sozinho.")
+        if _queue_busy():
+            return fail(409, "Tem rota rodando ou na fila. Espere o robô ficar ocioso pra atualizar.")
+        if action == "rollback" and not (_app_dir() / "backups" / "programa-anterior" / "LIFTY-SERVICE.exe").exists():
+            return fail(400, "Não existe versão anterior guardada.")
+        try:
+            _start_system_update(action, requester["username"])
+        except Exception as err:
+            return fail(500, "Não deu pra iniciar a atualização: %s" % err)
+        self._relay(200, "application/json", json.dumps({"ok": True, "action": action}, ensure_ascii=False).encode("utf-8"))
 
     def _chat_pallet_request_cancel(self, requester):
         """{id} -> cancela a própria Solicitação de pallets: tira as marcas
@@ -5097,6 +5229,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     raise ValueError("cada par precisa ter pickup e dropoff")
         except (json.JSONDecodeError, KeyError, ValueError) as err:
             self._relay(400, "application/json", json.dumps({"error": str(err)}, ensure_ascii=False).encode("utf-8"))
+            return
+
+        # Atualização do sistema em andamento (botão ⟳): o serviço vai
+        # reiniciar em instantes — nenhuma tarefa nova entra.
+        if _system_update["startedAt"] and time.time() - _system_update["startedAt"] < 600:
+            self._relay(409, "application/json", json.dumps(
+                {"error": "Tarefa recusada - o sistema está sendo atualizado. Tente de novo em 1 minuto."},
+                ensure_ascii=False).encode("utf-8"))
             return
 
         # Horário de operação / switch do admin (ver "Horário de operação").
