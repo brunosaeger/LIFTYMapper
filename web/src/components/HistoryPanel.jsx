@@ -58,7 +58,7 @@ function displayDescription(rec) {
 }
 
 // 'YYYY-MM-DD' (valor nativo de <input type="date">) -> 'DD/MM/AAAA', só
-// pra exibição. Sem lib de data (zero-dependência, ver CONTEXT.md) —
+// pra exibição. Sem lib de data (zero-dependência, ver web/CONTEXT.md) —
 // requestedAt já vem nesse formato ISO do server.py (strftime
 // "%Y-%m-%d %H:%M:%S"), então comparar prefixo de string basta pra filtrar.
 function formatDateBR(isoDate) {
@@ -357,7 +357,7 @@ export default function HistoryPanel({ onOpenManual, lots, points, selectedEntry
                 onClick={() => onSelectEntry && onSelectEntry(entry)}
               >
                 {/* pickup null = UNLOAD isolado pós-cancelamento (ver
-                    CONTEXT.md, "Cancelamento pós-pickup") — não é uma rota
+                    docs/context/fila.md, "Cancelamento pós-pickup") — não é uma rota
                     origem→destino normal, só termina de descarregar um
                     pallet que já estava no garfo. Nome fantasia
                     (displayCellName) em vez do nome técnico, pedido do

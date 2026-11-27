@@ -70,7 +70,7 @@ export async function createUser({ username, password, isAdmin, isMaster, kanban
   });
 }
 
-// Kanbans (Close Ups elegíveis pra restringir um usuário, ver CONTEXT.md) —
+// Kanbans (Close Ups elegíveis pra restringir um usuário, ver docs/context/usuarios.md) —
 // exclui os "livres pra todos" (server.py, FREE_KANBAN_IDS). Só id+nome.
 export async function fetchKanbans() {
   return jsonRequest('/api/kanbans');

@@ -1,7 +1,7 @@
 // Camada de API que sobra no cliente pro dispatch service do robô — só
 // leitura (erros/avisos), e persistência de calibração/histórico no nosso
 // próprio server.py. Toda a orquestração de fila (criar/disparar task,
-// cancelar, sondar status) migrou pro servidor (ver CONTEXT.md, "Fila de
+// cancelar, sondar status) migrou pro servidor (ver docs/context/fila.md, "Fila de
 // rotas compartilhada", e server.py) — o navegador não fala mais direto
 // com o robô pra isso, só manda intenções pro servidor (hooks/useLiveState.js).
 

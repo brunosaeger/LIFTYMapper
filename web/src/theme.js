@@ -9,7 +9,7 @@ const DARK_COLORS = {
   accentAmber: '#f5a524',
   accentAmberDim: '#8a611c',
   // Cor própria dos PONTOS AVULSOS ("lotes curinga" de uma célula só, ver
-  // CONTEXT.md). Laranja de propósito mais avermelhado que accentAmber
+  // docs/context/mapa.md). Laranja de propósito mais avermelhado que accentAmber
   // (#f5a524, que é bem amarelado): o âmbar já significa "destino/unload
   // selecionado", e os dois precisam ser distinguíveis à primeira vista
   // num mapa cheio. Só existe aqui, sem par em index.css — ponto avulso é

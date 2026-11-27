@@ -52,7 +52,7 @@ export default function CloseUpStatusBanner({ name, task, robot, onFocusEndpoint
       )}
       <div>
         {/* Prefixo em destaque (mint vibrante), resto do texto em branco —
-            pedido explícito do usuário, ver CONTEXT.md. */}
+            pedido explícito do usuário, ver docs/context/mapa.md. */}
         <span className="closeup-status-banner__prefix">VISUALIZANDO</span>
         {robot ? (
           <span className="closeup-status-banner__rest">

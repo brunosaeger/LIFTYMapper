@@ -1,6 +1,6 @@
 import { displayCellName } from '../hooks/useCalibration';
 
-// Caso 4 (diferenciação de pallets, ver CONTEXT.md): o pallet azul (metálico)
+// Caso 4 (diferenciação de pallets, ver docs/context/ocupacao.md): o pallet azul (metálico)
 // fica levemente elevado do chão em 4 pezinhos — o robô precisa de uma
 // altura no ponto de PICKUP pra alinhar o garfo corretamente; o de madeira
 // fica rente ao chão. Desde 2026-10-30 não se escolhe o pallet aqui: a tarefa
@@ -19,7 +19,7 @@ export default function PointToPointBar({ onOpenManual,
   const countsMatch = pickupNames.length === dropoffNames.length;
   const hasSelection = pickupNames.length > 0 || dropoffNames.length > 0;
   // Em sequência, exigir contagens iguais é o que garante que todo pallet
-  // pego tem pra onde ir (ver CONTEXT.md, "Lotes em sequência") — decisão
+  // pego tem pra onde ir (ver docs/context/ponto-a-ponto.md, "Lotes em sequência") — decisão
   // do usuário: bloquear o envio até bater, em vez de mandar pela metade.
   const canSend = pickupNames.length > 0 && dropoffNames.length > 0 && countsMatch;
   const sendLabel = editing ? 'Salvar alterações'

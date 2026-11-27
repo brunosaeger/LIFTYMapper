@@ -142,7 +142,7 @@ function PlayIcon() {
   );
 }
 
-// "Tarefas aguardando envio" (ver CONTEXT.md e MainApp.jsx): tarefas montadas
+// "Tarefas aguardando envio" (ver docs/context/ponto-a-ponto.md e MainApp.jsx): tarefas montadas
 // no Ponto a Ponto ficam aqui antes de irem pro robô, pra dar tempo de
 // conferir, reordenar, trocar pallet ou editar. Só "Iniciar tarefas" manda
 // pro servidor. Toda a REGRA (validação de obstrução ao reordenar/remover,

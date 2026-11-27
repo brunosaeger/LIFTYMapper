@@ -3,7 +3,7 @@
 sensor de obstaculo 3D (ambos ROS) como HTTP.
 
 ATENCAO — roda no COMPUTADOR DE BORDO DO ROBO (a mesma maquina que serve o
-dispatch service via wifi, ver CONTEXT.md "Descoberta do check_turn_angle
+dispatch service via wifi, ver robot-bridge/CONTEXT.md "Descoberta do check_turn_angle
 via ROS"), NUNCA na maquina que roda o server.py. E um consumidor
 independente dos topicos ROS que ja existem no robo, nada mais:
 
@@ -23,7 +23,7 @@ independente dos topicos ROS que ja existem no robo, nada mais:
   Liga/desliga o sensor de obstaculo 3D (camera de profundidade) —
   usado pelo server.py pra desligar SO durante o giro inicial de rotas
   pra energia que travam por sensor conservador demais em espaco
-  apertado (ver CONTEXT.md "obs_3d ligado/desligado durante giro"),
+  apertado (ver robot-bridge/CONTEXT.md "obs_3d ligado/desligado durante giro"),
   sempre com teto de tempo do lado do server.py — este bridge nunca
   decide sozinho por quanto tempo fica desligado, so publica o Bool
   que pedirem.

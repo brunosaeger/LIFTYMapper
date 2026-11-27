@@ -763,7 +763,7 @@ function LotMarker({ lot, cellSize, mode, isSelected, pickupNames, dropoffNames,
   );
 }
 
-// Área de Close Up — retângulo livre (sem rotação, ver CONTEXT.md) que só
+// Área de Close Up — retângulo livre (sem rotação, ver docs/context/mapa.md) que só
 // existe visualmente/interativamente em dois modos (ver render em
 // FloorPlanCanvas: a lista de closeUps nem é mapeada fora deles):
 //   - 'closeup' (edição, modo desenvolvedor): tracejado laranja visível,
@@ -1006,6 +1006,7 @@ export default function FloorPlanCanvas({
   palletRequests = EMPTY_MARKS,
   onRequestCellClick,
   closeUpPicking = false,
+  resetViewRequest = 0, // muda a cada pedido do MainApp pra afastar o mapa (ver handleResetView)
   queuePulseId = 0,
   invalidPulseName,
   invalidPulseId,
@@ -1164,11 +1165,20 @@ export default function FloorPlanCanvas({
     }
   }
 
-  function handleResetView() {
+  // Pedido do MainApp pra afastar o mapa (ex.: ao abrir a Solicitação de
+  // pallets) — mesmo enquadramento da lupa "−", sem avisar o MainApp de
+  // volta (não é um clique no botão). `resetViewRequest` muda a cada pedido.
+  useEffect(() => {
+    if (!resetViewRequest || !baseScale) return;
+    handleResetView({ fromButton: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resetViewRequest]);
+
+  function handleResetView({ fromButton = true } = {}) {
     if (!baseScale) return;
     clearViewFlip();
     setFollow(false);
-    onResetViewClick?.(); // só o clique no botão ZOOM - (ver MainApp.jsx)
+    if (fromButton) onResetViewClick?.(); // só o clique no botão ZOOM - (ver MainApp.jsx)
     // Voltar pro enquadramento geral não é mais "olhar de perto" nenhum
     // Close Up específico — some o banner "VISUALIZANDO: KANBAN X" (ver
     // handleCloseUpActivate em MainApp.jsx).
@@ -1772,7 +1782,7 @@ export default function FloorPlanCanvas({
     if (!pointer) return;
     // Qualquer mudança de ZOOM (roda, pinça, reset — não pan/arrasto) some
     // o banner "VISUALIZANDO: KANBAN X" — ele só sobrevive a mover o mapa
-    // no mesmo nível de zoom (ver CONTEXT.md).
+    // no mesmo nível de zoom (ver docs/context/mapa.md).
     onCloseUpActivate?.(null);
     setFollow(false);
     const oldScale = stage.scaleX();
@@ -1933,7 +1943,7 @@ export default function FloorPlanCanvas({
         {pinchPulseId > 0 && <span key={pinchPulseId} className="view-toggle__pinch-pulse" aria-hidden="true" />}
         {/* Lupa com "+" (zoom-in) — substituiu a mãozinha (que já tinha
             substituído o alternador de vista topo/isométrica, legado, ver
-            CONTEXT.md). Par visual do zoom-out no reset-toggle acima. */}
+            docs/context/mapa.md). Par visual do zoom-out no reset-toggle acima. */}
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <circle cx="11" cy="11" r="8" />
           <line x1="21" y1="21" x2="16.65" y2="16.65" />

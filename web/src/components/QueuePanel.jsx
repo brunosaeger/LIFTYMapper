@@ -48,7 +48,7 @@ function groupWaitingRoutes(routes) {
 // escuta é o <li> externo do grupo (ver QueueUnit), por delegação via
 // `data-route-id` (sempre presente aqui, com ou sem onClick direto).
 function QueueRoute({ id, pickup, dropoff, unloadOnly, user, palletType, lots, points, variant, selected, onClick, onCancel, cancelLabel, cancelPending, dragHandlers, extraClassName = '', dragStyle, innerRef }) {
-  // Cancelamento adiado (ver CONTEXT.md, "Cancelamento adiado até giro
+  // Cancelamento adiado (ver docs/context/fila.md, "Cancelamento adiado até giro
   // seguro") — só existe pra rota EM ANDAMENTO (variant "current"); as
   // outras (pending/queued na fila) não têm essa espera, cancelam na hora
   // como sempre. Clicar de novo enquanto pending é inofensivo (servidor
@@ -69,7 +69,7 @@ function QueueRoute({ id, pickup, dropoff, unloadOnly, user, palletType, lots, p
             displayCellName) — pickup/dropoff continuam sendo os nomes
             técnicos que vieram do servidor, usados em onClick/onCancel
             acima sem nenhuma mudança.
-            unloadOnly (ver CONTEXT.md, "Cancelamento pós-pickup"): tarefa
+            unloadOnly (ver docs/context/fila.md, "Cancelamento pós-pickup"): tarefa
             isolada de UNLOAD criada depois de cancelar já com o pallet no
             garfo — não tem origem (já foi feita, cancelada), devolve o
             pallet ao ponto de ORIGEM da rota cancelada (dropoff aqui é o
@@ -186,7 +186,7 @@ function QueueUnit({ unit, lots, points, selectedRouteId, onUnitClick, onRemoveQ
 // Painel "Fila" — antes vivia dentro do modo Ponto a Ponto (RouteQueue.jsx),
 // agora é seu próprio modo (botão "índice" no mapa, ver FloorPlanCanvas). A
 // LÓGICA de fila/cancelamento/prioridade não mudou nada, é toda do servidor
-// (ver CONTEXT.md, "Fila de rotas compartilhada") — este componente só lê
+// (ver docs/context/fila.md, "Fila de rotas compartilhada") — este componente só lê
 // currentRoute/waitingRoutes e manda intenções pra cima (cancelar, remover,
 // selecionar pra ver no mapa, reordenar).
 //
@@ -452,7 +452,7 @@ export default function QueuePanel({ currentRoute, waitingRoutes, lots, points, 
               variant="current"
               selected={!selectedRouteId || selectedRouteId === 'current'}
               onClick={handleUnitClick}
-              // Tarefa isolada de descarregar (ver CONTEXT.md, "Cancelamento
+              // Tarefa isolada de descarregar (ver docs/context/fila.md, "Cancelamento
               // pós-pickup") não pode ser cancelada pela UI: cancelar ela de
               // novo só recriaria o mesmo problema que ela existe pra
               // resolver (pallet preso no garfo), possivelmente em posição

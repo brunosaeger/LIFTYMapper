@@ -16,7 +16,7 @@ async function jsonRequest(path, options) {
   return data;
 }
 
-// Estado ao vivo compartilhado entre todos os dispositivos (ver CONTEXT.md,
+// Estado ao vivo compartilhado entre todos os dispositivos (ver docs/context/fila.md,
 // "Fila de rotas compartilhada") — currentRoute/pendingRoute/routeQueue/
 // occupied agora vivem no server.py (queue_state.json/calibration.json),
 // não mais em estado React local. Este hook só POLL o servidor (GET
@@ -72,7 +72,7 @@ export function useLiveState() {
   //
   // Sempre em lote, mesmo com um par só: o servidor precisa validar a
   // cadeia inteira com ocupação PROJETADA (ver "Lotes em sequência" no
-  // CONTEXT.md). Mandar par a par faria a 2ª rota ser rejeitada, porque no
+  // docs/context/ocupacao.md). Mandar par a par faria a 2ª rota ser rejeitada, porque no
   // instante do envio a origem anterior ainda está fisicamente ocupada.
   const enqueueRoutes = useCallback(async ({ pairs, palletType, palletTop }) => {
     const result = await jsonRequest('/api/queue/enqueue-batch', {
@@ -84,7 +84,7 @@ export function useLiveState() {
     return result;
   }, [refresh]);
 
-  // Cancelamento adiado até giro seguro (ver CONTEXT.md e server.py,
+  // Cancelamento adiado até giro seguro (ver docs/context/fila.md e server.py,
   // _queue_cancel_current): a resposta pode voltar com `pending: true` —
   // significa que o robô ainda NÃO tem espaço pra girar agora, então o
   // cancelamento de verdade não aconteceu ainda; o servidor continua

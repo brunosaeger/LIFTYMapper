@@ -4,7 +4,7 @@ import LoginScreen from './components/LoginScreen';
 import { fetchSession, login, logout } from './api/auth';
 import './App.css';
 
-// Camada de autenticação (ver CONTEXT.md, "Sistema de login") — decide
+// Camada de autenticação (ver docs/context/usuarios.md, "Sistema de login") — decide
 // entre tela de login e o app de verdade (MainApp). De propósito o app de
 // verdade só MONTA depois de sessão confirmada: os hooks de MainApp (ex:
 // useCalibration) disparam fetch autenticado já no primeiro render, e esse

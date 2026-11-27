@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { fetchChat, markChatRead, sendChatMessage, sendPalletRequest } from '../api/chat';
+import { cancelPalletRequest, fetchChat, markChatRead, sendChatMessage, sendPalletRequest } from '../api/chat';
 
 const POLL_MS = 4000; // mesmo ritmo do /api/live-state
 const NO_REQUESTS = {};
@@ -40,12 +40,17 @@ export function useChat(username, open) {
 
   const unread = open ? 0 : messages.filter((m) => m.id > lastReadId && m.user !== username).length;
 
-  const send = useCallback(async (text) => {
-    apply(await sendChatMessage(text));
+  const send = useCallback(async (text, replyTo = null) => {
+    apply(await sendChatMessage(text, replyTo));
   }, [apply]);
 
   const sendRequest = useCallback(async (positions, text) => {
     apply(await sendPalletRequest(positions, text));
+  }, [apply]);
+
+  // A resposta já traz o chat atualizado: o amarelo some na hora.
+  const cancelRequest = useCallback(async (id) => {
+    apply(await cancelPalletRequest(id));
   }, [apply]);
 
   // Marcação/X do modo Marcação: tira o amarelo da tela NO ATO (otimista);
@@ -64,5 +69,5 @@ export function useChat(username, open) {
     return refresh();
   }, [refresh]);
 
-  return { messages, unread, palletRequests, send, sendRequest, refresh, hideRequests, confirm };
+  return { messages, unread, palletRequests, send, sendRequest, cancelRequest, refresh, hideRequests, confirm };
 }

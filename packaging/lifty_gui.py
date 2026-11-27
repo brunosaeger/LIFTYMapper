@@ -61,7 +61,7 @@ def save_config(cfg):
 #
 # Só existe no Windows (é a API SetThreadExecutionState do kernel32) — em
 # qualquer outro SO (dev no Linux/Mac) é no-op. Lá, quem tem esse problema
-# ajusta nas configurações de energia do próprio SO (ver CONTEXT.md).
+# ajusta nas configurações de energia do próprio SO (ver packaging/CONTEXT.md).
 _ES_CONTINUOUS = 0x80000000
 _ES_SYSTEM_REQUIRED = 0x00000001
 

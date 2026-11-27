@@ -1,7 +1,7 @@
 // Gerador de id sem depender de crypto.randomUUID() — essa API só existe em
 // "contextos seguros" (HTTPS, ou localhost). Rodando via IP puro em HTTP
 // simples (o caso normal desse app numa rede local industrial, sem
-// domínio/certificado — ver CONTEXT.md), o navegador nem expõe
+// domínio/certificado — ver web/CONTEXT.md), o navegador nem expõe
 // crypto.randomUUID: chamar ele lança TypeError na hora, silenciosamente,
 // já que costuma ser a primeira linha da função, fora de qualquer
 // try/catch. Formato de UUID v4 só por convenção/compatibilidade visual —

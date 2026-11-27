@@ -60,7 +60,7 @@ export default function MainApp({ user, onLogout }) {
     // setView não é mais chamado por nada na UI — o botão que trocava de
     // vista virou o modo Interação (ver handleToggleInteractionMode). A
     // vista fica travada em 'top' daqui pra frente; 'iso' é legado
-    // inatingível (ver CONTEXT.md, "Duas vistas independentes").
+    // inatingível (ver docs/context/mapa.md, "Duas vistas independentes").
     view,
     points, addPoint, updatePoint, removePoint,
     lots, addLot, updateLot, removeLot,
@@ -72,7 +72,7 @@ export default function MainApp({ user, onLogout }) {
     syncRemoteStamp,
     status: saveStatus,
   } = useCalibration();
-  // Estado ao vivo compartilhado entre dispositivos (ver CONTEXT.md, "Fila
+  // Estado ao vivo compartilhado entre dispositivos (ver docs/context/fila.md, "Fila
   // de rotas compartilhada") — currentRoute/pendingRoute/routeQueue/
   // occupied vêm do servidor (polling), e as ações abaixo mandam intenções
   // pra ele em vez de mudar estado local direto (quem decide/dispara de
@@ -256,6 +256,7 @@ export default function MainApp({ user, onLogout }) {
   const [requestCallId, setRequestCallId] = useState(0);
   const [requestZoomPicking, setRequestZoomPicking] = useState(false);
   const [requestSending, setRequestSending] = useState(false);
+  const [resetViewRequest, setResetViewRequest] = useState(0); // pedido pro mapa afastar (ver FloorPlanCanvas)
   // Painel Histórico: qual entrada foi clicada, pra destacar origem/destino
   // no mapa (ver mapPickupNames abaixo) — guarda o par direto (o painel já
   // tem a entrada inteira em mãos, sem precisar re-achar por id como no
@@ -436,7 +437,7 @@ export default function MainApp({ user, onLogout }) {
   }
 
   // Listas (não nomes soltos) porque o modo "Lotes em sequência" seleciona
-  // vários de uma vez — ver CONTEXT.md. Fora dele, ficam com no máximo 1
+  // vários de uma vez — ver docs/context/ponto-a-ponto.md. Fora dele, ficam com no máximo 1
   // nome cada, e todo o comportamento antigo continua idêntico.
   const [pickupNames, setPickupNames] = useState([]);
   const [dropoffNames, setDropoffNames] = useState([]);
@@ -449,7 +450,7 @@ export default function MainApp({ user, onLogout }) {
   // normal a alternância continua automática (primeiro clique = origem,
   // segundo = destino).
   const [activeSlot, setActiveSlot] = useState('pickup');
-  // Diferenciação de pallets (ver CONTEXT.md): desde 2026-10-30 o Ponto a
+  // Diferenciação de pallets (ver docs/context/ocupacao.md): desde 2026-10-30 o Ponto a
   // Ponto NÃO escolhe o pallet — cada tarefa usa o MATERIAL marcado na
   // posição de origem (modo Marcação / entrega do robô, ver palletMaterials
   // e materialForPickup). Na lista de envio ainda dá pra trocar o pallet de
@@ -457,7 +458,7 @@ export default function MainApp({ user, onLogout }) {
   // "Pallet de cima" (2º andar do azul) continua dormente: sempre false.
   const palletTop = false;
 
-  // "Tarefas aguardando envio" (ver StagedTasksPanel.jsx e CONTEXT.md):
+  // "Tarefas aguardando envio" (ver StagedTasksPanel.jsx e docs/context/ponto-a-ponto.md):
   // "Enviar tarefa" não manda mais direto pro robô — a tarefa entra nesta
   // lista local, onde dá pra conferir, reordenar, trocar pallet ou editar,
   // e só "Iniciar tarefas" manda tudo pro servidor. Cada item é uma
@@ -647,11 +648,15 @@ export default function MainApp({ user, onLogout }) {
     setRequestCallId(0);
   }
 
+  // Entrar na solicitação já afasta o mapa (lupa "−") e deixa o próximo
+  // toque escolhendo o kanban pra ampliar (lupa "+") — pedido do usuário.
   function handleStartRequest() {
     if (mode === 'request') return;
     clearRequestDraft();
     setMode('request');
     resetSelection({ keepRoute: true });
+    setRequestZoomPicking(true);
+    setResetViewRequest((n) => n + 1);
   }
 
   // Volta pro chat (de onde a solicitação foi aberta).
@@ -698,6 +703,17 @@ export default function MainApp({ user, onLogout }) {
       showToast('Não deu pra enviar: ' + err.message, 'error');
     } finally {
       setRequestSending(false);
+    }
+  }
+
+  // X embaixo do cartão (só quem enviou vê; o servidor confere de novo): tira
+  // as marcas amarelas dessa solicitação na hora — a resposta já traz o chat.
+  async function handleCancelRequest(msg) {
+    try {
+      await chat.cancelRequest(msg.id);
+      showToast('Solicitação de pallets cancelada.', 'success');
+    } catch (err) {
+      showToast('Não deu pra cancelar: ' + err.message, 'error');
     }
   }
 
@@ -833,6 +849,30 @@ export default function MainApp({ user, onLogout }) {
       if (!t.palletType) t.palletType = materialForPickup(t.pickup, chain);
       if (!t.palletType) return t.pickup;
       chain.push(t);
+    }
+    return null;
+  }
+
+  // Solicitação de pallets (ver docs/context/chat-solicitacoes.md): destino com
+  // pedido ativo só recebe o material pedido. Devolve o material pedido
+  // quando NÃO bate com `type`, senão null. O servidor barra de novo no envio.
+  const MATERIAL_NAME = { wood: 'MADEIRA', blue: 'AZUL (metal)' };
+  function requestedMaterialMismatch(dropoff, type) {
+    const req = chat.palletRequests[dropoff];
+    return req && type && req.material !== type ? req.material : null;
+  }
+
+  function notifyRequestMismatch(dropoff, wanted, sent) {
+    showToast('Atenção ao material do pallet: a solicitação em ' + displayCellName(dropoff, lots, points)
+      + ' pede pallet de ' + MATERIAL_NAME[wanted] + ', e esta tarefa leva pallet de ' + (MATERIAL_NAME[sent] || sent) + '.', 'error');
+    triggerInvalidPulse(dropoff);
+  }
+
+  // Primeira tarefa da lista (na ordem) que vai contra uma solicitação.
+  function firstRequestMismatch(tasks) {
+    for (const t of tasks) {
+      const wanted = requestedMaterialMismatch(t.dropoff, t.palletType);
+      if (wanted) return { dropoff: t.dropoff, wanted, sent: t.palletType };
     }
     return null;
   }
@@ -1039,7 +1079,13 @@ export default function MainApp({ user, onLogout }) {
   // keepRoute: mesma regra do botão ZOOM + (handleToggleInteractionMode).
   function handleResetViewClick() {
     setRobotViewing(false);
-    setRequestZoomPicking(false);
+    // Solicitação de pallets: igual aos outros menus, a lupa "−" afasta e o
+    // próximo toque no mapa já escolhe o kanban pra ampliar (lupa "+"), sem
+    // sair do menu.
+    if (mode === 'request') {
+      setRequestZoomPicking(true);
+      return;
+    }
     if (mode === 'ptp' || mode === 'mark' || mode === 'queue') {
       setMode('interaction');
       resetSelection({ keepRoute: true });
@@ -1123,6 +1169,14 @@ export default function MainApp({ user, onLogout }) {
     if (!isDropoffAllowed(name, projectedOccupancy([pickupName], []))) {
       showToast(dropoffDeniedMessage(name), 'error');
       triggerInvalidPulse(name);
+      return;
+    }
+    // Destino com Solicitação de pallets: o pallet que sai da origem precisa
+    // ser o material pedido ali.
+    const sent = materialForPickup(pickupName, flattenUnits(stagedBeforeSelection));
+    const wanted = requestedMaterialMismatch(name, sent);
+    if (wanted) {
+      notifyRequestMismatch(name, wanted, sent);
       return;
     }
     setDropoffNames([name]);
@@ -1261,6 +1315,11 @@ export default function MainApp({ user, onLogout }) {
       rejectNoMaterial(missing);
       return;
     }
+    const mismatch = firstRequestMismatch(tasks);
+    if (mismatch) {
+      notifyRequestMismatch(mismatch.dropoff, mismatch.wanted, mismatch.sent);
+      return;
+    }
     unit.palletType = tasks[0].palletType;
     setStagedUnits(next);
     showToast(
@@ -1367,7 +1426,7 @@ export default function MainApp({ user, onLogout }) {
   // Clicar numa rota do painel Histórico: alterna seleção (clicar de novo
   // na mesma desseleciona — mesmo gesto do painel Fila) e, ao SELECIONAR,
   // já dá zoom de perto na origem (ou no destino, se não houver origem —
-  // caso do UNLOAD isolado pós-cancelamento, ver CONTEXT.md "Cancelamento
+  // caso do UNLOAD isolado pós-cancelamento, ver docs/context/fila.md "Cancelamento
   // pós-pickup") e liga o banner "VISUALIZANDO" com origem/destino
   // clicáveis, mesmo espírito de "Visualizar tarefa" no Ponto a Ponto.
   function handleSelectHistoryEntry(entry) {
@@ -1499,6 +1558,12 @@ export default function MainApp({ user, onLogout }) {
       notifyReserved(pickup); // o pallet de lá já está comprometido com outra tarefa
       return;
     }
+    // O pallet trocado não pode chegar num destino que pediu outro material.
+    const mismatch = firstRequestMismatch(flat.filter((t) => changed.has(t.taskId)).map((t) => ({ ...t, palletType: type })));
+    if (mismatch) {
+      notifyRequestMismatch(mismatch.dropoff, mismatch.wanted, mismatch.sent);
+      return;
+    }
     const deliveredEarlier = flat.slice(0, idx).some((t) => t.dropoff === pickup);
     if (!deliveredEarlier && occupied.includes(pickup) && palletMaterials[pickup] !== type) {
       setPalletMaterial([pickup], type).catch((e) => showToast('Erro ao mudar o material da posição: ' + e.message, 'error'));
@@ -1511,7 +1576,7 @@ export default function MainApp({ user, onLogout }) {
 
   // Disparo/avanço/sondagem de verdade (falar com o robô, decidir
   // atual/pendente/fila, detectar FINISHED/CANCELLED, marcar ocupação) não
-  // mora aqui — é tudo dono do servidor (ver CONTEXT.md, "Fila de rotas
+  // mora aqui — é tudo dono do servidor (ver docs/context/fila.md, "Fila de rotas
   // compartilhada", e hooks/useLiveState.js). "Iniciar tarefas" só manda a
   // INTENÇÃO e mostra o que o servidor reporta de volta.
   async function handleStartStaged() {
@@ -1520,6 +1585,12 @@ export default function MainApp({ user, onLogout }) {
     const err = validateChain(flat);
     if (err) {
       rejectStaged(err, 'Ordem inválida: ');
+      return;
+    }
+    // A solicitação pode ter chegado depois de a tarefa entrar na lista.
+    const mismatch = firstRequestMismatch(flat);
+    if (mismatch) {
+      notifyRequestMismatch(mismatch.dropoff, mismatch.wanted, mismatch.sent);
       return;
     }
     // A lista inteira num envio só: o servidor valida a cadeia com ocupação
@@ -1549,6 +1620,12 @@ export default function MainApp({ user, onLogout }) {
     } catch (e) {
       // Horário de operação / switch do admin: a mensagem do servidor já é o
       // aviso completo ("Tarefa recusada - ..."), sem prefixo.
+      if (e.data?.materialMismatch) {
+        // o servidor barrou (outro tablet mandou a solicitação neste meio-tempo)
+        notifyRequestMismatch(e.data.name, e.data.wanted, e.data.sent);
+        chat.refresh();
+        return;
+      }
       showToast(e.data?.operationBlocked ? e.message : 'Erro ao iniciar tarefas: ' + e.message, 'error');
     } finally {
       setStarting(false);
@@ -1560,7 +1637,7 @@ export default function MainApp({ user, onLogout }) {
     ? { text: 'Salve ou cancele a edição antes de iniciar.', kind: 'info' }
     : stagedChainError ? { text: 'Ordem inválida: ' + stagedChainError.message, kind: 'error' } : null;
 
-  // Cancelamento adiado até giro seguro (ver CONTEXT.md e useLiveState.js):
+  // Cancelamento adiado até giro seguro (ver docs/context/fila.md e useLiveState.js):
   // `result.pending` true significa que o robô não tem espaço pra girar
   // AGORA — o cancelamento de verdade não aconteceu ainda, o servidor
   // continua tentando sozinho (CancelPendingBanner, acima, mostra o aviso
@@ -1627,7 +1704,7 @@ export default function MainApp({ user, onLogout }) {
 
   // Painel Fila: rotas "de espera" na ordem em que o robô as verá — a
   // pendingRoute (se houver) já foi disparada pro dispatch como "próxima",
-  // o resto é fila local (ver CONTEXT.md, "Fila de rotas compartilhada").
+  // o resto é fila local (ver docs/context/fila.md, "Fila de rotas compartilhada").
   const waitingRoutes = pendingRoute ? [pendingRoute, ...routeQueue] : routeQueue;
 
   // Rota selecionada no painel Fila — `selectedQueueRouteId` tem 3 estados:
@@ -1752,7 +1829,7 @@ export default function MainApp({ user, onLogout }) {
           (esperando girar pra COMEÇAR uma rota nova), awaitingChargeMessage
           (esperando o robô voltar pra energia e carregar antes de COMEÇAR uma
           rota nova) e postPickupUnloadMessage (cancelou já com o pallet no
-          garfo — descarregando isolado antes de seguir, ver CONTEXT.md
+          garfo — descarregando isolado antes de seguir, ver docs/context/fila.md
           "Cancelamento pós-pickup") nunca coexistem — cada uma cobre uma
           janela sequencial diferente da mesma currentRoute, nunca ao mesmo
           tempo (ver server.py, "check-turn no início de tarefas", "Trava:
@@ -1831,6 +1908,7 @@ export default function MainApp({ user, onLogout }) {
           onTogglePtpMode={handleTogglePtpMode}
           interactionModeActive={mode === 'interaction' || (mode === 'request' && requestZoomPicking)}
           closeUpPicking={mode === 'request' && requestZoomPicking}
+          resetViewRequest={resetViewRequest}
           requestDraft={mode === 'request' ? requestDraft : EMPTY_SELECTION}
           palletRequests={chat.palletRequests}
           onRequestCellClick={handleRequestCellClick}
@@ -1960,6 +2038,7 @@ export default function MainApp({ user, onLogout }) {
               showToast={showToast}
               onStartRequest={handleStartRequest}
               onViewRequest={handleViewRequest}
+              onCancelRequest={handleCancelRequest}
               palletRequests={chat.palletRequests}
               labelOf={(n) => displayCellName(n, lots, points)}
             />

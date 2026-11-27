@@ -4,12 +4,12 @@ import { fetchUsers, createUser, updateUser, deleteUser, fetchKanbans, fetchOper
 
 // Painel "Usuários" — só visível pra quem logou como admin (ver App.jsx,
 // gate por user.isAdmin, independente do modo desenvolvedor de edição de
-// pontos/lotes, que é outra trava). Decisão do usuário (ver CONTEXT.md,
+// pontos/lotes, que é outra trava). Decisão do usuário (ver docs/context/usuarios.md,
 // "Sistema de login"): cadastro/gestão de conta é tudo feito por aqui,
 // sem fluxo de "esqueci minha senha" — quem tem acesso de admin troca a
 // senha de qualquer um direto nesta tela.
 //
-// Kanbans (pedido do usuário, 2026-10-01, ver CONTEXT.md "Delimitação de
+// Kanbans (pedido do usuário, 2026-10-01, ver docs/context/usuarios.md "Delimitação de
 // usuários por grupo de lotes"): um usuário COMUM (nem admin, nem Mestre)
 // pode ser restrito a só RETIRAR pallets de kanban(s) específico(s) — a
 // lista completa de kanbans elegíveis (exclui os "livres pra todos", ver
@@ -370,7 +370,7 @@ function UserRow({ user, isSelf, kanbans, onFocusKanban, onToggleAdmin, onToggle
           ✕
         </button>
       </div>
-      {/* KANBANS (ver CONTEXT.md, "Delimitação de usuários por grupo de
+      {/* KANBANS (ver docs/context/usuarios.md, "Delimitação de usuários por grupo de
           lotes") — só pra usuário comum; admin/Mestre usam qualquer um sem
           restrição, não faz sentido atribuir kanban a eles. */}
       {restrictable && (

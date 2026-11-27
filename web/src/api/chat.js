@@ -17,11 +17,21 @@ export function fetchChat() {
   return jsonRequest('/api/chat');
 }
 
-export function sendChatMessage(text) {
+// replyTo: id da mensagem respondida (ou null).
+export function sendChatMessage(text, replyTo = null) {
   return jsonRequest('/api/chat/send', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, replyTo }),
+  });
+}
+
+// Só quem enviou a solicitação pode cancelar (o servidor confere).
+export function cancelPalletRequest(id) {
+  return jsonRequest('/api/chat/pallet-request/cancel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
   });
 }
 

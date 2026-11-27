@@ -52,7 +52,7 @@ function normalizeView(raw) {
 //
 // A marcação de ocupação (occupied) NÃO mora mais aqui — ver
 // hooks/useLiveState.js. Ela virou estado compartilhado ao vivo entre
-// dispositivos (polling + mutação cirúrgica no servidor, ver CONTEXT.md,
+// dispositivos (polling + mutação cirúrgica no servidor, ver docs/context/mapa.md,
 // "Fila de rotas compartilhada"), diferente de pontos/lotes, que continuam
 // só localmente editados (modo desenvolvedor) e salvos em snapshot
 // debounced como sempre.

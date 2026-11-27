@@ -38,7 +38,7 @@ function BatteryIcon({ pct }) {
 
 // Retângulo semitransparente centralizado sobre o mapa — indicação rápida
 // de longe (chão de fábrica) do que o robô está fazendo. Lógica BINÁRIA de
-// propósito por enquanto (ver CONTEXT.md): `charging` vem de
+// propósito por enquanto (ver docs/context/avisos-robo.md): `charging` vem de
 // GET /reeman/base_encode (chargeFlag==2, confirmado em campo 2026-09-14),
 // sondado pela thread de fundo — este componente só lê o que já veio no
 // /api/live-state, nunca fala com o robô direto.
